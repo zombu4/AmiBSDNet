@@ -12,5 +12,7 @@ int	wm_start(const char *device, unsigned long unit);
    the file so it is preferred; psk NULL or "" for an open network */
 int	wm_set_network(const char *ssid, const char *psk);
 int	wm_has_network(const char *ssid);
+/* the preferred network (ssid, psk; psk empty if open): 0 if any */
+int	wm_get_network(char *ssid, int ssidlen, char *psk, int psklen);
 
 #endif

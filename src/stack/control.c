@@ -82,10 +82,17 @@ prefixlen(ULONG mask)
 	return n;
 }
 
+int	netdb_get_nameservers(ULONG *, int);
+const char *netdb_get_domain(void);
+
 static void
 iface_list(struct NetCtrlMsg *m)
 {
 	int i, j;
+
+	/* older clients send the shorter message without the DNS fields */
+	if (m->msg.mn_Length >= sizeof(*m))
+		m->ndns = netdb_get_nameservers(m->dns, 4);
 
 	m->nifaces = 0;
 	for (i = 0; i < nifaces && i < NETCTRL_MAXIFACES; i++) {
@@ -129,8 +136,6 @@ lib_opencount(void)
 	return n;
 }
 
-int	netdb_get_nameservers(ULONG *, int);
-const char *netdb_get_domain(void);
 
 static void
 status_report(struct NetCtrlMsg *m)

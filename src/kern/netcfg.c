@@ -28,13 +28,29 @@
 int	rump___sysimpl_socket30(int, int, int);
 int	rump___sysimpl_ioctl(int, u_long, void *);
 int	rump___sysimpl_close(int);
+int	rumpuser_amiga_errno(void);
+void	rumpuser_seterrno(int);
 ssize_t	rump___sysimpl_write(int, const void *, size_t);
 
 int	rump_amibsdnet_ifcreate(const char *, const char *);
+int	rump_amibsdnet_ifdestroy(const char *);
 int	rump_amibsdnet_ifaddr4(const char *, uint32_t, uint32_t);
 int	rump_amibsdnet_ifflags(const char *, int, int);
 int	rump_amibsdnet_ifdeladdr4(const char *, uint32_t);
 int	rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t);
+
+/* close the helper socket without losing the error of a failed call
+   (every system call stub sets errno, also on success) */
+static int
+done(int s, int rv)
+{
+	int err = rv ? rumpuser_amiga_errno() : 0;
+
+	rump___sysimpl_close(s);
+	if (rv)
+		rumpuser_seterrno(err);
+	return rv;
+}
 
 static int
 inet_socket(void)
@@ -64,8 +80,22 @@ rump_amibsdnet_ifcreate(const char *ifname, const char *linkstr)
 		ifd.ifd_data = __UNCONST(linkstr);
 		rv = rump___sysimpl_ioctl(s, SIOCSLINKSTR, &ifd);
 	}
-	rump___sysimpl_close(s);
-	return rv;
+	return done(s, rv);
+}
+
+/* remove a cloned interface; its driver is closed */
+int
+rump_amibsdnet_ifdestroy(const char *ifname)
+{
+	struct ifreq ifr;
+	int s, rv;
+
+	if ((s = inet_socket()) < 0)
+		return -1;
+	memset(&ifr, 0, sizeof(ifr));
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	rv = rump___sysimpl_ioctl(s, SIOCIFDESTROY, &ifr);
+	return done(s, rv);
 }
 
 /* add an IPv4 address (this also brings the interface up) */
@@ -97,8 +127,7 @@ rump_amibsdnet_ifaddr4(const char *ifname, uint32_t addr, uint32_t mask)
 	sin->sin_addr.s_addr = addr | ~mask;
 
 	rv = rump___sysimpl_ioctl(s, SIOCAIFADDR, &ifra);
-	rump___sysimpl_close(s);
-	return rv;
+	return done(s, rv);
 }
 
 /* remove an IPv4 address from an interface */
@@ -118,8 +147,7 @@ rump_amibsdnet_ifdeladdr4(const char *ifname, uint32_t addr)
 	sin->sin_family = AF_INET;
 	sin->sin_addr.s_addr = addr;
 	rv = rump___sysimpl_ioctl(s, SIOCDIFADDR, &ifr);
-	rump___sysimpl_close(s);
-	return rv;
+	return done(s, rv);
 }
 
 /* set and clear interface flags (IFF_UP etc.) */
@@ -138,8 +166,7 @@ rump_amibsdnet_ifflags(const char *ifname, int set, int clear)
 		ifr.ifr_flags = (ifr.ifr_flags | set) & ~clear;
 		rv = rump___sysimpl_ioctl(s, SIOCSIFFLAGS, &ifr);
 	}
-	rump___sysimpl_close(s);
-	return rv;
+	return done(s, rv);
 }
 
 /*
@@ -176,6 +203,5 @@ rump_amibsdnet_route4(int cmd, uint32_t dst, uint32_t mask, uint32_t gw)
 	if ((s = rump___sysimpl_socket30(PF_ROUTE, SOCK_RAW, 0)) < 0)
 		return -1;
 	n = rump___sysimpl_write(s, &m, sizeof(m));
-	rump___sysimpl_close(s);
-	return n == (ssize_t)sizeof(m) ? 0 : -1;
+	return done(s, n == (ssize_t)sizeof(m) ? 0 : -1);
 }

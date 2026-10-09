@@ -1,10 +1,15 @@
 /*
  * NetCtrl: control the AmiBSDNet stack from the Shell.
  *
- *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] [TIMEOUT=<seconds>]
+ *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] [TIMEOUT=<seconds>]
  *
  * WAIT returns when the network is up (or fails after TIMEOUT seconds,
  * default 30), for scripts that need the network.
+ *
+ * PROBE lists the network adapters (SANA-II drivers) and whether each is
+ * Ethernet or Wi-Fi, and sets the variables AmiBSDNet/Ethernet and
+ * AmiBSDNet/WiFi to the first driver of each kind (the installer reads
+ * them); it does not need the stack.
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -14,7 +19,10 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
+#include <dos/var.h>
+
 #include <amibsdnet/control.h>
+#include <amibsdnet/probe.h>
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -34,6 +42,42 @@ streq(const char *a, const char *b)
 		if (cb >= 'a' && cb <= 'z') cb -= 32;
 	} while (ca && ca == cb);
 	return ca == cb;
+}
+
+static void
+setvar(const char *name, const char *value)
+{
+
+	if (value)
+		SetVar((CONST_STRPTR)name, (CONST_STRPTR)value, -1,
+		    GVF_GLOBAL_ONLY);
+	else
+		DeleteVar((CONST_STRPTR)name, GVF_GLOBAL_ONLY);
+}
+
+static int
+probe(void)
+{
+	struct probe_adapter a[PROBE_MAX];
+	const char *eth = NULL, *wifi = NULL;
+	int n, i;
+
+	n = probe_adapters(a, PROBE_MAX);
+	for (i = 0; i < n; i++) {
+		PutStr((CONST_STRPTR)(a[i].wireless ? "Wi-Fi     " :
+		    "Ethernet  "));
+		PutStr((CONST_STRPTR)a[i].device);
+		PutStr((CONST_STRPTR)"\n");
+		if (a[i].wireless && !wifi)
+			wifi = a[i].device;
+		if (!a[i].wireless && !eth)
+			eth = a[i].device;
+	}
+	if (n == 0)
+		PutStr((CONST_STRPTR)"no network adapters found\n");
+	setvar("AmiBSDNet/Ethernet", eth);
+	setvar("AmiBSDNet/WiFi", wifi);
+	return n ? RETURN_OK : RETURN_WARN;
 }
 
 /* send a command; returns 0 and fills *m, or -1 if the stack is not running */
@@ -88,9 +132,10 @@ _start(void)
 		else if (streq(c, "OFFLINE")) cmd = NETCTRL_OFFLINE;
 		else if (streq(c, "RECONFIG")) cmd = NETCTRL_RECONFIG;
 		else if (streq(c, "WAIT")) cmd = 0;
+		else if (streq(c, "PROBE")) cmd = ~0UL;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
-			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] "
+			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] "
 			    "[TIMEOUT=<seconds>]\n");
 			rc = RETURN_ERROR;
 		}
@@ -100,6 +145,10 @@ _start(void)
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
+	if (cmd == ~0UL) {
+		rc = probe();
+		goto out;
+	}
 
 	if ((m = AllocVec(sizeof(*m), MEMF_ANY | MEMF_CLEAR)) == NULL) {
 		rc = RETURN_FAIL;

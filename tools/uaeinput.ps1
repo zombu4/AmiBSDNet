@@ -7,6 +7,8 @@
 #   uaeinput.ps1 dclick <x> <y>
 #   uaeinput.ps1 rclick <x> <y>       (right button: hold for menus)
 #   uaeinput.ps1 type  "<text>"       (SendKeys syntax: {ENTER} {ESC} ...)
+#   uaeinput.ps1 drag  "x1,y1" "x2,y2"
+#   uaeinput.ps1 rdown <x> <y> / move <x> <y> / rup   (hold a menu open)
 param([string]$Cmd, [string]$A1, [string]$A2)
 
 Add-Type -AssemblyName System.Drawing
@@ -60,7 +62,7 @@ function MoveTo([int]$x, [int]$y) {
                       [int]($cur.Y + ($pt.Y - $cur.Y) * $i / 12)) | Out-Null
     Start-Sleep -Milliseconds 25
   }
-  Start-Sleep -Milliseconds 350
+  Start-Sleep -Milliseconds 600
 }
 function Click([uint32]$down, [uint32]$up) {
   [U]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60
@@ -88,6 +90,10 @@ switch ($Cmd) {
     }
     [U]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero); "dragged $A1 -> $A2"
   }
+  # menus: rdown (hold the right button), move over the menu, shot, rup
+  "rdown"  { Focus; MoveTo $A1 $A2; [U]::mouse_event(0x8, 0, 0, 0, [IntPtr]::Zero); "right button down" }
+  "move"   { Focus; MoveTo $A1 $A2; "moved $A1,$A2" }
+  "rup"    { Focus; [U]::mouse_event(0x10, 0, 0, 0, [IntPtr]::Zero); "right button up" }
   "type"   { Focus; [System.Windows.Forms.SendKeys]::SendWait($A1); "typed" }
   default  { Write-Error "unknown command $Cmd"; exit 1 }
 }

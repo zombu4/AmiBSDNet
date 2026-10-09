@@ -2,9 +2,12 @@
  * AmiBSDNetStatus: Workbench status icon and Commodity for AmiBSDNet.
  *
  * Shows an AppIcon on the Workbench desktop that reflects the network
- * state (online with the IP address as its label, or offline).
- * Double-clicking it opens a status window with Go Online/Offline and
- * Reconnect.  It registers with Exchange as the "AmiBSDNet" commodity:
+ * state ("Net: <IP address>" when online, else "Net: Offline", "Net: No
+ * cable", ...).
+ * Double-clicking it opens a status window with Go Online/Offline,
+ * Reconnect, Wi-Fi... and Settings... (drivers, DHCP or fixed address,
+ * DNS, host name, Wi-Fi network); both are also in the Workbench Tools
+ * menu ("AmiBSDNet..." and "AmiBSDNet Settings...").  It registers with Exchange as the "AmiBSDNet" commodity:
  * Show opens the status window, Enable/Disable switch the stack
  * online/offline, Remove quits.  If the stack is not running, the window
  * offers to start it.
@@ -60,6 +63,10 @@ static UWORD *chipimg[2];	/* [0] offline, [1] online */
 static struct Image images[2];
 static struct DiskObject dobj[2];
 static struct AppIcon *appicon;
+static struct AppMenuItem *appmenu, *appmenu2;
+
+#define	MENU_STATUS	0
+#define	MENU_SETTINGS	1
 static int shown_state = -1;	/* -1 none, 0 offline, 1 online, 2 no stack,
 				   3 no link, 4 connecting */
 static char label[32];
@@ -237,11 +244,18 @@ copy(char *d, const char *s, int n)
 	*d = '\0';
 }
 
+static int
+strcmp_(const char *a, const char *b)
+{
+	while (*a && *a == *b)
+		a++, b++;
+	return (UBYTE)*a - (UBYTE)*b;
+}
+
 static void
 update_icon(struct MsgPort *appport)
 {
 	int state;
-
 	const char *text = "Offline";
 	ULONG i;
 
@@ -268,12 +282,18 @@ update_icon(struct MsgPort *appport)
 			}
 		}
 	}
+	char newlabel[sizeof(label)];
+
+	/* "Net: " so the icon is recognisable as the network status */
+	copy(newlabel, "Net: ", sizeof(newlabel));
 	if (state == 1)
-		fmt_ip(label, ctl->address);
+		fmt_ip(newlabel + 5, ctl->address);
 	else
-		copy(label, text, sizeof(label));
-	if (state == shown_state && appicon)
+		copy(newlabel + 5, text, sizeof(newlabel) - 5);
+	if (state == shown_state && appicon &&
+	    !strcmp_(newlabel, label))
 		return;
+	copy(label, newlabel, sizeof(label));
 	if (appicon)
 		RemoveAppIcon(appicon);
 	appicon = AddAppIconA(0, 0, (UBYTE *)label, appport, 0,
@@ -287,6 +307,26 @@ update_icon(struct MsgPort *appport)
  */
 
 static void
+start_stack(void)
+{
+
+	SystemTags((CONST_STRPTR)stackcmd,
+	    SYS_Asynch, TRUE,
+	    SYS_Input, Open((CONST_STRPTR)"NIL:", MODE_OLDFILE),
+	    SYS_Output, Open((CONST_STRPTR)"NIL:", MODE_NEWFILE),
+	    TAG_DONE);
+}
+
+static void
+show_settings(struct MsgPort *appport)
+{
+
+	if (settings_window() == 2)
+		start_stack();
+	update_icon(appport);
+}
+
+static void
 show_status(struct MsgPort *appport)
 {
 	struct EasyStruct es;
@@ -298,15 +338,15 @@ show_status(struct MsgPort *appport)
 	es.es_TextFormat = (UBYTE *)"%s";
 
 	if (stack_cmd(NETCTRL_STATUS) != 0) {
-		es.es_GadgetFormat = (UBYTE *)"Start AmiBSDNet|Cancel";
+		es.es_GadgetFormat = (UBYTE *)"Start AmiBSDNet|Settings...|Cancel";
 		choice = EasyRequest(NULL, &es, NULL,
 		    (ULONG)"The AmiBSDNet network stack is not running.");
 		if (choice == 1)
-			SystemTags((CONST_STRPTR)stackcmd,
-			    SYS_Asynch, TRUE,
-			    SYS_Input, Open((CONST_STRPTR)"NIL:", MODE_OLDFILE),
-			    SYS_Output, Open((CONST_STRPTR)"NIL:", MODE_NEWFILE),
-			    TAG_DONE);
+			start_stack();
+		else if (choice == 2) {
+			show_settings(appport);
+			return;
+		}
 	} else {
 		struct NetCtrlIface wifi;
 		int online = ctl->online, haswifi = 0;
@@ -323,12 +363,12 @@ show_status(struct MsgPort *appport)
 		stack_cmd(NETCTRL_STATUS);
 		if (haswifi)
 			es.es_GadgetFormat = online ?
-			    (UBYTE *)"Go Offline|Reconnect|Wi-Fi...|OK" :
-			    (UBYTE *)"Go Online|Reconnect|Wi-Fi...|OK";
+			    (UBYTE *)"Go Offline|Reconnect|Wi-Fi...|Settings...|OK" :
+			    (UBYTE *)"Go Online|Reconnect|Wi-Fi...|Settings...|OK";
 		else
 			es.es_GadgetFormat = online ?
-			    (UBYTE *)"Go Offline|Reconnect|OK" :
-			    (UBYTE *)"Go Online|Reconnect|OK";
+			    (UBYTE *)"Go Offline|Reconnect|Settings...|OK" :
+			    (UBYTE *)"Go Online|Reconnect|Settings...|OK";
 		choice = EasyRequest(NULL, &es, NULL, (ULONG)ctl->text);
 		if (choice == 1)
 			stack_cmd(online ? NETCTRL_OFFLINE : NETCTRL_ONLINE);
@@ -338,6 +378,10 @@ show_status(struct MsgPort *appport)
 			stack_cmd(NETCTRL_ONLINE);
 		} else if (choice == 3 && haswifi)
 			wifi_window(&wifi);
+		else if (choice == (haswifi ? 4 : 3)) {
+			show_settings(appport);
+			return;
+		}
 	}
 	update_icon(appport);
 }
@@ -392,6 +436,19 @@ read_options(struct WBStartup *wbmsg)
 
 /* ------------------------------------------------------------------------ */
 
+/* "AmiBSDNet..." in the Workbench Tools menu; like the icon, retried
+   until Workbench is up */
+static void
+add_menu(struct MsgPort *appport)
+{
+	if (appmenu == NULL)
+		appmenu = AddAppMenuItemA(MENU_STATUS, 0,
+		    (UBYTE *)"AmiBSDNet...", appport, NULL);
+	if (appmenu2 == NULL)
+		appmenu2 = AddAppMenuItemA(MENU_SETTINGS, 0,
+		    (UBYTE *)"AmiBSDNet Settings...", appport, NULL);
+}
+
 static int
 run(void)
 {
@@ -438,6 +495,7 @@ run(void)
 	}
 
 	update_icon(appport);
+	add_menu(appport);
 	appmask = 1UL << appport->mp_SigBit;
 	tmask = 1UL << tport->mp_SigBit;
 	treq->tr_node.io_Command = TR_ADDREQUEST;
@@ -452,6 +510,7 @@ run(void)
 		if (sigs & tmask) {
 			WaitIO((struct IORequest *)treq);
 			update_icon(appport);
+			add_menu(appport);
 			treq->tr_time.tv_secs = interval;
 			treq->tr_time.tv_micro = 0;
 			SendIO((struct IORequest *)treq);
@@ -463,10 +522,14 @@ run(void)
 			while ((am = (struct AppMessage *)GetMsg(appport))) {
 				if (am->am_Type == AMTYPE_APPICON)
 					open = 1;
+				else if (am->am_Type == AMTYPE_APPMENUITEM)
+					open = am->am_ID == MENU_SETTINGS ? 2 : 1;
 				ReplyMsg((struct Message *)am);
 			}
-			if (open)
+			if (open == 1)
 				show_status(appport);
+			else if (open == 2)
+				show_settings(appport);
 		}
 		if (cxport && (sigs & cxmask)) {
 			CxMsg *cm;
@@ -503,6 +566,10 @@ run(void)
 	WaitIO((struct IORequest *)treq);
 
 out:
+	if (appmenu)
+		RemoveAppMenuItem(appmenu);
+	if (appmenu2)
+		RemoveAppMenuItem(appmenu2);
 	if (appicon)
 		RemoveAppIcon(appicon);
 	if (broker)

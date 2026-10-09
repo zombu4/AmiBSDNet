@@ -28,13 +28,21 @@ Early development.
 - [x] Starts at boot from S:User-Startup without delaying it
       (`NetCtrl WAIT` for scripts that need the network)
 - [x] Workbench status AppIcon + Exchange commodity (`AmiBSDNetStatus`),
-      with a Wi-Fi window (scan, passphrase, connect)
+      with a Wi-Fi window (scan, passphrase, connect) and a Settings
+      window (drivers with Detect, DHCP or fixed address, DNS, host name,
+      Wi-Fi network) that applies changes without a reboot; both also in
+      the Workbench Tools menu
+- [x] Ethernet and Wi-Fi at the same time, default route via Ethernet
+      while connected, Wi-Fi otherwise
 - [x] Link detection (SANA-II link events) and a DHCP client that keeps
       retrying, so cables/routers appearing after boot are picked up;
       WirelessManager started automatically for Wi-Fi interfaces
-- [x] Installer script for Workbench 3.2+, generated icons, LHA/ZIP
-      packaging (`tools/package.py`)
-- [ ] Tested on real Kickstart/Workbench 3.2 and PiStorm hardware
+- [x] Installer script for Workbench 3.2+ that detects the network
+      adapters (`NetCtrl PROBE`), generated icons, LHA/ZIP packaging
+      (`tools/package.py`)
+- [x] Installed and tested with the official Workbench 3.2 installer
+      (Kickstart 3.2.2, 68040) in WinUAE
+- [ ] Tested on PiStorm hardware (wifipi.device, genet.device)
 
 ## Building
 

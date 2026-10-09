@@ -19,15 +19,28 @@ Requirements
 
 Installation
 ------------
-Double-click "Install". The installer asks for your network driver,
-whether your network uses DHCP (most do) or a fixed address, and
-whether to show the status icon on the Workbench. It adds this line to
-S:User-Startup:
+Double-click "Install". The installer finds your network adapters by
+itself (every SANA-II driver in DEVS:Networks, and drivers built into
+ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
+you have both, both are set up. For Wi-Fi it asks for the network name
+and passphrase (or leave them empty and choose the network later from
+the status icon). It then asks whether your network uses DHCP (most do)
+or a fixed address, and whether to show the status icon on the
+Workbench. If no adapter is found you can choose the driver yourself.
+It adds this line to S:User-Startup:
 
     C:AmiBSDNet
 
 The stack starts in the background; boot is not delayed while it waits
 for a DHCP server.
+
+Ethernet and Wi-Fi together
+---------------------------
+Ethernet and Wi-Fi are separate interfaces that work at the same time,
+each with its own address from its own network. Internet traffic goes
+out through Ethernet while its cable is connected and through Wi-Fi
+otherwise; the switch happens by itself when the cable is plugged in or
+pulled. The name servers of both are used.
 
 Cable and Wi-Fi changes
 -----------------------
@@ -56,7 +69,19 @@ The status icon
 AmiBSDNetStatus puts an icon on the Workbench showing whether you are
 online and your address (or "No cable", "No Wi-Fi", "Connecting").
 Double-click it for a status window with Go Online / Go Offline,
-Reconnect and, for Wi-Fi interfaces, Wi-Fi.... It is also the "AmiBSDNet" commodity
+Reconnect, Wi-Fi... (for Wi-Fi interfaces) and Settings.... The same
+windows are in the Workbench Tools menu: "AmiBSDNet..." and "AmiBSDNet
+Settings...".
+
+The Settings window holds the whole configuration: the Ethernet and
+Wi-Fi drivers (Detect finds them), automatic (DHCP) or fixed address,
+gateway, DNS server, host name, and the Wi-Fi network and passphrase
+(Scan... lists the networks in range). Save stores the settings and
+applies them at once, without a reboot; Use applies them until the next
+reboot. A fixed address is used for Ethernet if there is an Ethernet
+adapter, else for Wi-Fi.
+
+It is also the "AmiBSDNet" commodity
 in Exchange: Show opens the status window, Enable / Disable switch the
 network online / offline. Tool types: STACK=<command to start the
 stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
@@ -67,12 +92,16 @@ AmiBSDNet [CONFIG=<file>] [LOG=<file>] [DEBUG]
     Starts the stack. Configuration defaults to
     ENV:AmiBSDNet/AmiBSDNet.conf, the log to T:AmiBSDNet.log.
 
-NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] [TIMEOUT=<seconds>]
+NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] [TIMEOUT=<seconds>]
     STATUS    interfaces, addresses, traffic counters, name servers
     ONLINE    bring the network up
     OFFLINE   take the network down
     RECONFIG  re-read the configuration file
     WAIT      wait until the network is up (for scripts)
+
+NetCtrl PROBE
+    Lists the network adapters and whether each is Ethernet or Wi-Fi;
+    sets the variables AmiBSDNet/Ethernet and AmiBSDNet/WiFi.
 
 Ping HOST [COUNT=<n>]
     Send ICMP echo requests.
@@ -83,15 +112,19 @@ ENVARC:AmiBSDNet/AmiBSDNet.conf (copied to ENV: at boot), one item per
 line, '#' starts a comment:
 
     hostname   amiga
-    interface  sana0 wifipi.device 0 dhcp
+    interface  sana0 genet.device 0 dhcp
+    interface  sana1 wifipi.device 0 dhcp wifi
     # or a fixed address:
-    # interface  sana0 wifipi.device 0 address 192.168.1.20/24
+    # interface  sana0 genet.device 0 address 192.168.1.20/24
     # gateway    192.168.1.1
     # nameserver 192.168.1.1
     domain     home.lan
 
-Up to four interfaces (sana0 ... sana3) can be configured. With DHCP,
-the router and name servers come from the DHCP server.
+Up to four interfaces (sana0 ... sana3) can be configured; the first
+one that is connected carries the Internet traffic. "wifi" marks a
+Wi-Fi interface for the Settings window (the stack also detects it from
+the driver). With DHCP, the router and name servers come from the DHCP
+server.
 
 Host names are looked up in DEVS:Internet/hosts first, then with DNS.
 

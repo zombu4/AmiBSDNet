@@ -829,6 +829,14 @@ rumpuser_seterrno(int error)
 	self()->err = error;
 }
 
+/* the same for kernel-side AmiBSDNet code (keeps the rump name prefix) */
+int
+rumpuser_amiga_errno(void)
+{
+
+	return self()->err;
+}
+
 /* ------------------------------------------------------------------------
  * threads
  */
@@ -926,6 +934,27 @@ rumpuser_thread_join(void *ptcookie)
 	);
 	FreeVec(t);
 	return 0;
+}
+
+/*
+ * The same for host code that is not on a rump CPU (component code
+ * between rumpuser_component_unschedule() and _schedule(), like
+ * pthread_join() in NetBSD's own backends): rumpuser_thread_join() is
+ * the kernel's hypercall and would leave the caller holding a CPU.
+ */
+void
+amiga_host_thread_join(void *ptcookie)
+{
+	struct amthread *t = ptcookie, *me = self();
+
+	Forbid();
+	while (!t->done) {
+		t->joiner = SysBase->ThisTask;
+		t->joinmask = me->cvmask;
+		Wait(me->cvmask);
+	}
+	Permit();
+	FreeVec(t);
 }
 
 void

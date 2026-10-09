@@ -13,6 +13,15 @@ struct NetCtrlMsg *status_msg(void);
 /* the Wi-Fi window for a wireless interface */
 void	wifi_window(const struct NetCtrlIface *);
 
+/* the settings window: 0 = cancelled, 1 = applied, 2 = written but the
+   stack is not running (start it) */
+int	settings_window(void);
+
+/* gadtools.library CreateContext() (wifiwin.c) */
+struct Gadget;
+struct Gadget *create_context(struct Gadget **);
+extern struct Library *GadToolsBase;
+
 void	*memset(void *, int, unsigned long);
 
 /* exec list init without amiga.lib */

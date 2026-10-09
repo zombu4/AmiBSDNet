@@ -250,7 +250,7 @@ scan(const char *device, ULONG unit)
  * CreateContext() (gadtools.library LVO -114, A0 = &glist): the NDK's
  * inline macro for it does not compile with current GCC.
  */
-static struct Gadget *
+struct Gadget *
 create_context(struct Gadget **glistp)
 {
 	register struct Gadget *res __asm("d0");

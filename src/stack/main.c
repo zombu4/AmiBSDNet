@@ -61,7 +61,12 @@ stack_main(void)
 	int rv;
 
 	((struct Process *)SysBase->ThisTask)->pr_WindowPtr = (APTR)-1;
-	log = Open((CONST_STRPTR)logpath, MODE_NEWFILE);
+	/* empty the log, then keep it open with a shared lock so it can be
+	   read (Type T:AmiBSDNet.log) while the stack runs */
+	if ((log = Open((CONST_STRPTR)logpath, MODE_NEWFILE)) != 0) {
+		Close(log);
+		log = Open((CONST_STRPTR)logpath, MODE_READWRITE);
+	}
 	amiga_rump_loginit((long)log);
 	crash_install();
 	if (amiga_rump_hostinit(0) != 0)

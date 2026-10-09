@@ -52,6 +52,7 @@ void	rump_virtif_sana_deliverpkt(struct virtif_sc *, struct hiovec *, size_t);
 struct s2req {
 	struct IOSana2Req ios2;
 	int	kind;			/* REQ_RX or REQ_TX */
+	int	busy;			/* sent to the driver, not yet back */
 	struct s2req *next;		/* free list (transmit) */
 	UBYTE	buf[ETHER_HDR_LEN + FRAME_MAX];
 };
@@ -204,6 +205,7 @@ queue_read(struct s2req *r, struct MsgPort *port, UWORD type)
 	/* leave room in front to rebuild the Ethernet header in place */
 	r->ios2.ios2_Data = r->buf + ETHER_HDR_LEN;
 	r->ios2.ios2_DataLength = FRAME_MAX;
+	r->busy = 1;
 	SendIO((struct IORequest *)&r->ios2);
 }
 
@@ -222,6 +224,7 @@ queue_event(struct virtif_user *viu, struct MsgPort *port)
 	r->ios2.ios2_Req.io_Command = S2_ONEVENT;
 	r->ios2.ios2_Req.io_Flags = 0;
 	r->ios2.ios2_WireError = mask;
+	r->busy = 1;
 	SendIO((struct IORequest *)&r->ios2);
 }
 
@@ -252,6 +255,31 @@ event_done(struct virtif_user *viu, struct s2req *r, struct MsgPort *port)
 	}
 	if (!viu->stopping)
 		queue_event(viu, port);
+}
+
+/*
+ * Get a request back from the driver at shutdown.  Some drivers cannot
+ * abort every command (S2_ONEVENT, for one), so wait at most about two
+ * seconds: a request that does not come back stays the driver's, and
+ * returns -1 so its memory, the reply port and the open device are left
+ * alone.
+ */
+static int
+reap(struct s2req *r, int abort)
+{
+	int i;
+
+	if (!r->busy)
+		return 0;
+	if (abort && !CheckIO((struct IORequest *)&r->ios2))
+		AbortIO((struct IORequest *)&r->ios2);
+	for (i = 0; i < 100 && !CheckIO((struct IORequest *)&r->ios2); i++)
+		amiga_host_sleep_ms(20);
+	if (!CheckIO((struct IORequest *)&r->ios2))
+		return -1;
+	WaitIO((struct IORequest *)&r->ios2);
+	r->busy = 0;
+	return 0;
 }
 
 /* a driver is wireless if NSCMD_DEVICEQUERY lists S2_GETNETWORKS */
@@ -292,8 +320,10 @@ tapped(struct virtif_user *viu, struct s2req *r)
 	if (fn == NULL)
 		return 0;
 	rebuild_header(r);
-	return fn(viu->tapctx, r->buf,
-	    ETHER_HDR_LEN + r->ios2.ios2_DataLength);
+	if (!fn(viu->tapctx, r->buf, ETHER_HDR_LEN + r->ios2.ios2_DataLength))
+		return 0;
+	viu->rx_packets++;	/* received, even if not by the kernel */
+	return 1;
 }
 
 static void
@@ -345,7 +375,7 @@ sana_iothread(void *arg)
 	struct IOSana2Req *base = NULL;
 	struct s2req *r;
 	ULONG iomask, txmask, sigs;
-	int opened = 0, nrx = 0, ntx = 0;
+	int opened = 0, nrx = 0, ntx = 0, stuck = 0;
 	unsigned i, t;
 
 	viu->iotask = SysBase->ThisTask;
@@ -421,10 +451,12 @@ sana_iothread(void *arg)
 		/* frames posted by the kernel */
 		while ((r = (struct s2req *)GetMsg(txport)) != NULL) {
 			r->ios2.ios2_Req.io_Message.mn_ReplyPort = ioport;
+			r->busy = 1;
 			SendIO((struct IORequest *)&r->ios2);
 		}
 		/* completed requests */
 		while ((r = (struct s2req *)GetMsg(ioport)) != NULL) {
+			r->busy = 0;
 			if (r->kind == REQ_EV) {
 				event_done(viu, r, ioport);
 				continue;
@@ -453,41 +485,47 @@ sana_iothread(void *arg)
 			viu->stopping = 1;
 	}
 
-	/* shut down: abort and reap everything that is in flight */
+	/* shut down: abort and reap what the driver still has.  Only those:
+	   WaitIO() on a request already taken off the reply port would
+	   Remove() it a second time and corrupt the port's list. */
 	viu->txport = NULL;
-	for (i = 0; i < (unsigned)nrx; i++) {
-		r = viu->rxreqs[i];
-		if (!CheckIO((struct IORequest *)&r->ios2))
-			AbortIO((struct IORequest *)&r->ios2);
-		WaitIO((struct IORequest *)&r->ios2);
-	}
+	for (i = 0; i < (unsigned)nrx; i++)
+		if (reap(viu->rxreqs[i], 1))
+			stuck++;
 	for (i = 0; i < (unsigned)ntx; i++)
-		WaitIO((struct IORequest *)&viu->txreqs[i]->ios2);
-	if (viu->evreq && viu->events) {
-		if (!CheckIO((struct IORequest *)&viu->evreq->ios2))
-			AbortIO((struct IORequest *)&viu->evreq->ios2);
-		WaitIO((struct IORequest *)&viu->evreq->ios2);
-	}
+		if (reap(viu->txreqs[i], 0))	/* writes finish by themselves */
+			stuck++;
+	if (viu->evreq && reap(viu->evreq, 1))
+		stuck++;
+	if (stuck)
+		amiga_rump_printf("sana: %s keeps %d request(s); leaving it "
+		    "open\n", viu->devname, stuck);
+	/* frames the kernel posted after the last pass */
+	while (GetMsg(txport) != NULL)
+		;
 	goto cleanup;
 
 fail:
 	viu->state = -1;
 cleanup:
 	for (i = 0; i < (unsigned)nrx; i++)
-		FreeVec(viu->rxreqs[i]);
+		if (!viu->rxreqs[i]->busy)
+			FreeVec(viu->rxreqs[i]);
 	for (i = 0; i < (unsigned)ntx; i++)
-		FreeVec(viu->txreqs[i]);
-	if (viu->evreq)
+		if (!viu->txreqs[i]->busy)
+			FreeVec(viu->txreqs[i]);
+	if (viu->evreq && !viu->evreq->busy)
 		FreeVec(viu->evreq);
 	viu->evreq = NULL;
 	viu->txfree = NULL;
-	if (opened)
+	/* with requests still at the driver, its reply port must stay */
+	if (opened && !stuck)
 		CloseDevice((struct IORequest *)base);
-	if (base)
+	if (base && !stuck)
 		DeleteIORequest((struct IORequest *)base);
 	if (txport)
 		DeleteMsgPort(txport);
-	if (ioport)
+	if (ioport && !stuck)
 		DeleteMsgPort(ioport);
 	rumpuser_component_kthread_release();
 	return NULL;
@@ -520,7 +558,7 @@ rumpcomp_sana_create(const char *linkstr, struct virtif_sc *sc,
 		while (viu->state == 0)
 			amiga_host_sleep_ms(20);
 		if (viu->state < 0) {
-			rumpuser_thread_join(viu->iothread);
+			amiga_host_thread_join(viu->iothread);
 			rv = RUMPUSER_ENOENT;
 		}
 	}
@@ -553,7 +591,8 @@ rumpcomp_sana_destroy(struct virtif_user *viu)
 
 	viu->stopping = 1;
 	Signal(viu->iotask, SIGBREAKF_CTRL_C);
-	rumpuser_thread_join(viu->iothread);
+	/* not rumpuser_thread_join(): we are off the rump CPU here */
+	amiga_host_thread_join(viu->iothread);
 	rumpuser_component_schedule(cookie);
 	Forbid();
 	{

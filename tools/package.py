@@ -39,10 +39,11 @@ def build():
     run([sys.executable, "-I", "tools/build.py"], env)
     run([BASH, "tools/build_stack.sh", "build/AmiBSDNet"])
     for src, out, extra in (
-            ("src/tools/netctrl.c", "build/NetCtrl", []),
+            ("src/tools/netctrl.c", "build/NetCtrl", ["src/common/probe.c"]),
             ("src/tools/ping.c", "build/Ping", []),
             ("src/tools/status.c", "build/AmiBSDNetStatus",
-             ["src/tools/wifiwin.c", "src/common/wm.c"])):
+             ["src/tools/wifiwin.c", "src/tools/settingswin.c",
+              "src/common/wm.c", "src/common/probe.c"])):
         run([BASH, "tools/build_amiga.sh", src, out] + extra)
 
 
