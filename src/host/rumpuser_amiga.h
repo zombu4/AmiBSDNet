@@ -73,6 +73,8 @@ int	amiga_rump_errno(void);
 /* formatted output to the rump console log (same sink as kernel printf) */
 void	amiga_rump_printf(const char *, ...) __printflike(1, 2);
 void	amiga_rump_vprintf(const char *, va_list);
+/* same, with an Amiga-style packed LONG argument array (RawDoFmt) */
+void	amiga_rump_vprintf_longs(const char *, const long *);
 
 /*
  * Set by rumpuser_exit() (RUMPUSER_PANIC for a kernel panic).  At the same

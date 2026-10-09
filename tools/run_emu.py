@@ -9,6 +9,8 @@ Usage:  python -I tools/run_emu.py <amiga-exe> [options]
   --net           enable uaenet.device (SANA-II); unit 0 is SLIRP NAT
   --echo PORT     run a TCP echo server on the host at 127.0.0.1:PORT,
                   reachable from the emulated Amiga as 10.0.2.2:PORT
+  --stack CONF    start build/AmiBSDNet with configuration file CONF
+                  before the program (implies --net)
   --show          leave the emulator running afterwards
 
 Test programs write DH0:done themselves and log to DH0:rump.log; both,
@@ -86,6 +88,7 @@ def main():
     ap.add_argument("--rom", default=":AROS")
     ap.add_argument("--net", action="store_true")
     ap.add_argument("--echo", type=int, default=0)
+    ap.add_argument("--stack", default=None)
     ap.add_argument("--show", action="store_true")
     a = ap.parse_args()
 
@@ -98,6 +101,13 @@ def main():
             os.remove(p)
     with open(os.path.join(HD, "S", "Startup-Sequence"), "w",
               newline="\n") as f:
+        if a.stack:
+            a.net = True
+            shutil.copy(os.path.join(TOP, "build", "AmiBSDNet"),
+                        os.path.join(HD, "AmiBSDNet"))
+            shutil.copy(a.stack, os.path.join(HD, "AmiBSDNet.conf"))
+            f.write("DH0:AmiBSDNet CONFIG=DH0:AmiBSDNet.conf "
+                    "LOG=DH0:rump.log\n")
         f.write(f"DH0:{name} >DH0:stdout.txt\n"
                 "Echo >DH0:done \"rc=$RC\"\n")
     cfg = os.path.join(EMU, "test.uae")
