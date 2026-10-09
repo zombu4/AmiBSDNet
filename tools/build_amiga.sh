@@ -9,7 +9,7 @@ src=$1
 out=$2
 shift 2
 name=$(basename "$src" .c)
-$T/m68k-amiga-elf-gcc.exe -m68020 -O2 -ffreestanding -fno-builtin \
+$T/m68k-amiga-elf-gcc.exe -m68020-60 -O2 -ffreestanding -fno-builtin \
     -fno-tree-loop-distribute-patterns -Wall -Wno-unused-parameter \
     -Wno-volatile-register-var -Wno-pointer-sign -Wno-array-bounds \
     -ffile-prefix-map=$(pwd)=. -Isrc/include -Ibuild/gen "$@" \

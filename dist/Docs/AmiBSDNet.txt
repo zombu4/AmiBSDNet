@@ -1,0 +1,89 @@
+AmiBSDNet 0.1
+=============
+
+AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
+(Workbench 3.2 recommended), built from the networking code of the
+NetBSD 11 kernel: the real BSD TCP/IP, IPv4 and IPv6 implementation,
+running as a "rump kernel" on top of Exec. Programs use it through the
+standard bsdsocket.library (AmiTCP / Roadshow API), so existing Amiga
+network software works without changes.
+
+Requirements
+------------
+- a 68020 or better CPU; a PiStorm (Emu68) is the main target
+- Fast RAM: the stack needs about 3 MB and uses Fast RAM only
+- a network card with a SANA-II driver (PiStorm Wi-Fi under Emu68:
+  wifipi.device; WinUAE: uaenet.device; Zorro cards such as the A2065,
+  Ariadne or X-Surf: their own driver)
+- no other TCP/IP stack running at the same time
+
+Installation
+------------
+Double-click "Install". The installer asks for your network driver,
+whether your network uses DHCP (most do) or a fixed address, and
+whether to show the status icon on the Workbench. It adds this line to
+S:User-Startup:
+
+    C:AmiBSDNet
+
+The stack starts in the background; boot is not delayed while it waits
+for a DHCP server.
+
+The status icon
+---------------
+AmiBSDNetStatus puts an icon on the Workbench showing whether you are
+online and your address. Double-click it for a status window with Go
+Online / Go Offline and Reconnect. It is also the "AmiBSDNet" commodity
+in Exchange: Show opens the status window, Enable / Disable switch the
+network online / offline. Tool types: STACK=<command to start the
+stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
+
+Commands
+--------
+AmiBSDNet [CONFIG=<file>] [LOG=<file>] [DEBUG]
+    Starts the stack. Configuration defaults to
+    ENV:AmiBSDNet/AmiBSDNet.conf, the log to T:AmiBSDNet.log.
+
+NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] [TIMEOUT=<seconds>]
+    STATUS    interfaces, addresses, traffic counters, name servers
+    ONLINE    bring the network up
+    OFFLINE   take the network down
+    RECONFIG  re-read the configuration file
+    WAIT      wait until the network is up (for scripts)
+
+Ping HOST [COUNT=<n>]
+    Send ICMP echo requests.
+
+Configuration file
+------------------
+ENVARC:AmiBSDNet/AmiBSDNet.conf (copied to ENV: at boot), one item per
+line, '#' starts a comment:
+
+    hostname   amiga
+    interface  sana0 wifipi.device 0 dhcp
+    # or a fixed address:
+    # interface  sana0 wifipi.device 0 address 192.168.1.20/24
+    # gateway    192.168.1.1
+    # nameserver 192.168.1.1
+    domain     home.lan
+
+Up to four interfaces (sana0 ... sana3) can be configured. With DHCP,
+the router and name servers come from the DHCP server.
+
+Host names are looked up in DEVS:Internet/hosts first, then with DNS.
+
+Limitations of this version
+---------------------------
+- The stack cannot be unloaded once started (NetCtrl OFFLINE takes the
+  network down); a reboot removes it.
+- IPv6 is built in but not yet configured automatically.
+- Not yet implemented bsdsocket.library calls fail with ENOSYS: the
+  packet filter (bpf_*), mbuf and monitoring APIs, and Roadshow's
+  interface and route configuration calls.
+
+Licence
+-------
+AmiBSDNet's own code: PolyForm Noncommercial License 1.0.0 (free for
+noncommercial use; not to be sold or bundled into commercial products).
+The NetBSD code it contains remains under NetBSD's BSD-style licence.
+Source: https://github.com/zombu4/AmiBSDNet

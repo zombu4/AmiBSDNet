@@ -1,0 +1,189 @@
+; AmiBSDNet installation script for the Amiga Installer (Workbench 3.2+)
+;
+; Installs the AmiBSDNet network stack, its tools and the Workbench status
+; icon, writes the network configuration and starts the stack at boot
+; from S:User-Startup.
+
+(set #app "AmiBSDNet")
+(set @app-name #app)
+(set #ver "0.1")
+
+(if (< (/ (getversion "exec.library" (resident)) 65536) 40)
+	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
+
+(if (or (= (database "cpu") "68000") (= (database "cpu") "68010"))
+	(abort "AmiBSDNet needs a 68020 or better CPU (for example a PiStorm)."))
+
+(message
+	"\nAmiBSDNet " #ver "\n\n"
+	"A complete TCP/IP network stack for AmigaOS, built from the\n"
+	"NetBSD 11 kernel's networking code.\n\n"
+	"This installs:\n"
+	"  C:AmiBSDNet       the network stack\n"
+	"  C:NetCtrl, C:Ping  control and diagnostic commands\n"
+	"  the AmiBSDNetStatus Workbench icon (optional)\n\n"
+	"and adds the stack to S:User-Startup.\n\n"
+	"Another TCP/IP stack (Roadshow, Miami, AmiTCP) must not be\n"
+	"started at the same time.")
+
+(complete 0)
+
+; -------------------------------------------------------------------
+; programs
+
+(copyfiles
+	(prompt "Installing the AmiBSDNet programs to C:")
+	(help @copyfiles-help)
+	(source "C/")
+	(dest "C:")
+	(choices "AmiBSDNet" "NetCtrl" "Ping")
+	(nogauge))
+
+(complete 20)
+
+(set #docdest
+	(askdir
+		(prompt "Where should the AmiBSDNet drawer (documentation and "
+			"the status icon) be created?")
+		(help @askdir-help)
+		(default "SYS:")))
+(set #drawer (tackon #docdest "AmiBSDNet"))
+(makedir #drawer (infos))
+(copyfiles
+	(prompt "Installing the documentation")
+	(help @copyfiles-help)
+	(source "Docs/")
+	(dest #drawer)
+	(all)
+	(infos)
+	(nogauge))
+(copyfiles
+	(source "Status/")
+	(dest #drawer)
+	(all)
+	(infos)
+	(nogauge))
+
+(complete 40)
+
+; -------------------------------------------------------------------
+; network configuration
+
+(set #devfile
+	(askfile
+		(prompt "Choose the SANA-II driver of your network hardware "
+			"(PiStorm Wi-Fi: wifipi.device, WinUAE: uaenet.device)")
+		(help "AmiBSDNet talks to your network card through its SANA-II "
+			"driver, normally found in DEVS:Networks/. Your card's "
+			"documentation names the driver.")
+		(default "DEVS:Networks/")))
+(set #device (fileonly #devfile))
+
+(set #unit
+	(asknumber
+		(prompt "Unit number of the network card (usually 0)")
+		(help "Only needed when one driver handles several cards.")
+		(range 0 31)
+		(default 0)))
+
+(set #mode
+	(askchoice
+		(prompt "How does this Amiga get its network address?")
+		(help "Most home networks hand out addresses automatically (DHCP). "
+			"Choose a fixed address only if your network needs one.")
+		(choices "Automatically (DHCP)" "Fixed address")
+		(default 0)))
+
+(set #hostname
+	(askstring
+		(prompt "Name of this computer on the network")
+		(help "Letters, digits and '-' only.")
+		(default "amiga")))
+
+(set #confdir "ENVARC:AmiBSDNet")
+(makedir #confdir)
+(set #conf (tackon #confdir "AmiBSDNet.conf"))
+
+(if (= #mode 0)
+	(
+		(textfile
+			(prompt "Writing the network configuration")
+			(help @textfile-help)
+			(dest #conf)
+			(append "# AmiBSDNet configuration (see the AmiBSDNet "
+				"documentation)\n")
+			(append "hostname   " #hostname "\n")
+			(append "interface  sana0 " #device " " #unit " dhcp\n"))
+	)
+	(
+		(set #addr
+			(askstring
+				(prompt "Address and prefix length of this Amiga, "
+					"for example 192.168.1.20/24")
+				(help "The /24 means netmask 255.255.255.0.")
+				(default "192.168.1.20/24")))
+		(set #gw
+			(askstring
+				(prompt "Address of your router (default gateway)")
+				(help @askstring-help)
+				(default "192.168.1.1")))
+		(set #dns
+			(askstring
+				(prompt "Address of your DNS server (often the router)")
+				(help @askstring-help)
+				(default #gw)))
+		(textfile
+			(prompt "Writing the network configuration")
+			(help @textfile-help)
+			(dest #conf)
+			(append "# AmiBSDNet configuration (see the AmiBSDNet "
+				"documentation)\n")
+			(append "hostname   " #hostname "\n")
+			(append "interface  sana0 " #device " " #unit " address "
+				#addr "\n")
+			(append "gateway    " #gw "\n")
+			(append "nameserver " #dns "\n"))
+	))
+
+; the running system reads ENV:
+(makedir "ENV:AmiBSDNet")
+(copyfiles (source #conf) (dest "ENV:AmiBSDNet") (nogauge))
+
+; a hosts file for local names, unless one exists
+(if (not (exists "DEVS:Internet/hosts"))
+	(
+		(makedir "DEVS:Internet")
+		(textfile
+			(dest "DEVS:Internet/hosts")
+			(append "# host name table: address  name  [aliases]\n")
+			(append "127.0.0.1  localhost\n"))
+	))
+
+(complete 70)
+
+; -------------------------------------------------------------------
+; start at boot
+
+(startup #app
+	(prompt "AmiBSDNet will be started from S:User-Startup at every boot.")
+	(help @startup-help)
+	(command "C:AmiBSDNet\n"))
+
+(if (askbool
+		(prompt "Show the AmiBSDNet status icon on the Workbench at every "
+			"boot (copies AmiBSDNetStatus to WBStartup)?")
+		(help "The icon shows whether you are online and your address. "
+			"Double-click it for details, to go online or offline.")
+		(default 1))
+	(copyfiles
+		(source (tackon #drawer "AmiBSDNetStatus"))
+		(dest "SYS:WBStartup")
+		(infos)
+		(nogauge)))
+
+(complete 100)
+
+(exit
+	"AmiBSDNet is installed.\n\n"
+	"Reboot to start the network, or type C:AmiBSDNet in a Shell now.\n"
+	"\"NetCtrl\" shows the network status.")

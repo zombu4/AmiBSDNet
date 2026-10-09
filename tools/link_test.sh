@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")/.."
 T=toolchain/opt/bin
-HF="-m68040 -O2 -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
+HF="-m68020-60 -O2 -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
     -Wall -Wno-unused-parameter -Wno-volatile-register-var -Wno-pointer-sign -Wno-array-bounds \
     -ffile-prefix-map=$(pwd)=. -Inetbsd-src/sys/rump/include -Isrc/host"
 name=$(basename "$1" .c)
@@ -15,7 +15,7 @@ for src in src/host/*.c; do
 	hostobjs="$hostobjs $obj"
 done
 $T/m68k-amiga-elf-gcc.exe $HF -c "$1" -o "build/$name.o"
-$T/m68k-amiga-elf-gcc.exe -m68040 -nostdlib \
+$T/m68k-amiga-elf-gcc.exe -m68020-60 -nostdlib \
     -Wl,--emit-relocs,--gc-sections,-Ttext=0,-e,_start,-Map=build/$name.map \
     "build/$name.o" \
     -Wl,--whole-archive build/libamibsdnet.a build/librumpnet_net.a \
