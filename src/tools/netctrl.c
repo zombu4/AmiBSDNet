@@ -1,7 +1,8 @@
 /*
  * NetCtrl: control the AmiBSDNet stack from the Shell.
  *
- *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] [TIMEOUT=<seconds>]
+ *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|
+ *           DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS] [TIMEOUT=<seconds>]
  *
  * WAIT returns when the network is up (or fails after TIMEOUT seconds,
  * default 30), for scripts that need the network.
@@ -10,6 +11,13 @@
  * Ethernet or Wi-Fi, and sets the variables AmiBSDNet/Ethernet and
  * AmiBSDNet/WiFi to the first driver of each kind (the installer reads
  * them); it does not need the stack.
+ *
+ * CHECK looks for other TCP/IP stacks and an Emu68 system (variables
+ * AmiBSDNet/OtherStacks, AmiBSDNet/OthersAtBoot, AmiBSDNet/OtherRunning,
+ * AmiBSDNet/Emu68);
+ * DISABLEOTHERS, REMOVEOTHERS and RESTOREOTHERS take other stacks out of
+ * the boot (reversibly), remove them from it, or put them back
+ * (src/tools/otherstacks.c).
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -24,11 +32,13 @@
 #include <amibsdnet/control.h>
 #include <amibsdnet/probe.h>
 
+#include "otherstacks.h"
+
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.1 (09.10.2026)";
+    "\0$VER: NetCtrl 0.2 (09.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -78,6 +88,88 @@ probe(void)
 	setvar("AmiBSDNet/Ethernet", eth);
 	setvar("AmiBSDNet/WiFi", wifi);
 	return n ? RETURN_OK : RETURN_WARN;
+}
+
+/* local commands (not sent to the stack) */
+#define	CMD_PROBE	0xffff0001UL
+#define	CMD_CHECK	0xffff0002UL
+#define	CMD_DISABLE	0xffff0003UL
+#define	CMD_REMOVE	0xffff0004UL
+#define	CMD_RESTORE	0xffff0005UL
+
+/* after otherstacks_check(): AmiBSDNet/OthersAtBoot; returns how many */
+static int
+report_atboot(void)
+{
+	char names[128];
+	int n = otherstacks_atboot(names, sizeof(names));
+
+	if (n) {
+		PutStr((CONST_STRPTR)"still started at boot: ");
+		PutStr((CONST_STRPTR)names);
+		PutStr((CONST_STRPTR)"\n");
+	}
+	setvar("AmiBSDNet/OthersAtBoot", n ? names : NULL);
+	return n;
+}
+
+/* DISABLEOTHERS / REMOVEOTHERS / RESTOREOTHERS, then look again */
+static int
+others(int mode)
+{
+	char names[128];
+	int rv = otherstacks_apply(mode), n;
+
+	otherstacks_check(names, sizeof(names));
+	n = report_atboot();
+	if (mode != OTHERS_RESTORE && n) {
+		PutStr((CONST_STRPTR)"NetCtrl: not everything could be taken "
+		    "out of the boot\n");
+		return RETURN_WARN;
+	}
+	if (rv != 0) {
+		PutStr((CONST_STRPTR)"NetCtrl: some files could not be "
+		    "changed\n");
+		return RETURN_WARN;
+	}
+	PutStr((CONST_STRPTR)(mode == OTHERS_RESTORE ? "restored\n" :
+	    "no other TCP/IP stack is started at boot any more\n"));
+	return RETURN_OK;
+}
+
+/*
+ * CHECK, for the installer: other TCP/IP stacks (AmiBSDNet/OtherStacks,
+ * AmiBSDNet/OtherRunning if one is running now) and whether this is an
+ * Emu68 (PiStorm) system (AmiBSDNet/Emu68).
+ */
+static int
+check(void)
+{
+	char names[128];
+	int running;
+
+	if (otherstacks_check(names, sizeof(names))) {
+		PutStr((CONST_STRPTR)"other TCP/IP stacks: ");
+		PutStr((CONST_STRPTR)names);
+		PutStr((CONST_STRPTR)"\n");
+		setvar("AmiBSDNet/OtherStacks", names);
+	} else
+		setvar("AmiBSDNet/OtherStacks", NULL);
+	report_atboot();
+	/* a bsdsocket.library in memory that is not AmiBSDNet's */
+	Forbid();
+	running = FindName(&SysBase->LibList, (CONST_STRPTR)"bsdsocket.library")
+	    != NULL && FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME) == NULL;
+	Permit();
+	if (running)
+		PutStr((CONST_STRPTR)"another TCP/IP stack is running now\n");
+	setvar("AmiBSDNet/OtherRunning", running ? "1" : NULL);
+	if (OpenResource((CONST_STRPTR)"devicetree.resource")) {
+		PutStr((CONST_STRPTR)"Emu68 (PiStorm) system\n");
+		setvar("AmiBSDNet/Emu68", "1");
+	} else
+		setvar("AmiBSDNet/Emu68", NULL);
+	return RETURN_OK;
 }
 
 /* send a command; returns 0 and fills *m, or -1 if the stack is not running */
@@ -132,10 +224,15 @@ _start(void)
 		else if (streq(c, "OFFLINE")) cmd = NETCTRL_OFFLINE;
 		else if (streq(c, "RECONFIG")) cmd = NETCTRL_RECONFIG;
 		else if (streq(c, "WAIT")) cmd = 0;
-		else if (streq(c, "PROBE")) cmd = ~0UL;
+		else if (streq(c, "PROBE")) cmd = CMD_PROBE;
+		else if (streq(c, "CHECK")) cmd = CMD_CHECK;
+		else if (streq(c, "DISABLEOTHERS")) cmd = CMD_DISABLE;
+		else if (streq(c, "REMOVEOTHERS")) cmd = CMD_REMOVE;
+		else if (streq(c, "RESTOREOTHERS")) cmd = CMD_RESTORE;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
-			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] "
+			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
+			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS] "
 			    "[TIMEOUT=<seconds>]\n");
 			rc = RETURN_ERROR;
 		}
@@ -145,8 +242,18 @@ _start(void)
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
-	if (cmd == ~0UL) {
+	switch (cmd) {
+	case CMD_PROBE:
 		rc = probe();
+		goto out;
+	case CMD_CHECK:
+		rc = check();
+		goto out;
+	case CMD_DISABLE:
+	case CMD_REMOVE:
+	case CMD_RESTORE:
+		rc = others(cmd == CMD_DISABLE ? OTHERS_DISABLE :
+		    cmd == CMD_REMOVE ? OTHERS_REMOVE : OTHERS_RESTORE);
 		goto out;
 	}
 

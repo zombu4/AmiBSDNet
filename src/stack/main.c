@@ -43,7 +43,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.1 (09.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.2 (09.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -71,7 +71,7 @@ stack_main(void)
 	crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.1 starting\n");
+	P("AmiBSDNet 0.2 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
@@ -165,6 +165,25 @@ _start(void)
 			sb_copy(logpath, (const char *)argv[1], sizeof(logpath));
 		amiga_rump_debug = argv[2] ? 1 : 0;
 		FreeArgs(rda);
+	}
+
+	/* only one stack: not twice, and not next to another one */
+	{
+		int ours, other;
+
+		Forbid();
+		ours = FindPort((CONST_STRPTR)"AmiBSDNet") != NULL;
+		other = !ours && FindName(&SysBase->LibList,
+		    (CONST_STRPTR)"bsdsocket.library") != NULL;
+		Permit();
+		if (ours || other) {
+			if (out)
+				PutStr((CONST_STRPTR)(ours ?
+				    "AmiBSDNet is already running\n" :
+				    "AmiBSDNet: another TCP/IP stack is running "
+				    "(bsdsocket.library is in use); not started\n"));
+			return ours ? RETURN_WARN : RETURN_FAIL;
+		}
 	}
 
 	for (void (**c)(void) = __init_array_start; c < __init_array_end; c++)
