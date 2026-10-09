@@ -79,6 +79,62 @@
 		(default "DEVS:Networks/")))
 (set #device (fileonly #devfile))
 
+; Wi-Fi: the network name and passphrase go to Wireless.prefs, which
+; WirelessManager (started by AmiBSDNet) uses to join the network
+(set #wifi
+	(askbool
+		(prompt "Is " #device " a Wi-Fi adapter (for example the "
+			"PiStorm's wifipi.device)?")
+		(help "For Wi-Fi, AmiBSDNet needs the network name and passphrase. "
+			"You can change them later from the status icon (Wi-Fi...).")
+		(default (if (patmatch "#?(wifi|wlan|prism|wireless)#?" #device) 1 0))))
+
+(if #wifi
+	(
+		(if (not (exists "C:WirelessManager"))
+			(message "Note: C:WirelessManager was not found.\n\n"
+				"It is needed for WPA-protected Wi-Fi and comes with the "
+				"Emu68 Wi-Fi package (wifipi.device). Install it, then "
+				"AmiBSDNet starts it by itself."))
+		(set #write-wifi 1)
+		(if (exists "ENVARC:Sys/Wireless.prefs")
+			(set #write-wifi
+				(askbool
+					(prompt "Wi-Fi settings already exist "
+						"(ENVARC:Sys/Wireless.prefs). Replace them?")
+					(help "Choose No to keep your current Wi-Fi network.")
+					(default 0))))
+		(if #write-wifi
+			(
+				(set #ssid
+					(askstring
+						(prompt "Name (SSID) of your Wi-Fi network")
+						(help "Exactly as shown by your router, including "
+							"upper and lower case.")
+						(default "")))
+				(set #psk
+					(askstring
+						(prompt "Wi-Fi passphrase (leave empty for an "
+							"open network)")
+						(help "8 to 63 characters for WPA/WPA2.")
+						(default "")))
+				(makedir "ENVARC:Sys")
+				(if (= #psk "")
+					(textfile
+						(dest "ENVARC:Sys/Wireless.prefs")
+						(append "network={\n\tssid=\"" #ssid "\"\n"
+							"\tkey_mgmt=NONE\n}\n"))
+					(textfile
+						(dest "ENVARC:Sys/Wireless.prefs")
+						(append "network={\n\tssid=\"" #ssid "\"\n"
+							"\tpsk=\"" #psk "\"\n"
+							"\tkey_mgmt=WPA-PSK\n}\n")))
+				(makedir "ENV:Sys")
+				(copyfiles (source "ENVARC:Sys/Wireless.prefs")
+					(dest "ENV:Sys") (nogauge))
+			))
+	))
+
 (set #unit
 	(asknumber
 		(prompt "Unit number of the network card (usually 0)")

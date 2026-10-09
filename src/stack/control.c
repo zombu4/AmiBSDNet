@@ -82,6 +82,38 @@ prefixlen(ULONG mask)
 	return n;
 }
 
+static void
+iface_list(struct NetCtrlMsg *m)
+{
+	int i, j;
+
+	m->nifaces = 0;
+	for (i = 0; i < nifaces && i < NETCTRL_MAXIFACES; i++) {
+		struct iface *ifc = &ifaces[i];
+		struct NetCtrlIface *o = &m->ifaces[m->nifaces++];
+		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
+
+		memset(o, 0, sizeof(*o));
+		sb_copy(o->name, ifc->name, sizeof(o->name));
+		sb_copy(o->device, ifc->device, sizeof(o->device));
+		o->unit = ifc->unit;
+		o->address = ifc->addr;
+		o->netmask = ifc->mask;
+		o->gateway = ifc->gateway;
+		if (v) {
+			for (j = 0; j < 6; j++)
+				o->mac[j] = sana_macaddr(v)[j];
+			if (sana_link_events(v))
+				o->flags |= NETIF_LINKEVENTS;
+		}
+		o->flags |= (ifc->up ? NETIF_UP : 0) |
+		    (ifc->admin ? NETIF_ADMIN : 0) |
+		    (ifc->link ? NETIF_LINK : 0) |
+		    (ifc->dhcp ? NETIF_DHCP : 0) |
+		    (ifc->wireless ? NETIF_WIRELESS : 0);
+	}
+}
+
 static ULONG
 lib_opencount(void)
 {
@@ -117,8 +149,14 @@ status_report(struct NetCtrlMsg *m)
 		tb_s(&b, ifc->device);
 		tb_s(&b, " unit ");
 		tb_u(&b, ifc->unit);
-		tb_s(&b, ifc->up ? "  UP" : "  DOWN");
-		tb_s(&b, ifc->dhcp ? " (DHCP)\n" : "\n");
+		tb_s(&b, ifc->up ? "  UP" : !ifc->admin ? "  OFFLINE" :
+		    !ifc->link ? "  NO LINK" : ifc->dhcp ? "  WAITING FOR DHCP" :
+		    "  DOWN");
+		if (ifc->dhcp)
+			tb_s(&b, " (DHCP)");
+		if (ifc->wireless)
+			tb_s(&b, " (Wi-Fi)");
+		tb_s(&b, "\n");
 		if (ifc->addr) {
 			tb_s(&b, "  inet ");
 			tb_ip(&b, ifc->addr);
@@ -210,6 +248,9 @@ control_handle(void)
 		case NETCTRL_RECONFIG:
 			m->result = stack_reconfigure();
 			break;
+		case NETCTRL_IFLIST:
+			iface_list(m);
+			break;
 		default:
 			m->result = -1;
 			break;
@@ -218,6 +259,14 @@ control_handle(void)
 		m->online = addr != 0x7f000001UL;
 		m->address = m->online ? addr : 0;
 		m->opencount = lib_opencount();
+		{
+			int i;
+
+			m->link = 0;
+			for (i = 0; i < nifaces; i++)
+				if (ifaces[i].link)
+					m->link = 1;
+		}
 		ReplyMsg(&m->msg);
 	}
 }

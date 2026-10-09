@@ -15,7 +15,12 @@ struct iface {
 	int dhcp;
 	ULONG addr, mask;		/* network order (= host order on m68k) */
 	ULONG gateway;
-	int up;
+	int up;				/* has an address and is usable */
+	volatile int admin;		/* wanted online (NetCtrl ONLINE/OFFLINE) */
+	volatile int link;		/* driver reports a link (default yes) */
+	volatile int dhcp_event;	/* wakes the DHCP client */
+	int wireless;			/* driver supports SANA-II wireless */
+	int link_logged;
 };
 
 extern struct iface ifaces[MAX_IFACES];
@@ -24,6 +29,7 @@ extern int nifaces;
 int	stack_configure(const char *path);
 void	stack_offline(void);
 void	stack_online(void);
+void	stack_link_changed(void);
 int	stack_reconfigure(void);
 extern volatile ULONG config_generation;
 
@@ -34,7 +40,10 @@ void	control_handle(void);
 ULONG	netcfg_primary_address(void);
 void	sb_copy(char *, const char *, unsigned long);
 
-/* DHCP client (dhcp.c): returns 0 when configured */
+/* wireless (wireless.c): starts WirelessManager for the interface */
+void	wireless_start(struct iface *);
+
+/* DHCP client (dhcp.c): starts the interface's client thread */
 int	dhcp_configure(struct iface *);
 
 /* resolver configuration (src/lib/netdb.c) */

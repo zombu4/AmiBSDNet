@@ -38,10 +38,12 @@ def build():
         shutil.rmtree(os.path.join(BUILD, d), ignore_errors=True)
     run([sys.executable, "-I", "tools/build.py"], env)
     run([BASH, "tools/build_stack.sh", "build/AmiBSDNet"])
-    for src, out in (("src/tools/netctrl.c", "build/NetCtrl"),
-                     ("src/tools/ping.c", "build/Ping"),
-                     ("src/tools/status.c", "build/AmiBSDNetStatus")):
-        run([BASH, "tools/build_amiga.sh", src, out])
+    for src, out, extra in (
+            ("src/tools/netctrl.c", "build/NetCtrl", []),
+            ("src/tools/ping.c", "build/Ping", []),
+            ("src/tools/status.c", "build/AmiBSDNetStatus",
+             ["src/tools/wifiwin.c", "src/common/wm.c"])):
+        run([BASH, "tools/build_amiga.sh", src, out] + extra)
 
 
 # ---------------------------------------------------------------------------

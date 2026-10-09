@@ -93,7 +93,10 @@ stack_main(void)
 
 	for (;;) {
 		ULONG s = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D |
-		    control_sigmask());
+		    SIGBREAKF_CTRL_E | control_sigmask());
+
+		if (s & SIGBREAKF_CTRL_E)
+			stack_link_changed();
 
 		if (s & control_sigmask())
 			control_handle();

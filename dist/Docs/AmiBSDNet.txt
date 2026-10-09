@@ -29,11 +29,34 @@ S:User-Startup:
 The stack starts in the background; boot is not delayed while it waits
 for a DHCP server.
 
+Cable and Wi-Fi changes
+-----------------------
+Nothing has to be started by hand. With DHCP, AmiBSDNet keeps asking
+for an address in the background until it gets one, so a cable plugged
+in or a router switched on after boot is picked up by itself. Drivers
+that report link changes (SANA-II link events, e.g. Wi-Fi association)
+make it react at once: the address is released when the link goes and
+fetched again when it returns. The status icon shows "No cable" or
+"No Wi-Fi" while there is no link.
+
+Wi-Fi
+-----
+Wireless drivers such as Emu68's wifipi.device associate with the
+network; the WPA handshake is done by WirelessManager (part of the
+Emu68 Wi-Fi package, C:WirelessManager), which reads
+ENV:Sys/Wireless.prefs. AmiBSDNet starts WirelessManager itself for a
+Wi-Fi interface if it is not already running. The installer asks for
+the network name and passphrase; to change networks later, double-click
+the status icon and choose Wi-Fi...: the window lists the networks in
+range (strongest first), and Connect stores the network, restarts
+WirelessManager and fetches a new address.
+
 The status icon
 ---------------
 AmiBSDNetStatus puts an icon on the Workbench showing whether you are
-online and your address. Double-click it for a status window with Go
-Online / Go Offline and Reconnect. It is also the "AmiBSDNet" commodity
+online and your address (or "No cable", "No Wi-Fi", "Connecting").
+Double-click it for a status window with Go Online / Go Offline,
+Reconnect and, for Wi-Fi interfaces, Wi-Fi.... It is also the "AmiBSDNet" commodity
 in Exchange: Show opens the status window, Enable / Disable switch the
 network online / offline. Tool types: STACK=<command to start the
 stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
