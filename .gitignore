@@ -1,0 +1,25 @@
+# third-party pieces fetched by tools/bootstrap.py
+/downloads/
+/toolchain/
+/netbsd-src/
+
+# build output
+/build/
+
+# emulator: WinUAE binary, generated configs, the shared test drive, logs.
+# Kickstart ROMs and Workbench installs must never be committed.
+/emu/
+*.rom
+*.adf
+*.hdf
+
+# editor / OS litter
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+__pycache__/
+*.pyc
