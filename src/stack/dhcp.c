@@ -7,8 +7,8 @@
  * and sent raw; replies are caught by a receive tap before they reach the
  * kernel.  The lease is then applied to the kernel interface.
  *
- * A renewal process keeps the lease: it sleeps until T1 and re-requests
- * the same address (raw, broadcast), falling back to a new DISCOVER.
+ * Each DHCP interface has a client thread that obtains, renews and, when
+ * the link goes away, releases the lease (see dhcp_thread()).
  */
 
 #include <exec/types.h>
@@ -342,7 +342,7 @@ apply_lease(struct dhcpctx *c, const struct lease *l)
 	    (long)l->ndns, l->leasetime);
 }
 
-/* full DISCOVER/OFFER/REQUEST/ACK exchange; returns 0 on success */
+/* one exchange round (a few seconds); returns 0 on success */
 static int
 dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 {
@@ -351,7 +351,7 @@ dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 	ULONG timeout = 2000;
 	int attempt, type;
 
-	for (attempt = 0; attempt < 5; attempt++, timeout *= 2) {
+	for (attempt = 0; attempt < 3; attempt++, timeout *= 2) {
 		ReadEClock(&ev);
 		c->xid = ev.ev_lo ^ get32(c->mac + 2) ^ (attempt << 24);
 		c->have_reply = 0;
@@ -375,75 +375,156 @@ dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 	return -1;
 }
 
-struct renewer {
+/* remove the leased address and route from the kernel */
+static void
+drop_lease(struct dhcpctx *c)
+{
+	struct iface *ifc = c->ifc;
+
+	if (ifc->gateway)
+		rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, ifc->gateway);
+	if (ifc->addr)
+		rump_amibsdnet_ifdeladdr4(ifc->name, ifc->addr);
+	ifc->addr = 0;
+	ifc->gateway = 0;
+	ifc->up = 0;
+}
+
+struct dhcpclient {
 	struct dhcpctx c;
 	struct lease l;
 	ULONG generation;
 };
 
-static void *
-dhcp_renew_thread(void *arg)
+/*
+ * Sleep up to ms, waking early for a link/admin change of the interface
+ * or a reconfiguration.  Returns 1 if woken by such an event.
+ */
+static int
+dhcp_pause(struct dhcpclient *d, ULONG ms)
 {
-	struct renewer *r = arg;
-	struct lease l;
-	ULONG t;
+	struct iface *ifc = d->c.ifc;
 
-	r->c.task = SysBase->ThisTask;
 	for (;;) {
-		t = r->l.t1 ? r->l.t1 : 1800;
-		while (t > 0) {
-			ULONG chunk = t > 60 ? 60 : t;
-
-			amiga_host_sleep_ms(chunk * 1000);
-			t -= chunk;
+		if (ifc->dhcp_event) {
+			ifc->dhcp_event = 0;
+			return 1;
 		}
-		if (r->generation != config_generation)
-			break;		/* reconfigured: a new renewer exists */
-		if (!r->c.ifc->up)
-			continue;	/* offline: try again next period */
-		sana_set_tap(r->c.viu, dhcp_tap, &r->c);
-		if (dhcp_acquire(&r->c, &l, &r->l) == 0) {
-			if (l.addr != r->l.addr)
-				apply_lease(&r->c, &l);
-			r->l = l;
-		} else
-			P("%s: DHCP renewal failed, keeping %s lease\n",
-			    r->c.ifc->name, "the current");
-		sana_set_tap(r->c.viu, NULL, NULL);
+		if (d->generation != config_generation)
+			return 1;
+		if (ms == 0)
+			return 0;
+		amiga_host_sleep_ms(ms > 250 ? 250 : ms);
+		ms = ms > 250 ? ms - 250 : 0;
 	}
-	FreeVec(r);
+}
+
+/*
+ * The DHCP client of one interface, for as long as this configuration
+ * lasts.  While the link is up and there is no lease it keeps asking
+ * (backing off to once a minute), so a cable plugged in or a router
+ * switched on later is picked up by itself.  On link loss the lease is
+ * dropped; when the link returns the previous address is requested again.
+ */
+static void *
+dhcp_thread(void *arg)
+{
+	struct dhcpclient *d = arg;
+	struct dhcpctx *c = &d->c;
+	struct iface *ifc = c->ifc;
+	struct lease l;
+	ULONG backoff = 4000, waited;
+	int bound = 0, have_prev = 0, quiet = 0;
+
+	c->task = SysBase->ThisTask;
+	while (d->generation == config_generation) {
+		if (!ifc->admin || !ifc->link) {
+			if (bound) {
+				P("%s: %s, releasing %s\n", ifc->name,
+				    ifc->admin ? "link lost" : "offline",
+				    "the DHCP address");
+				drop_lease(c);
+				bound = 0;
+			}
+			dhcp_pause(d, 5000);
+			continue;
+		}
+		if (!bound) {
+			if (!quiet)
+				P("%s: DHCP discovering\n", ifc->name);
+			sana_set_tap(c->viu, dhcp_tap, c);
+			if (dhcp_acquire(c, &l, have_prev ? &d->l : NULL) == 0) {
+				sana_set_tap(c->viu, NULL, NULL);
+				apply_lease(c, &l);
+				d->l = l;
+				have_prev = 1;
+				bound = 1;
+				quiet = 0;
+				backoff = 4000;
+				continue;
+			}
+			sana_set_tap(c->viu, NULL, NULL);
+			if (!quiet)
+				P("%s: no DHCP server answered, retrying\n",
+				    ifc->name);
+			quiet = 1;
+			dhcp_pause(d, backoff);
+			if (backoff < 60000)
+				backoff *= 2;
+			continue;
+		}
+		/* bound: sleep until T1, then renew */
+		waited = 0;
+		while (waited < d->l.t1 && !dhcp_pause(d, 1000))
+			waited++;
+		if (waited < d->l.t1)
+			continue;	/* an event: re-evaluate */
+		sana_set_tap(c->viu, dhcp_tap, c);
+		if (dhcp_acquire(c, &l, &d->l) == 0) {
+			if (l.addr != d->l.addr) {
+				drop_lease(c);
+				apply_lease(c, &l);
+			}
+			d->l = l;
+		} else {
+			P("%s: DHCP renewal failed\n", ifc->name);
+			/* past the lease time the address is no longer ours */
+			if (d->l.leasetime <= d->l.t1 + 60) {
+				drop_lease(c);
+				bound = 0;
+			} else
+				d->l.leasetime -= d->l.t1, d->l.t1 = 60;
+		}
+		sana_set_tap(c->viu, NULL, NULL);
+	}
+	if (bound)
+		drop_lease(c);
+	FreeVec(d);
 	return NULL;
 }
 
+/* start the DHCP client of an interface; returns at once */
 int
 dhcp_configure(struct iface *ifc)
 {
-	struct renewer *r;
+	struct dhcpclient *d;
 	int i;
 
-	if ((r = AllocVec(sizeof(*r), MEMF_FAST | MEMF_CLEAR)) == NULL)
+	if ((d = AllocVec(sizeof(*d), MEMF_FAST | MEMF_CLEAR)) == NULL)
 		return -1;
-	r->c.ifc = ifc;
-	r->c.task = SysBase->ThisTask;
-	r->generation = config_generation;
-	if ((r->c.viu = sana_find(ifc->device, ifc->unit)) == NULL) {
-		FreeVec(r);
+	d->c.ifc = ifc;
+	d->generation = config_generation;
+	if ((d->c.viu = sana_find(ifc->device, ifc->unit)) == NULL) {
+		FreeVec(d);
 		return -1;
 	}
 	for (i = 0; i < 6; i++)
-		r->c.mac[i] = sana_macaddr(r->c.viu)[i];
+		d->c.mac[i] = sana_macaddr(d->c.viu)[i];
 	rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
-
-	sana_set_tap(r->c.viu, dhcp_tap, &r->c);
-	P("%s: DHCP discovering\n", ifc->name);
-	i = dhcp_acquire(&r->c, &r->l, NULL);
-	sana_set_tap(r->c.viu, NULL, NULL);
-	if (i != 0) {
-		FreeVec(r);
+	if (rumpuser_thread_create(dhcp_thread, d, "AmiBSDNet DHCP", 0, 0, -1,
+	    NULL) != 0) {
+		FreeVec(d);
 		return -1;
 	}
-	apply_lease(&r->c, &r->l);
-	rumpuser_thread_create(dhcp_renew_thread, r, "AmiBSDNet DHCP", 0, 0,
-	    -1, NULL);
 	return 0;
 }

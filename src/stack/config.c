@@ -5,12 +5,16 @@
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <proto/exec.h>
+#include <exec/execbase.h>
 #include <proto/dos.h>
 
 #include "rumpuser_amiga.h"
+#include "sana2_host.h"
 #include "stack.h"
 
 #define	P	amiga_rump_printf
+
+extern struct ExecBase *SysBase;
 
 struct iface ifaces[MAX_IFACES];
 int nifaces;
@@ -117,6 +121,36 @@ tokenize(char *line, char **tok, int max)
 	return n;
 }
 
+/* called on the interface's I/O process when the driver reports a link
+   change: must not block */
+static struct Task *stacktask;
+
+static void
+link_hook(void *ctx, int up)
+{
+	struct iface *ifc = ctx;
+
+	ifc->link = up;
+	ifc->dhcp_event = 1;
+	if (!ifc->dhcp)
+		ifc->up = up && ifc->admin && ifc->addr;
+	if (stacktask)
+		Signal(stacktask, SIGBREAKF_CTRL_E);
+}
+
+void
+stack_link_changed(void)
+{
+	int i;
+
+	for (i = 0; i < nifaces; i++)
+		if (ifaces[i].link != ifaces[i].link_logged) {
+			ifaces[i].link_logged = ifaces[i].link;
+			P("%s: link %s\n", ifaces[i].name,
+			    ifaces[i].link ? "up" : "down");
+		}
+}
+
 static void
 iface_bringup(struct iface *ifc)
 {
@@ -148,9 +182,20 @@ iface_bringup(struct iface *ifc)
 		    amiga_rump_errno());
 		return;
 	}
+	{
+		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
+
+		if (v) {
+			ifc->link = sana_link(v);
+			ifc->wireless = sana_is_wireless(v);
+			sana_set_linkhook(v, link_hook, ifc);
+		}
+	}
+	if (ifc->wireless)
+		wireless_start(ifc);
 	if (ifc->dhcp) {
 		if (dhcp_configure(ifc) != 0)
-			P("%s: no DHCP lease\n", ifc->name);
+			P("%s: cannot start the DHCP client\n", ifc->name);
 		return;
 	}
 	if (ifc->addr) {
@@ -177,6 +222,7 @@ stack_configure(const char *path)
 	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0)
 		return -1;
 	sb_copy(cfgfile, path, sizeof(cfgfile));
+	stacktask = SysBase->ThisTask;
 	P("AmiBSDNet: reading %s\n", path);
 	config_generation++;
 	nifaces = 0;
@@ -200,6 +246,9 @@ stack_configure(const char *path)
 			struct iface *ifc = &ifaces[nifaces];
 
 			memset(ifc, 0, sizeof(*ifc));
+			ifc->admin = 1;
+			ifc->link = 1;
+			ifc->link_logged = 1;
 			sb_copy(ifc->name, tok[1], sizeof(ifc->name));
 			sb_copy(ifc->device, tok[2], sizeof(ifc->device));
 			if (!parse_ulong(tok[3], &ifc->unit)) {
@@ -242,6 +291,8 @@ stack_offline(void)
 	int i;
 
 	for (i = 0; i < nifaces; i++) {
+		ifaces[i].admin = 0;
+		ifaces[i].dhcp_event = 1;
 		rump_amibsdnet_ifflags(ifaces[i].name, 0, NB_IFF_UP);
 		ifaces[i].up = 0;
 	}
@@ -255,11 +306,11 @@ stack_online(void)
 	for (i = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 
+		ifc->admin = 1;
+		ifc->dhcp_event = 1;	/* the DHCP client takes it from here */
 		rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
-		if (ifc->dhcp && !ifc->addr)
-			dhcp_configure(ifc);
-		else if (ifc->addr)
-			ifc->up = 1;
+		if (!ifc->dhcp && ifc->addr)
+			ifc->up = ifc->link;
 	}
 }
 

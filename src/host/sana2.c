@@ -57,6 +57,7 @@ struct s2req {
 };
 #define	REQ_RX	1
 #define	REQ_TX	2
+#define	REQ_EV	3
 
 struct virtif_user {
 	struct virtif_sc *sc;
@@ -76,6 +77,14 @@ struct virtif_user {
 	struct s2req *txreqs[NTX];
 
 	volatile ULONG rx_packets, rx_dropped, tx_packets, tx_dropped;
+
+	/* link state from S2_ONEVENT */
+	struct s2req *evreq;
+	volatile int link;
+	int events;			/* 0 none, 1 ONLINE/OFFLINE, 2 + CONNECT */
+	int wireless;
+	sana_link_fn linkhook;
+	void	*linkctx;
 
 	/* host-side frame tap (DHCP client): sees frames before the kernel */
 	sana_tap_fn tap;
@@ -198,6 +207,73 @@ queue_read(struct s2req *r, struct MsgPort *port, UWORD type)
 	SendIO((struct IORequest *)&r->ios2);
 }
 
+/* ask for the next link change: the opposite of the current state */
+static void
+queue_event(struct virtif_user *viu, struct MsgPort *port)
+{
+	struct s2req *r = viu->evreq;
+	ULONG mask;
+
+	if (viu->link)
+		mask = S2EVENT_OFFLINE | (viu->events == 2 ? S2EVENT_DISCONNECT : 0);
+	else
+		mask = S2EVENT_ONLINE | (viu->events == 2 ? S2EVENT_CONNECT : 0);
+	r->ios2.ios2_Req.io_Message.mn_ReplyPort = port;
+	r->ios2.ios2_Req.io_Command = S2_ONEVENT;
+	r->ios2.ios2_Req.io_Flags = 0;
+	r->ios2.ios2_WireError = mask;
+	SendIO((struct IORequest *)&r->ios2);
+}
+
+static void
+event_done(struct virtif_user *viu, struct s2req *r, struct MsgPort *port)
+{
+	ULONG ev = r->ios2.ios2_WireError;
+	int up = viu->link;
+	sana_link_fn fn;
+
+	if (r->ios2.ios2_Req.io_Error) {
+		/* not supported: try plain ONLINE/OFFLINE, then give up */
+		if (viu->events == 2) {
+			viu->events = 1;
+			queue_event(viu, port);
+		} else
+			viu->events = 0;
+		return;
+	}
+	if (ev & (S2EVENT_OFFLINE | S2EVENT_DISCONNECT))
+		up = 0;
+	if (ev & (S2EVENT_ONLINE | S2EVENT_CONNECT))
+		up = 1;
+	if (up != viu->link) {
+		viu->link = up;
+		if ((fn = viu->linkhook) != NULL)
+			fn(viu->linkctx, up);
+	}
+	if (!viu->stopping)
+		queue_event(viu, port);
+}
+
+/* a driver is wireless if NSCMD_DEVICEQUERY lists S2_GETNETWORKS */
+static int
+probe_wireless(struct IOSana2Req *base)
+{
+	struct NSDeviceQueryResult nsq;
+	struct IOStdReq *io = (struct IOStdReq *)base;
+	UWORD *cmd;
+	int w = 0;
+
+	memset(&nsq, 0, sizeof(nsq));
+	io->io_Command = NSCMD_DEVICEQUERY;
+	io->io_Data = &nsq;
+	io->io_Length = sizeof(nsq);
+	if (DoIO((struct IORequest *)io) == 0 && nsq.SupportedCommands)
+		for (cmd = nsq.SupportedCommands; *cmd; cmd++)
+			if (*cmd == S2_GETNETWORKS)
+				w = 1;
+	return w;
+}
+
 static int
 is_zero_mac(const UBYTE *m)
 {
@@ -306,8 +382,10 @@ sana_iothread(void *arg)
 		if (DoIO((struct IORequest *)base) == 0)
 			CopyMem(base->ios2_SrcAddr, viu->mac, ETHER_ADDR_LEN);
 	}
+	viu->wireless = probe_wireless(base);
 	base->ios2_Req.io_Command = S2_ONLINE;
 	DoIO((struct IORequest *)base);
+	viu->link = 1;
 
 	for (t = 0; t < NRXTYPES; t++) {
 		for (i = 0; i < NRX_PER_TYPE; i++) {
@@ -326,6 +404,12 @@ sana_iothread(void *arg)
 		viu->txfree = r;
 	}
 
+	/* link change notification, if the driver can do it */
+	if ((viu->evreq = req_alloc(base, REQ_EV)) != NULL) {
+		viu->events = 2;
+		queue_event(viu, ioport);
+	}
+
 	viu->txport = txport;
 	viu->state = 1;
 	iomask = 1UL << ioport->mp_SigBit;
@@ -341,6 +425,10 @@ sana_iothread(void *arg)
 		}
 		/* completed requests */
 		while ((r = (struct s2req *)GetMsg(ioport)) != NULL) {
+			if (r->kind == REQ_EV) {
+				event_done(viu, r, ioport);
+				continue;
+			}
 			if (r->kind == REQ_RX) {
 				if (r->ios2.ios2_Req.io_Error == 0 &&
 				    !tapped(viu, r))
@@ -375,6 +463,11 @@ sana_iothread(void *arg)
 	}
 	for (i = 0; i < (unsigned)ntx; i++)
 		WaitIO((struct IORequest *)&viu->txreqs[i]->ios2);
+	if (viu->evreq && viu->events) {
+		if (!CheckIO((struct IORequest *)&viu->evreq->ios2))
+			AbortIO((struct IORequest *)&viu->evreq->ios2);
+		WaitIO((struct IORequest *)&viu->evreq->ios2);
+	}
 	goto cleanup;
 
 fail:
@@ -384,6 +477,9 @@ cleanup:
 		FreeVec(viu->rxreqs[i]);
 	for (i = 0; i < (unsigned)ntx; i++)
 		FreeVec(viu->txreqs[i]);
+	if (viu->evreq)
+		FreeVec(viu->evreq);
+	viu->evreq = NULL;
 	viu->txfree = NULL;
 	if (opened)
 		CloseDevice((struct IORequest *)base);
@@ -595,4 +691,49 @@ sana_stats(struct virtif_user *viu, ULONG *rx, ULONG *tx, ULONG *rxdrop,
 	*tx = viu->tx_packets;
 	*rxdrop = viu->rx_dropped;
 	*txdrop = viu->tx_dropped;
+}
+
+int
+sana_link(struct virtif_user *viu)
+{
+
+	return viu->link;
+}
+
+int
+sana_link_events(struct virtif_user *viu)
+{
+
+	return viu->events != 0;
+}
+
+int
+sana_is_wireless(struct virtif_user *viu)
+{
+
+	return viu->wireless;
+}
+
+const char *
+sana_devname(struct virtif_user *viu)
+{
+
+	return viu->devname;
+}
+
+ULONG
+sana_unit(struct virtif_user *viu)
+{
+
+	return viu->unit;
+}
+
+void
+sana_set_linkhook(struct virtif_user *viu, sana_link_fn fn, void *ctx)
+{
+
+	Forbid();
+	viu->linkctx = ctx;
+	viu->linkhook = fn;
+	Permit();
 }

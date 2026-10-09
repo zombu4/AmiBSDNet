@@ -27,7 +27,11 @@ Early development.
 - [x] Control port + `NetCtrl` (STATUS/ONLINE/OFFLINE/RECONFIG), `Ping`
 - [x] Starts at boot from S:User-Startup without delaying it
       (`NetCtrl WAIT` for scripts that need the network)
-- [x] Workbench status AppIcon + Exchange commodity (`AmiBSDNetStatus`)
+- [x] Workbench status AppIcon + Exchange commodity (`AmiBSDNetStatus`),
+      with a Wi-Fi window (scan, passphrase, connect)
+- [x] Link detection (SANA-II link events) and a DHCP client that keeps
+      retrying, so cables/routers appearing after boot are picked up;
+      WirelessManager started automatically for Wi-Fi interfaces
 - [x] Installer script for Workbench 3.2+, generated icons, LHA/ZIP
       packaging (`tools/package.py`)
 - [ ] Tested on real Kickstart/Workbench 3.2 and PiStorm hardware

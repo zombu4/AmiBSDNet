@@ -24,6 +24,19 @@ void	sana_raw_send(struct virtif_user *, const UBYTE *frame, ULONG len);
 void	sana_stats(struct virtif_user *, ULONG *rx, ULONG *tx,
 	    ULONG *rxdrop, ULONG *txdrop);
 
+/* link state: 1 up (also when the driver cannot tell), 0 down */
+int	sana_link(struct virtif_user *);
+/* 1 if the driver reports link changes at all */
+int	sana_link_events(struct virtif_user *);
+/* 1 if the driver supports the SANA-II wireless extensions */
+int	sana_is_wireless(struct virtif_user *);
+const char *sana_devname(struct virtif_user *);
+ULONG	sana_unit(struct virtif_user *);
+
+/* called on the I/O process when the link goes up or down; must not block */
+typedef void (*sana_link_fn)(void *ctx, int up);
+void	sana_set_linkhook(struct virtif_user *, sana_link_fn, void *ctx);
+
 /* kernel send entry, also usable for raw frames */
 struct hiovec;
 void	rumpcomp_sana_send(struct virtif_user *, struct hiovec *, size_t);

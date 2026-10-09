@@ -95,5 +95,29 @@ struct Sana2DeviceQuery {
 #define	S2EVENT_RX		(1 << 2)
 #define	S2EVENT_ONLINE		(1 << 3)
 #define	S2EVENT_OFFLINE		(1 << 4)
+#define	S2EVENT_CONNECT		(1 << 9)	/* Revision 6+: link established */
+#define	S2EVENT_DISCONNECT	(1 << 10)	/* Revision 6+: link lost */
+
+/* SANA-II Revision 6 wireless extensions (devices/sana2wireless.h) */
+#define	S2_GETSIGNALQUALITY	0xc010
+#define	S2_GETNETWORKS		0xc011
+#define	S2_SETOPTIONS		0xc012
+#define	S2_GETNETWORKINFO	0xc014
+#define	S2INFO_SSID		(TAG_USER + 0)
+#define	S2INFO_BSSID		(TAG_USER + 1)
+#define	S2INFO_Encryption	(TAG_USER + 4)
+#define	S2INFO_Channel		(TAG_USER + 7)
+#define	S2INFO_Signal		(TAG_USER + 8)
+#define	S2INFO_InfoElements	(TAG_USER + 11)
+
+/* New Style Device query (devices/newstyle.h) */
+#define	NSCMD_DEVICEQUERY	0x4000
+struct NSDeviceQueryResult {
+	ULONG	DevQueryFormat;
+	ULONG	SizeAvailable;
+	UWORD	DeviceType;
+	UWORD	DeviceSubType;
+	UWORD	*SupportedCommands;
+};
 
 #endif /* AMIBSDNET_SANA2_H */

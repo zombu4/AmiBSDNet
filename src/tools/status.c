@@ -36,6 +36,8 @@
 
 #include <amibsdnet/control.h>
 
+#include "statustool.h"
+
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 struct IntuitionBase *IntuitionBase;
@@ -58,14 +60,15 @@ static UWORD *chipimg[2];	/* [0] offline, [1] online */
 static struct Image images[2];
 static struct DiskObject dobj[2];
 static struct AppIcon *appicon;
-static int shown_state = -1;	/* -1 none, 0 offline, 1 online, 2 no stack */
+static int shown_state = -1;	/* -1 none, 0 offline, 1 online, 2 no stack,
+				   3 no link, 4 connecting */
 static char label[32];
 
 /* ------------------------------------------------------------------------
  * talking to the stack
  */
 
-static int
+int
 stack_cmd(ULONG cmd)
 {
 	struct MsgPort *reply, *port;
@@ -87,6 +90,34 @@ stack_cmd(ULONG cmd)
 	}
 	DeleteMsgPort(reply);
 	return port ? 0 : -1;
+}
+
+struct NetCtrlMsg *
+status_msg(void)
+{
+
+	return ctl;
+}
+
+void *
+memcpy(void *d, const void *src, unsigned long n)
+{
+	char *p = d;
+	const char *q = src;
+
+	while (n--)
+		*p++ = *q++;
+	return d;
+}
+
+void *
+memset(void *d, int c, unsigned long n)
+{
+	char *p = d;
+
+	while (n--)
+		*p++ = c;
+	return d;
 }
 
 /* ------------------------------------------------------------------------
@@ -211,20 +242,42 @@ update_icon(struct MsgPort *appport)
 {
 	int state;
 
-	if (stack_cmd(NETCTRL_STATE) != 0)
+	const char *text = "Offline";
+	ULONG i;
+
+	if (stack_cmd(NETCTRL_IFLIST) != 0) {
 		state = 2;
-	else
-		state = ctl->online ? 1 : 0;
+		text = "No network";
+	} else if (ctl->online) {
+		state = 1;
+	} else {
+		state = 0;
+		/* say why: no cable / no Wi-Fi, or still getting an address */
+		for (i = 0; i < ctl->nifaces; i++) {
+			UWORD f = ctl->ifaces[i].flags;
+
+			if (!(f & NETIF_ADMIN))
+				continue;
+			if (!(f & NETIF_LINK)) {
+				text = (f & NETIF_WIRELESS) ? "No Wi-Fi" :
+				    "No cable";
+				state = 3;
+			} else if (state != 3) {
+				text = "Connecting";
+				state = 4;
+			}
+		}
+	}
 	if (state == 1)
 		fmt_ip(label, ctl->address);
 	else
-		copy(label, state == 2 ? "No network" : "Offline", sizeof(label));
+		copy(label, text, sizeof(label));
 	if (state == shown_state && appicon)
 		return;
 	if (appicon)
 		RemoveAppIcon(appicon);
 	appicon = AddAppIconA(0, 0, (UBYTE *)label, appport, 0,
-	    &dobj[state == 1], NULL);
+	    &dobj[state == 1 ? 1 : 0], NULL);
 	shown_state = state;
 }
 
@@ -254,14 +307,36 @@ show_status(struct MsgPort *appport)
 			    SYS_Output, Open((CONST_STRPTR)"NIL:", MODE_NEWFILE),
 			    TAG_DONE);
 	} else {
-		es.es_GadgetFormat = ctl->online ?
-		    (UBYTE *)"Go Offline|Reconnect|OK" :
-		    (UBYTE *)"Go Online|Reconnect|OK";
+		struct NetCtrlIface wifi;
+		int online = ctl->online, haswifi = 0;
+		ULONG i;
+
+		/* is there a wireless interface?  (fetch the text afterwards) */
+		if (stack_cmd(NETCTRL_IFLIST) == 0)
+			for (i = 0; i < ctl->nifaces; i++)
+				if (ctl->ifaces[i].flags & NETIF_WIRELESS) {
+					wifi = ctl->ifaces[i];
+					haswifi = 1;
+					break;
+				}
+		stack_cmd(NETCTRL_STATUS);
+		if (haswifi)
+			es.es_GadgetFormat = online ?
+			    (UBYTE *)"Go Offline|Reconnect|Wi-Fi...|OK" :
+			    (UBYTE *)"Go Online|Reconnect|Wi-Fi...|OK";
+		else
+			es.es_GadgetFormat = online ?
+			    (UBYTE *)"Go Offline|Reconnect|OK" :
+			    (UBYTE *)"Go Online|Reconnect|OK";
 		choice = EasyRequest(NULL, &es, NULL, (ULONG)ctl->text);
 		if (choice == 1)
-			stack_cmd(ctl->online ? NETCTRL_OFFLINE : NETCTRL_ONLINE);
-		else if (choice == 2)
-			stack_cmd(NETCTRL_RECONFIG);
+			stack_cmd(online ? NETCTRL_OFFLINE : NETCTRL_ONLINE);
+		else if (choice == 2) {
+			/* drop the address and fetch a fresh one */
+			stack_cmd(NETCTRL_OFFLINE);
+			stack_cmd(NETCTRL_ONLINE);
+		} else if (choice == 3 && haswifi)
+			wifi_window(&wifi);
 	}
 	update_icon(appport);
 }
