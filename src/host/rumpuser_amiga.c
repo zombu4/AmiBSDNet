@@ -43,7 +43,7 @@ struct Device *TimerBase;
 /* seconds from the AmigaOS epoch (1978-01-01) to the Unix epoch */
 #define	AMIGA_EPOCH_OFFSET	252460800UL
 
-#define	THREAD_STACK		(64 * 1024)
+#define	THREAD_STACK		(32 * 1024)	/* NetBSD/m68k uses 16 KB */
 
 struct Task *amiga_rump_notifytask;
 int amiga_rump_debug;
@@ -492,26 +492,42 @@ rumpuser_init(int version, const struct rumpuser_hyperup *hyperup)
  * memory
  *
  * All stack memory comes from Fast RAM (MEMF_FAST); Chip RAM is left to
- * the custom chips.  The real allocation pointer is stored just below
- * the aligned block.
- * TODO: page-aligned requests waste up to 'alignment' bytes each; trim
- * with partial FreeMem() once verified on Kickstart 3.2's allocator.
+ * the custom chips.
+ *
+ * Blocks come straight from AllocMem() and go back with FreeMem() using
+ * the length rump passes to rumpuser_free() (always the allocation
+ * length).  Aligned requests (the kernel asks for whole 8 KB pages) use
+ * the classic Amiga technique: allocate size + alignment, then FreeMem()
+ * the unused head and tail, so no memory is wasted on alignment.
  */
+
+#define	MEM_ROUND(n)	(((n) + 7) & ~(size_t)7)	/* MEM_BLOCKSIZE */
 
 int
 rumpuser_malloc(size_t len, int alignment, void **memp)
 {
-	uintptr_t raw, a;
+	size_t size = MEM_ROUND(len ? len : 1), total, head, tail;
+	UBYTE *raw, *a;
 
 	TRACE0();
-	if (alignment < (int)sizeof(void *))
-		alignment = sizeof(void *);
-	raw = (uintptr_t)AllocVec(len + alignment + sizeof(void *), MEMF_FAST);
-	if (raw == 0)
+	if (alignment <= 8) {
+		if ((raw = AllocMem(size, MEMF_FAST)) == NULL)
+			return RUMPUSER_ENOMEM;
+		*memp = raw;
+		return 0;
+	}
+	total = size + alignment;
+	if ((raw = AllocMem(total, MEMF_FAST)) == NULL)
 		return RUMPUSER_ENOMEM;
-	a = (raw + sizeof(void *) + alignment - 1) & ~(uintptr_t)(alignment - 1);
-	((void **)a)[-1] = (void *)raw;
-	*memp = (void *)a;
+	a = (UBYTE *)(((uintptr_t)raw + alignment - 1) &
+	    ~(uintptr_t)(alignment - 1));
+	head = a - raw;
+	tail = total - head - size;
+	if (head)
+		FreeMem(raw, head);
+	if (tail)
+		FreeMem(a + size, tail);
+	*memp = a;
 	return 0;
 }
 
@@ -521,7 +537,7 @@ rumpuser_free(void *mem, size_t len)
 
 	TRACE0();
 	if (mem)
-		FreeVec(((void **)mem)[-1]);
+		FreeMem(mem, MEM_ROUND(len ? len : 1));
 }
 
 int

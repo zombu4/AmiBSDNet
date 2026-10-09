@@ -11,7 +11,7 @@ network software works without changes.
 Requirements
 ------------
 - a 68020 or better CPU; a PiStorm (Emu68) is the main target
-- Fast RAM: the stack needs about 3 MB and uses Fast RAM only
+- Fast RAM: the stack uses about 3.5 MB, all of it Fast RAM (no Chip RAM)
 - a network card with a SANA-II driver (PiStorm Wi-Fi under Emu68:
   wifipi.device; WinUAE: uaenet.device; Zorro cards such as the A2065,
   Ariadne or X-Surf: their own driver)
