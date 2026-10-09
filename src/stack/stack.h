@@ -23,6 +23,14 @@ extern int nifaces;
 
 int	stack_configure(const char *path);
 void	stack_offline(void);
+void	stack_online(void);
+int	stack_reconfigure(void);
+extern volatile ULONG config_generation;
+
+/* control port (control.c) */
+int	control_init(void);
+ULONG	control_sigmask(void);
+void	control_handle(void);
 ULONG	netcfg_primary_address(void);
 void	sb_copy(char *, const char *, unsigned long);
 
@@ -38,6 +46,7 @@ void	netdb_set_hostname(const char *);
 int	rump_amibsdnet_ifcreate(const char *, const char *);
 int	rump_amibsdnet_ifaddr4(const char *, ULONG, ULONG);
 int	rump_amibsdnet_ifflags(const char *, int, int);
+int	rump_amibsdnet_ifdeladdr4(const char *, ULONG);
 int	rump_amibsdnet_route4(int, ULONG, ULONG, ULONG);
 #define	NB_RTM_ADD	1
 #define	NB_RTM_DELETE	2

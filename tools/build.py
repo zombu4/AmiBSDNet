@@ -171,6 +171,10 @@ def comp_rumpnet_net():
         c["path"].append(os.path.join(base, sub))
     c["srcs"] += ["netinet_component.c", "netinet6_component.c"]
     c["extra_inc"] = [os.path.join(RUMPTOP, "librump", "rumpkern")]
+    # No IPsec: NetBSD's netinet makefiles build with -DIPSEC, but the
+    # netipsec component is not part of AmiBSDNet, and raw IP sockets would
+    # then call into its stubs (panic "component not available").
+    c["cppflags"] = [f for f in c["cppflags"] if "IPSEC" not in f]
     c["cppflags"] += ["-DINET", "-DINET6"]
     return c
 

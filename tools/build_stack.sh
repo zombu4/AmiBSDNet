@@ -9,7 +9,7 @@ OUT=${1:-build/AmiBSDNet}
 HF="-m68040 -O2 -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
     -Wall -Wno-unused-parameter -Wno-volatile-register-var -Wno-pointer-sign -Wno-array-bounds \
     -ffile-prefix-map=$(pwd)=. -Inetbsd-src/sys/rump/include -Isrc/host \
-    -Isrc/lib -Isrc/stack -Ibuild/gen"
+    -Isrc/lib -Isrc/stack -Isrc/include -Ibuild/gen"
 mkdir -p build/stackobj
 python -I tools/gen/gen_bsdsocket.py
 objs=""
