@@ -9,6 +9,7 @@
 #include <exec/lists.h>
 #include <exec/nodes.h>
 #include <dos/dos.h>
+#include <dos/dostags.h>
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
@@ -167,116 +168,177 @@ make_label(struct net *n)
 #define	SCAN_TIMEOUT	(-3)
 #define	SCAN_SECONDS	30
 
+#define	S2_GETSTATIONADDRESS	(CMD_NONSTD + 1)
+#define	S2_CONFIGINTERFACE	(CMD_NONSTD + 2)
+
 /*
- * Scan for networks; returns their number or SCAN_*.  The scan runs
- * asynchronously (the driver answers only when the radio has finished,
- * and some never do) while cancelled() keeps the window alive and says
- * whether the user gave up.  A request the driver does not give back
- * after AbortIO() is left to it, with its port, pool and the open
- * device: freeing memory the driver may still write to would crash.
+ * The scan runs in its own process, which owns the request, its memory
+ * pool and the open device, and frees them only when the driver really
+ * answers.  It must never be aborted: wifipi.device's AbortIO() replies an
+ * active scan without ending it, and the driver then writes into the
+ * freed pool and blocks every later scan (WirelessManager's too).  The
+ * window only waits for the job; Close or a timeout stop waiting, and no
+ * new scan is started while one is still out.
  */
-static int
-scan(const char *device, ULONG unit, int (*cancelled)(void))
+static struct {
+	volatile int state;		/* 0 idle, 1 running, 2 done */
+	int result;
+	char device[64];
+	ULONG unit;
+	int n;
+	struct net nets[MAXNETS];
+} job;
+
+static void
+scan_proc(void)
 {
 	struct MsgPort *port;
 	struct IOSana2Req *req;
 	APTR pool;
-	int rv = SCAN_FAILED, ticks, stuck = 0;
+	int rv = SCAN_FAILED, a, b;
 	ULONG i;
+
+	job.n = 0;
+	if ((port = CreateMsgPort()) != NULL) {
+		req = (struct IOSana2Req *)CreateIORequest(port, sizeof(*req));
+		if (req != NULL) {
+			req->ios2_BufferManagement = bufftags;
+			if (amibsdnet_open_sana(job.device, job.unit,
+			    (struct IORequest *)req, 0) == 0) {
+				/*
+				 * The firmware scans only once the interface is
+				 * configured (the stack normally did that; a
+				 * second configure fails harmlessly).
+				 */
+				req->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+				if (DoIO((struct IORequest *)req) == 0) {
+					for (i = 0; i < 6 && !req->ios2_SrcAddr[i];
+					    i++)
+						;
+					if (i == 6)
+						CopyMem(req->ios2_DstAddr,
+						    req->ios2_SrcAddr, 6);
+					req->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+					DoIO((struct IORequest *)req);
+				}
+				if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR, 8192,
+				    2048))) {
+					req->ios2_Req.io_Command = S2_GETNETWORKS;
+					req->ios2_Data = pool;
+					req->ios2_StatData = NULL;
+					req->ios2_DataLength = 0;
+					if (DoIO((struct IORequest *)req) == 0) {
+						struct TagItem **lists =
+						    req->ios2_StatData;
+
+						for (i = 0; lists &&
+						    i < req->ios2_DataLength; i++) {
+							const char *ssid = (const char *)
+							    tagdata(lists[i], S2INFO_SSID,
+							    (ULONG)"");
+							LONG sig = (LONG)tagdata(lists[i],
+							    S2INFO_Signal, 0);
+							const char *prot = protection(
+							    (const UBYTE *)tagdata(
+							    lists[i], S2INFO_InfoElements,
+							    0));
+							int j;
+
+							if (!ssid[0])
+								continue;	/* hidden */
+							/* one entry per name: the
+							   strongest */
+							for (j = 0; j < job.n; j++)
+								if (seq(job.nets[j].ssid,
+								    ssid))
+									break;
+							if (j < job.n &&
+							    job.nets[j].signal >= sig)
+								continue;
+							if (j == job.n) {
+								if (job.n == MAXNETS)
+									continue;
+								job.n++;
+							}
+							scopy(job.nets[j].ssid, ssid,
+							    sizeof(job.nets[j].ssid));
+							job.nets[j].signal = sig;
+							job.nets[j].protected =
+							    !seq(prot, "open");
+						}
+						rv = job.n;
+					}
+					DeletePool(pool);
+				}
+				CloseDevice((struct IORequest *)req);
+			}
+			DeleteIORequest((struct IORequest *)req);
+		}
+		DeleteMsgPort(port);
+	}
+	/* strongest first */
+	for (a = 0; a < job.n; a++)
+		for (b = 0; b + 1 < job.n - a; b++)
+			if (job.nets[b].signal < job.nets[b + 1].signal) {
+				struct net t;
+
+				CopyMem(&job.nets[b], &t, sizeof(t));
+				CopyMem(&job.nets[b + 1], &job.nets[b], sizeof(t));
+				CopyMem(&t, &job.nets[b + 1], sizeof(t));
+			}
+	job.result = rv;
+	job.state = 2;
+}
+
+/* is a scan process still out?  (the status tool must not quit then: the
+   process runs this program's code) */
+int
+wifi_scan_busy(void)
+{
+
+	return job.state == 1;
+}
+
+/*
+ * Scan for networks; returns their number or SCAN_*.  cancelled() keeps
+ * the window answering and says whether the user gave up.
+ */
+static int
+scan(const char *device, ULONG unit, int (*cancelled)(void))
+{
+	int ticks, i, rv;
 
 	nnets = 0;
 	NewList(&netlist);
-	if ((port = CreateMsgPort()) == NULL)
-		return SCAN_FAILED;
-	req = (struct IOSana2Req *)CreateIORequest(port, sizeof(*req));
-	if (req == NULL) {
-		DeleteMsgPort(port);
-		return SCAN_FAILED;
-	}
-	req->ios2_BufferManagement = bufftags;
-	if (amibsdnet_open_sana(device, unit, (struct IORequest *)req, 0) == 0) {
-		if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR, 8192, 2048))) {
-			req->ios2_Req.io_Command = S2_GETNETWORKS;
-			req->ios2_Data = pool;
-			req->ios2_StatData = NULL;
-			req->ios2_DataLength = 0;
-			SendIO((struct IORequest *)req);
-			for (ticks = 0; !CheckIO((struct IORequest *)req);
-			    ticks += 5) {
-				int c = cancelled();
-
-				if (c || ticks >= SCAN_SECONDS * 50) {
-					rv = c ? SCAN_CANCELLED : SCAN_TIMEOUT;
-					AbortIO((struct IORequest *)req);
-					for (ticks = 0; ticks < 100 &&
-					    !CheckIO((struct IORequest *)req);
-					    ticks += 5)
-						Delay(5);
-					stuck = !CheckIO((struct IORequest *)req);
-					break;
-				}
-				Delay(5);
-			}
-			if (stuck) {
-				/* the driver keeps the request: leave it be */
-				return rv;
-			}
-			WaitIO((struct IORequest *)req);
-			if (rv == SCAN_FAILED && req->ios2_Req.io_Error == 0) {
-				struct TagItem **lists = req->ios2_StatData;
-
-				for (i = 0; lists && i < req->ios2_DataLength; i++) {
-					const char *ssid = (const char *)tagdata(
-					    lists[i], S2INFO_SSID, (ULONG)"");
-					LONG sig = (LONG)tagdata(lists[i],
-					    S2INFO_Signal, 0);
-					const char *prot = protection((const UBYTE *)
-					    tagdata(lists[i], S2INFO_InfoElements, 0));
-					int j;
-
-					if (!ssid[0])
-						continue;	/* hidden */
-					/* one entry per name: keep the strongest */
-					for (j = 0; j < nnets; j++)
-						if (seq(nets[j].ssid, ssid))
-							break;
-					if (j < nnets && nets[j].signal >= sig)
-						continue;
-					if (j == nnets) {
-						if (nnets == MAXNETS)
-							continue;
-						nnets++;
-					}
-					scopy(nets[j].ssid, ssid, sizeof(nets[j].ssid));
-					nets[j].signal = sig;
-					nets[j].protected = !seq(prot, "open");
-				}
-				rv = nnets;
-			}
-			DeletePool(pool);
+	if (job.state == 2)
+		job.state = 0;		/* old results: scan again */
+	if (job.state == 0) {
+		scopy(job.device, device, sizeof(job.device));
+		job.unit = unit;
+		job.state = 1;
+		if (CreateNewProcTags(NP_Entry, (ULONG)scan_proc,
+		    NP_Name, (ULONG)"AmiBSDNet scan", NP_StackSize, 16384,
+		    TAG_DONE) == NULL) {
+			job.state = 0;
+			return SCAN_FAILED;
 		}
-		CloseDevice((struct IORequest *)req);
 	}
-	DeleteIORequest((struct IORequest *)req);
-	DeleteMsgPort(port);
-
-	/* strongest first */
-	{
-		int a, b;
-
-		for (a = 0; a < nnets; a++)
-			for (b = 0; b + 1 < nnets - a; b++)
-				if (nets[b].signal < nets[b + 1].signal) {
-					struct net t = nets[b];
-
-					nets[b] = nets[b + 1];
-					nets[b + 1] = t;
-				}
+	/* else a scan from before is still out: wait for that one */
+	for (ticks = 0; job.state == 1; ticks += 5) {
+		if (cancelled())
+			return SCAN_CANCELLED;
+		if (ticks >= SCAN_SECONDS * 50)
+			return SCAN_TIMEOUT;
+		Delay(5);
 	}
-	for (i = 0; i < (ULONG)nnets; i++) {
+	nnets = job.n;
+	for (i = 0; i < nnets; i++) {
+		CopyMem(&job.nets[i], &nets[i], sizeof(nets[i]));
 		make_label(&nets[i]);
 		AddTail(&netlist, &nets[i].node);
 	}
+	rv = job.result;
+	job.state = 0;
 	return rv;
 }
 
@@ -365,9 +427,9 @@ do_scan(const struct NetCtrlIface *ifc)
 	set_list((struct List *)~0);
 	n = scan(ifc->device, ifc->unit, scan_cancelled);
 	set_list(&netlist);
-	set_status(n == SCAN_CANCELLED ? "Scan stopped" :
-	    n == SCAN_TIMEOUT ? "The scan did not finish (is the Wi-Fi driver "
-	    "working?)" :
+	set_status(n == SCAN_CANCELLED ? "Stopped waiting for the scan" :
+	    n == SCAN_TIMEOUT ? "The driver did not finish the scan (is the "
+	    "stack running with this driver?)" :
 	    n < 0 ? "The driver cannot scan" :
 	    n == 0 ? "No networks found" : "Choose a network and Connect");
 }

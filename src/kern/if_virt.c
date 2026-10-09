@@ -4,7 +4,10 @@
  * AmiBSDNet: NetBSD's sys/rump/net/lib/libvirtif/if_virt.c with one fix:
  * virtif_unclone() freed the softc, which contains the ifnet, before
  * detaching the ifnet, so removing an interface (reconfiguration) used
- * freed memory.  It now frees the softc last.
+ * freed memory.  It now frees the softc last.  Also: unclone of an
+ * interface whose link string never worked (no backend) no longer calls
+ * the backend with NULL, the link string is freed on unclone, and the
+ * pointer is cleared when a failed SIOCSLINKSTR frees it.
  */
 
 /*
@@ -69,6 +72,7 @@ struct virtif_sc {
 
 	int sc_num;
 	char *sc_linkstr;
+	size_t sc_linkstrlen;		/* AmiBSDNet: to free it */
 };
 
 static int  virtif_clone(struct if_clone *, int);
@@ -168,6 +172,14 @@ virtif_unclone(struct ifnet *ifp)
 	if (ifp->if_flags & IFF_UP)
 		return EBUSY;
 
+	/* AmiBSDNet: an interface whose link (driver) was never set up has
+	   no backend and was never ether_ifattach()ed */
+	if (sc->sc_viu == NULL) {
+		if_detach(ifp);
+		kmem_free(sc, sizeof(*sc));
+		return 0;
+	}
+
 	if ((rv = VIFHYPER_DYING(sc->sc_viu)) != 0)
 		return rv;
 
@@ -179,6 +191,8 @@ virtif_unclone(struct ifnet *ifp)
 	ether_ifdetach(ifp);
 	if_detach(ifp);
 
+	if (sc->sc_linkstr != NULL && sc->sc_linkstrlen)
+		kmem_free(sc->sc_linkstr, sc->sc_linkstrlen);
 	kmem_free(sc, sizeof(*sc));	/* the ifnet is part of it */
 
 	return 0;
@@ -261,16 +275,19 @@ virtif_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 
 
 		sc->sc_linkstr = kmem_alloc(ifd->ifd_len, KM_SLEEP);
+		sc->sc_linkstrlen = ifd->ifd_len;
 		rv = copyinstr(ifd->ifd_data, sc->sc_linkstr,
 		    ifd->ifd_len, NULL);
 		if (rv) {
 			kmem_free(sc->sc_linkstr, ifd->ifd_len);
+			sc->sc_linkstr = NULL;	/* AmiBSDNet: no dangling */
 			break;
 		}
 
 		rv = virtif_create(ifp);
 		if (rv) {
 			kmem_free(sc->sc_linkstr, ifd->ifd_len);
+			sc->sc_linkstr = NULL;
 		}
 		break;
 #endif /* RUMP_VIF_LINKSTR */

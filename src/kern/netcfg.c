@@ -79,6 +79,14 @@ rump_amibsdnet_ifcreate(const char *ifname, const char *linkstr)
 		ifd.ifd_len = strlen(linkstr) + 1;
 		ifd.ifd_data = __UNCONST(linkstr);
 		rv = rump___sysimpl_ioctl(s, SIOCSLINKSTR, &ifd);
+		if (rv != 0) {
+			/* no driver behind it: do not leave a half interface
+			   (EEXIST next time would look like a working one) */
+			int err = rumpuser_amiga_errno();
+
+			rump___sysimpl_ioctl(s, SIOCIFDESTROY, &ifr);
+			rumpuser_seterrno(err);
+		}
 	}
 	return done(s, rv);
 }

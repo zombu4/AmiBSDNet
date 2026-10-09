@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.3")
+(set #ver "0.4")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -30,63 +30,44 @@
 ; AmiBSDNet/OtherRunning and AmiBSDNet/Emu68
 
 (working "Checking the system...")
+(makedir "ENV:AmiBSDNet")
 (run "C/NetCtrl CHECK >NIL:" (safe))
 (set #others (getenv "AmiBSDNet/OtherStacks"))
 (set #otherrunning (= (getenv "AmiBSDNet/OtherRunning") "1"))
 (set #emu68 (= (getenv "AmiBSDNet/Emu68") "1"))
 
+; Switching is a trial: the other stack is disabled (not removed), and
+; AmiBSDNet/Trial makes AmiBSDNet put it back by itself ("NetCtrl
+; FALLBACK") if it does not get connected after its first start.  Only
+; after it has connected is the switch permanent.  The question is asked
+; here, but nothing is changed until the very end of the installation,
+; so aborting the installer anywhere leaves the other stack working.
+(set #trial 0)
+(set #othersdo 1)
 (if (<> #others "")
-	(
-		(set #othersdo
-			(askchoice
-				(prompt "Another TCP/IP stack is installed:\n" #others
-					"\n\nOnly one TCP/IP stack can run at a time. "
-					"What should be done with it?")
-				(help "Disable: it is no longer started at boot. Its "
-					"startup lines in S:Startup-Sequence and "
-					"S:User-Startup are commented out, and its "
-					"WBStartup items and LIBS:bsdsocket.library are "
-					"moved to SYS:Storage/AmiBSDNet-Disabled. "
-					"\"NetCtrl RESTOREOTHERS\" undoes this.\n\n"
-					"Remove: the same, but the startup lines and those "
-					"files are deleted. Its program drawer is left "
-					"alone; delete it yourself if you want.\n\n"
-					"The startup files are saved as "
-					"<name>.amibsdnet-backup first.\n\n"
-					"Keep: nothing is changed; do not start both stacks.")
-				(choices "Disable it (can be undone)" "Remove it"
-					"Keep it (I will take care of it)")
-				(default 0)))
-		(if (= #othersdo 0)
-			(run "C/NetCtrl DISABLEOTHERS >NIL:"
-				(prompt "Disabling " #others)
-				(help @run-help)))
-		(if (= #othersdo 1)
-			(run "C/NetCtrl REMOVEOTHERS >NIL:"
-				(prompt "Removing " #others " from the startup")
-				(help @run-help)))
-		; look again: is anything of it still started at boot?
-		(run "C/NetCtrl CHECK >NIL:" (safe))
-		(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
-		(if (and (< #othersdo 2) (<> #atboot ""))
-			(message "Not everything could be taken out of the boot:\n"
-				#atboot "\n\n"
-				"Please check S:Startup-Sequence, S:User-Startup and "
-				"SYS:WBStartup yourself before rebooting: AmiBSDNet "
-				"does not start while another TCP/IP stack is "
-				"running."))
-		(if (and (< #othersdo 2) (= #atboot ""))
-			(message #others " is no longer started at boot."
-				(if (= #othersdo 0)
-					(cat "\n\nTo undo this later, type "
-						"\"NetCtrl RESTOREOTHERS\" in a Shell.")
-					"")))
-		(if (and (= #othersdo 2) (<> #atboot ""))
-			(message "Note: " #atboot " is still started at boot.\n\n"
-				"AmiBSDNet does not start while another TCP/IP stack "
-				"is running, so take it out of the startup before "
-				"rebooting."))
-	))
+	(set #othersdo
+		(askchoice
+			(prompt "Another TCP/IP stack is installed:\n" #others
+				"\n\nOnly one TCP/IP stack can run at a time.")
+			(help "Switch: at the end of the installation, " #others
+				" is taken out of the boot. Its startup lines in "
+				"S:Startup-Sequence and S:User-Startup are commented "
+				"out, and its WBStartup items and LIBS:bsdsocket.library "
+				"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
+				"files are saved as <name>.amibsdnet-backup first.\n\n"
+				"This is a trial: if AmiBSDNet does not get connected "
+				"within three minutes after the next boot, it puts "
+				"everything back by itself (the other stack, and the "
+				"Wi-Fi driver it replaced) and tells you to reboot. Once "
+				"it has connected, the switch stays. You can go back at "
+				"any time with \"NetCtrl FALLBACK\".\n\n"
+				"Keep: nothing is changed (also your Wi-Fi driver), and "
+				"AmiBSDNet is not started while the other stack is "
+				"running.")
+			(choices (cat "Switch to AmiBSDNet (" #others
+					" comes back if AmiBSDNet fails)")
+				"Keep it (I will take care of it)")
+			(default 0))))
 
 (complete 10)
 
@@ -110,18 +91,35 @@
 	(dest "C:")
 	(confirm "expert"))
 
-; on a PiStorm: the Raspberry Pi Wi-Fi driver and its firmware.  An
-; existing wifipi.device is kept as wifipi.device.old.
-(if #emu68
+; on a PiStorm: the Raspberry Pi Wi-Fi driver and its firmware.  What is
+; there already is saved first (only once: a second install must not
+; overwrite the user's original): wifipi.device.old and DEVS:Firmware.old.
+; NetCtrl FALLBACK puts them back.  Someone who keeps the other stack
+; keeps the Wi-Fi driver it works with, too.
+(set #keepdriver (and (<> #others "") (= #othersdo 1)
+	(exists "DEVS:Networks/wifipi.device")))
+(if (and #emu68 (not #keepdriver))
 	(
 		(makedir "DEVS:Networks")
 		(makedir "DEVS:Firmware")
-		(if (exists "DEVS:Networks/wifipi.device")
+		(if (and (exists "DEVS:Networks/wifipi.device")
+			(not (exists "DEVS:Networks/wifipi.device.old")))
 			(copyfiles
 				(source "DEVS:Networks/wifipi.device")
 				(dest "DEVS:Networks")
 				(newname "wifipi.device.old")
 				(nogauge)))
+		(if (not (exists "DEVS:Firmware.old"))
+			(
+				(makedir "DEVS:Firmware.old")
+				(copyfiles
+					(prompt "Saving the current Wi-Fi firmware")
+					(help @copyfiles-help)
+					(source "DEVS:Firmware")
+					(dest "DEVS:Firmware.old")
+					(all)
+					(nogauge))
+			))
 		(copyfiles
 			(prompt "Installing the PiStorm Wi-Fi driver (wifipi.device)")
 			(help @copyfiles-help)
@@ -171,7 +169,7 @@
 ; find the network adapters: NetCtrl PROBE opens every SANA-II driver
 ; and sets AmiBSDNet/Ethernet and AmiBSDNet/WiFi
 (working "Looking for network adapters...")
-(run "C:NetCtrl PROBE >NIL:" (safe))
+(run "C/NetCtrl PROBE >NIL:" (safe))
 (set #eth (getenv "AmiBSDNet/Ethernet"))
 (set #wlan (getenv "AmiBSDNet/WiFi"))
 (set #ethunit 0)
@@ -384,6 +382,56 @@
 		(nogauge)))
 
 (complete 100)
+
+; -------------------------------------------------------------------
+; the switch from the other stack, last of all: only now that AmiBSDNet
+; is installed and started from S:User-Startup (checked) is the other
+; stack taken out of the boot, as a trial (see above)
+
+(if (and (= #othersdo 0) (not @pretend))
+	(
+		(run "C/NetCtrl CHECK >NIL:" (safe))
+		(if (<> (getenv "AmiBSDNet/SelfAtBoot") "1")
+			(message "AmiBSDNet is not started from S:User-Startup (was "
+				"that step skipped?), so " #others " was left as it "
+				"is. Run the installer again to switch.")
+			(
+				(run "C/NetCtrl DISABLEOTHERS >NIL:"
+					(prompt "Taking " #others " out of the boot")
+					(help @run-help))
+				(run "C/NetCtrl CHECK >NIL:" (safe))
+				(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
+				(if (<> #atboot "")
+					(message "Not everything could be taken out of the "
+						"boot:\n" #atboot "\n\n"
+						"Please check S:Startup-Sequence, S:User-Startup "
+						"and SYS:WBStartup yourself before rebooting: "
+						"AmiBSDNet does not start while another TCP/IP "
+						"stack is running."))
+				(textfile (dest "ENVARC:AmiBSDNet/Trial") (append "1"))
+				(textfile (dest "ENV:AmiBSDNet/Trial") (append "1"))
+				(set #trial 1)
+			))
+	))
+
+(if (and (= #othersdo 1) (<> #others "") (not @pretend))
+	(
+		(run "C/NetCtrl CHECK >NIL:" (safe))
+		(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
+		(if (<> #atboot "")
+			(message "Note: " #atboot " is still started at boot.\n\n"
+				"AmiBSDNet does not start while another TCP/IP stack is "
+				"running."))
+	))
+
+(if #trial
+	(exit
+		"AmiBSDNet is installed.\n\n"
+		"Reboot now. AmiBSDNet then has three minutes to get connected. "
+		"If it does not, it puts " #others " and your previous Wi-Fi "
+		"driver back by itself and asks you to reboot again; its logs "
+		"are kept in SYS:Storage/AmiBSDNet-Logs.\n\n"
+		"\"NetCtrl\" shows the network status."))
 
 (if (or #otherrunning (and #emu68 (<> #wlan "")))
 	(exit

@@ -26,6 +26,8 @@
 #include <dos/rdargs.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
+#include <intuition/intuition.h>
+#include <proto/intuition.h>
 
 #include <dos/var.h>
 
@@ -38,7 +40,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.3 (10.10.2026)";
+    "\0$VER: NetCtrl 0.4 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -58,10 +60,15 @@ static void
 setvar(const char *name, const char *value)
 {
 
-	if (value)
+	if (value) {
+		/* on a first install ENV:AmiBSDNet does not exist yet */
+		BPTR l = CreateDir((CONST_STRPTR)"ENV:AmiBSDNet");
+
+		if (l)
+			UnLock(l);
 		SetVar((CONST_STRPTR)name, (CONST_STRPTR)value, -1,
 		    GVF_GLOBAL_ONLY);
-	else
+	} else
 		DeleteVar((CONST_STRPTR)name, GVF_GLOBAL_ONLY);
 }
 
@@ -96,6 +103,35 @@ probe(void)
 #define	CMD_DISABLE	0xffff0003UL
 #define	CMD_REMOVE	0xffff0004UL
 #define	CMD_RESTORE	0xffff0005UL
+#define	CMD_FALLBACK	0xffff0006UL
+
+/*
+ * FALLBACK: back to the previous TCP/IP stack (run by AmiBSDNet when a
+ * trial switch did not connect, or by hand).  Says so in a requester as
+ * well, since at boot there is no Shell to read it in.
+ */
+static int
+fallback(void)
+{
+	struct Library *IntuitionBase;
+	struct EasyStruct es;
+	char msg[400];
+	int rv = otherstacks_fallback(msg, sizeof(msg));
+
+	PutStr((CONST_STRPTR)msg);
+	PutStr((CONST_STRPTR)"\n");
+	if ((IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library",
+	    37)) != NULL) {
+		es.es_StructSize = sizeof(es);
+		es.es_Flags = 0;
+		es.es_Title = (UBYTE *)"AmiBSDNet";
+		es.es_TextFormat = (UBYTE *)"%s";
+		es.es_GadgetFormat = (UBYTE *)"OK";
+		EasyRequestArgs(NULL, &es, NULL, (APTR)&(char *){ msg });
+		CloseLibrary(IntuitionBase);
+	}
+	return rv == 0 ? RETURN_OK : RETURN_WARN;
+}
 
 /* after otherstacks_check(): AmiBSDNet/OthersAtBoot; returns how many */
 static int
@@ -178,6 +214,7 @@ check(void)
 	} else
 		setvar("AmiBSDNet/OtherStacks", NULL);
 	report_atboot();
+	setvar("AmiBSDNet/SelfAtBoot", otherstacks_self_atboot() ? "1" : NULL);
 	/* a bsdsocket.library in memory that is not AmiBSDNet's */
 	Forbid();
 	running = FindName(&SysBase->LibList, (CONST_STRPTR)"bsdsocket.library")
@@ -251,10 +288,11 @@ _start(void)
 		else if (streq(c, "DISABLEOTHERS")) cmd = CMD_DISABLE;
 		else if (streq(c, "REMOVEOTHERS")) cmd = CMD_REMOVE;
 		else if (streq(c, "RESTOREOTHERS")) cmd = CMD_RESTORE;
+		else if (streq(c, "FALLBACK")) cmd = CMD_FALLBACK;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
 			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
-			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS] "
+			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK] "
 			    "[TIMEOUT=<seconds>]\n");
 			rc = RETURN_ERROR;
 		}
@@ -276,6 +314,9 @@ _start(void)
 	case CMD_RESTORE:
 		rc = others(cmd == CMD_DISABLE ? OTHERS_DISABLE :
 		    cmd == CMD_REMOVE ? OTHERS_REMOVE : OTHERS_RESTORE);
+		goto out;
+	case CMD_FALLBACK:
+		rc = fallback();
 		goto out;
 	}
 

@@ -23,6 +23,7 @@ struct iface {
 	volatile int dhcp_event;	/* wakes the DHCP client */
 	int wireless;			/* driver supports SANA-II wireless */
 	int attached;			/* the driver could be opened */
+	volatile int release;		/* went offline: give up the lease */
 	int link_logged;
 };
 
@@ -30,6 +31,7 @@ extern struct iface ifaces[MAX_IFACES];
 extern int nifaces;
 
 int	stack_configure(const char *path);
+int	stack_configure_from(const char *path, const char *fallback);
 void	stack_offline(void);
 void	stack_online(void);
 void	stack_link_changed(void);
@@ -44,6 +46,11 @@ ULONG	control_sigmask(void);
 void	control_handle(void);
 ULONG	netcfg_primary_address(void);
 void	sb_copy(char *, const char *, unsigned long);
+
+/* trial switch-over from another stack (trial.c) */
+int	trial_begin(void);
+void	trial_failed(void);
+int	stack_connected(void);
 
 /* wireless (wireless.c): starts WirelessManager for the interface */
 void	wireless_start(struct iface *);

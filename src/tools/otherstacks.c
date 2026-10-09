@@ -19,6 +19,7 @@
 #include <exec/execbase.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
+#include <dos/var.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 
@@ -328,6 +329,8 @@ make_parking(const char *sub)
 	}
 }
 
+static int copy_file(const char *, const char *);
+
 /* park (rename into PARKING/sub) or delete a file */
 static int
 park(const char *path, const char *sub, const char *name, int remove)
@@ -343,7 +346,10 @@ park(const char *path, const char *sub, const char *name, int remove)
 	cat(dest, dest, "/", sizeof(dest));
 	cat(dest, dest, name, sizeof(dest));
 	DeleteFile((CONST_STRPTR)dest);		/* an older parked copy */
-	return Rename((CONST_STRPTR)path, (CONST_STRPTR)dest) ? 1 : -1;
+	if (Rename((CONST_STRPTR)path, (CONST_STRPTR)dest))
+		return 1;
+	/* another volume (LIBS: may be assigned anywhere): copy, delete */
+	return copy_file(path, dest) && DeleteFile((CONST_STRPTR)path) ? 1 : -1;
 }
 
 static int
@@ -362,6 +368,60 @@ copy_file(const char *from, const char *to)
 	}
 	FreeVec(buf);
 	return ok;
+}
+
+/*
+ * Replacing a startup file safely: the new text goes to <name>.amibsdnet-new
+ * with every Write() checked, and only then replaces the original.  A full
+ * disk or a write error leaves the original as it was.
+ */
+struct safewrite {
+	BPTR	fh;
+	int	ok;
+	char	tmp[110];
+	const char *name;
+};
+
+static int
+sw_open(struct safewrite *sw, const char *name)
+{
+
+	sw->name = name;
+	sw->ok = 1;
+	cat(sw->tmp, name, ".amibsdnet-new", sizeof(sw->tmp));
+	sw->fh = Open((CONST_STRPTR)sw->tmp, MODE_NEWFILE);
+	return sw->fh != 0 ? 0 : -1;
+}
+
+static void
+sw_write(struct safewrite *sw, const void *p, LONG n)
+{
+
+	if (sw->ok && n > 0 && Write(sw->fh, (APTR)p, n) != n)
+		sw->ok = 0;
+}
+
+/* 0 when the original was replaced */
+static int
+sw_close(struct safewrite *sw)
+{
+
+	if (!Close(sw->fh))
+		sw->ok = 0;
+	if (!sw->ok) {
+		DeleteFile((CONST_STRPTR)sw->tmp);
+		return -1;
+	}
+	/* the original may be in use (a script that is running) */
+	if (!DeleteFile((CONST_STRPTR)sw->name)) {
+		DeleteFile((CONST_STRPTR)sw->tmp);
+		return -1;
+	}
+	if (!Rename((CONST_STRPTR)sw->tmp, (CONST_STRPTR)sw->name) &&
+	    !copy_file(sw->tmp, sw->name))
+		return -1;		/* the text is still in sw->tmp */
+	DeleteFile((CONST_STRPTR)sw->tmp);
+	return 0;
 }
 
 /* the first word of a script line: "If", "EndIf", ... */
@@ -418,7 +478,7 @@ edit_startup(const char *name, int mode)
 	LONG len;
 	char *buf = read_file(name, &len), *p, *e, backup[96];
 	UBYTE *mark;
-	BPTR fh;
+	struct safewrite sw;
 	int changed = 0, line;
 
 	if (buf == NULL)
@@ -442,10 +502,11 @@ edit_startup(const char *name, int mode)
 		FreeVec(buf);
 		return 0;
 	}
+	/* the first backup is the original: never overwritten, and no change
+	   without it */
 	cat(backup, name, ".amibsdnet-backup", sizeof(backup));
-	if (!exists(backup))
-		copy_file(name, backup);
-	if ((fh = Open((CONST_STRPTR)name, MODE_NEWFILE)) == 0) {
+	if ((!exists(backup) && !copy_file(name, backup)) ||
+	    sw_open(&sw, name) != 0) {
 		FreeVec(mark);
 		FreeVec(buf);
 		return -1;
@@ -457,37 +518,43 @@ edit_startup(const char *name, int mode)
 			;
 		n = e - p + (e < buf + len);	/* with the line feed */
 		if (mode == 2 && m)
-			Write(fh, p + MARKLEN, n - MARKLEN);
+			sw_write(&sw, p + MARKLEN, n - MARKLEN);
 		else if (mode != 2 && m) {
 			if (mode == 0) {
-				Write(fh, (APTR)MARK, MARKLEN);
-				Write(fh, p, n);
+				sw_write(&sw, MARK, MARKLEN);
+				sw_write(&sw, p, n);
 			}
 		} else
-			Write(fh, p, n);
+			sw_write(&sw, p, n);
 	}
-	Close(fh);
 	FreeVec(mark);
 	FreeVec(buf);
-	return changed;
+	return sw_close(&sw) == 0 ? changed : -1;
 }
+
+#define	MAXITEMS	16
 
 static int
 move_wbstartup(int mode)
 {
 	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
-	char names[16][108], path[160];
+	char (*names)[108], path[160];
 	int n = 0, i, rv = 0;
 	unsigned s, j;
 	BPTR l;
 
 	if (fib == NULL)
 		return -1;
+	/* big buffers off the stack: NetCtrl may run on a small one */
+	if ((names = AllocVec(MAXITEMS * 108, MEMF_ANY)) == NULL) {
+		FreeDosObject(DOS_FIB, fib);
+		return -1;
+	}
 	/* collect first: renaming while scanning confuses ExNext() */
 	if ((l = Lock((CONST_STRPTR)(mode == 2 ? PARKING "/WBStartup" :
 	    "SYS:WBStartup"), ACCESS_READ)) != 0) {
 		if (Examine(l, fib))
-			while (ExNext(l, fib) && n < 16)
+			while (ExNext(l, fib) && n < MAXITEMS)
 				for (s = 0; s < NSTACKS; s++)
 					for (j = 0; stacks[s].wbstartup[j]; j++)
 						if ((mode == 2 || stacks[s].found) &&
@@ -516,7 +583,171 @@ move_wbstartup(int mode)
 				rv = -1;
 		}
 	}
+	FreeVec(names);
 	return rv < 0 ? -1 : n;
+}
+
+/* ------------------------------------------------------------------------
+ * going back (a trial switch that did not connect, or NetCtrl FALLBACK)
+ */
+
+#define	OWN_MARK	"; [AmiBSDNet-off] "
+#define	OWN_MARKLEN	18
+
+/* comment out the lines inside ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" */
+static int
+own_startup_off(void)
+{
+	static const char *name = "S:User-Startup";
+	LONG len;
+	char *buf = read_file(name, &len), *p, *e;
+	struct safewrite sw;
+	int inside = 0;
+
+	if (buf == NULL)
+		return -1;
+	if (sw_open(&sw, name) != 0) {
+		FreeVec(buf);
+		return -1;
+	}
+	for (p = buf; p < buf + len; p = e + 1) {
+		int n;
+
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		n = e - p + (e < buf + len);
+		if (starts_nocase(p, ";END AmiBSDNet"))
+			inside = 0;
+		if (inside && *p != ';')
+			sw_write(&sw, OWN_MARK, OWN_MARKLEN);
+		sw_write(&sw, p, n);
+		if (starts_nocase(p, ";BEGIN AmiBSDNet"))
+			inside = 1;
+	}
+	FreeVec(buf);
+	return sw_close(&sw);
+}
+
+/* copy every file of dir "from" into dir "to" (created if needed) */
+static int
+copy_dir(const char *from, const char *to)
+{
+	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
+	char (*names)[64], a[160], b[160];
+	int n = 0, i, rv = 0;
+	BPTR l;
+
+	if (fib == NULL)
+		return -1;
+	if ((names = AllocVec(40 * 64, MEMF_ANY)) == NULL) {
+		FreeDosObject(DOS_FIB, fib);
+		return -1;
+	}
+	if ((l = Lock((CONST_STRPTR)from, ACCESS_READ)) != 0) {
+		if (Examine(l, fib))
+			while (ExNext(l, fib) && n < 40)
+				if (fib->fib_DirEntryType < 0)
+					cat(names[n++], (const char *)
+					    fib->fib_FileName, "", 64);
+		UnLock(l);
+	}
+	FreeDosObject(DOS_FIB, fib);
+	if ((l = CreateDir((CONST_STRPTR)to)) != 0)
+		UnLock(l);
+	for (i = 0; i < n; i++) {
+		cat(a, from, "/", sizeof(a));
+		cat(a, a, names[i], sizeof(a));
+		cat(b, to, "/", sizeof(b));
+		cat(b, b, names[i], sizeof(b));
+		if (!copy_file(a, b))
+			rv = -1;
+	}
+	FreeVec(names);
+	return rv;
+}
+
+/* does S:User-Startup start AmiBSDNet (an active C:AmiBSDNet line)? */
+int
+otherstacks_self_atboot(void)
+{
+	LONG len;
+	char *buf = read_file("S:User-Startup", &len), *p, *e;
+	int found = 0;
+
+	if (buf == NULL)
+		return 0;
+	for (p = buf; p < buf + len && !found; p = e + 1) {
+		const char *q = p;
+
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		while (q < e && (*q == ' ' || *q == '\t'))
+			q++;
+		if (e - q >= 11 && starts_nocase(q, "C:AmiBSDNet") &&
+		    (e - q == 11 || q[11] == ' ' || q[11] == '\t' ||
+		    q[11] == '\r'))
+			found = 1;
+	}
+	FreeVec(buf);
+	return found;
+}
+
+int
+otherstacks_fallback(char *msg, int size)
+{
+	APTR old;
+	int rv, tries;
+	BPTR l;
+
+	/*
+	 * At boot the startup scripts may still be running (and so cannot be
+	 * replaced): try again for up to two minutes.
+	 */
+	for (tries = 0; tries < 24; tries++) {
+		rv = otherstacks_apply(OTHERS_RESTORE);
+		old = quiet();
+		if (own_startup_off() != 0)
+			rv = -1;
+		loud(old);
+		if (rv == 0)
+			break;
+		Delay(250);
+	}
+	old = quiet();
+	/* the status icon is not wanted without the stack */
+	park("SYS:WBStartup/AmiBSDNetStatus", "AmiBSDNet", "AmiBSDNetStatus",
+	    0);
+	park("SYS:WBStartup/AmiBSDNetStatus.info", "AmiBSDNet",
+	    "AmiBSDNetStatus.info", 0);
+	/* the Wi-Fi driver and firmware the installer replaced */
+	if (exists("DEVS:Networks/wifipi.device.old")) {
+		DeleteFile((CONST_STRPTR)"DEVS:Networks/wifipi.device.amibsdnet");
+		Rename((CONST_STRPTR)"DEVS:Networks/wifipi.device",
+		    (CONST_STRPTR)"DEVS:Networks/wifipi.device.amibsdnet");
+		if (!Rename((CONST_STRPTR)"DEVS:Networks/wifipi.device.old",
+		    (CONST_STRPTR)"DEVS:Networks/wifipi.device"))
+			rv = -1;
+	}
+	if (exists("DEVS:Firmware.old") &&
+	    copy_dir("DEVS:Firmware.old", "DEVS:Firmware") != 0)
+		rv = -1;
+	/* T: is gone after the reboot: keep the logs */
+	if ((l = CreateDir((CONST_STRPTR)"SYS:Storage/AmiBSDNet-Logs")) != 0)
+		UnLock(l);
+	copy_file("T:AmiBSDNet.log", "SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log");
+	copy_file("T:WirelessManager.log",
+	    "SYS:Storage/AmiBSDNet-Logs/WirelessManager.log");
+	DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+	loud(old);
+	cat(msg, rv == 0 ? "The previous TCP/IP stack and Wi-Fi driver are "
+	    "back, and AmiBSDNet\nis no longer started at boot. Reboot to use "
+	    "them.\n\nAmiBSDNet's logs were saved in "
+	    "SYS:Storage/AmiBSDNet-Logs." :
+	    "Not everything could be put back; see \"NetCtrl CHECK\".\n"
+	    "AmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs.", "",
+	    size);
+	return rv;
 }
 
 int
@@ -538,7 +769,10 @@ otherstacks_apply(int mode)
 		if (exists(PARKING "/Libs/bsdsocket.library") &&
 		    !exists("LIBS:bsdsocket.library") &&
 		    !Rename((CONST_STRPTR)PARKING "/Libs/bsdsocket.library",
-		    (CONST_STRPTR)"LIBS:bsdsocket.library"))
+		    (CONST_STRPTR)"LIBS:bsdsocket.library") &&
+		    !(copy_file(PARKING "/Libs/bsdsocket.library",
+		    "LIBS:bsdsocket.library") &&
+		    DeleteFile((CONST_STRPTR)PARKING "/Libs/bsdsocket.library")))
 			rv = -1;
 	} else if (park("LIBS:bsdsocket.library", "Libs", "bsdsocket.library",
 	    mode == 1) < 0)
