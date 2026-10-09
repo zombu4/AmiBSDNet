@@ -20,6 +20,7 @@
 
 #include <amibsdnet/control.h>
 #include <amibsdnet/wm.h>
+#include <amibsdnet/devopen.h>
 
 #include "statustool.h"
 
@@ -161,34 +162,67 @@ make_label(struct net *n)
 	n->node.ln_Name = n->label;
 }
 
-/* scan; returns the number of networks or -1 */
+#define	SCAN_FAILED	(-1)
+#define	SCAN_CANCELLED	(-2)
+#define	SCAN_TIMEOUT	(-3)
+#define	SCAN_SECONDS	30
+
+/*
+ * Scan for networks; returns their number or SCAN_*.  The scan runs
+ * asynchronously (the driver answers only when the radio has finished,
+ * and some never do) while cancelled() keeps the window alive and says
+ * whether the user gave up.  A request the driver does not give back
+ * after AbortIO() is left to it, with its port, pool and the open
+ * device: freeing memory the driver may still write to would crash.
+ */
 static int
-scan(const char *device, ULONG unit)
+scan(const char *device, ULONG unit, int (*cancelled)(void))
 {
 	struct MsgPort *port;
 	struct IOSana2Req *req;
 	APTR pool;
-	int rv = -1;
+	int rv = SCAN_FAILED, ticks, stuck = 0;
 	ULONG i;
 
 	nnets = 0;
 	NewList(&netlist);
 	if ((port = CreateMsgPort()) == NULL)
-		return -1;
+		return SCAN_FAILED;
 	req = (struct IOSana2Req *)CreateIORequest(port, sizeof(*req));
 	if (req == NULL) {
 		DeleteMsgPort(port);
-		return -1;
+		return SCAN_FAILED;
 	}
 	req->ios2_BufferManagement = bufftags;
-	if (OpenDevice((CONST_STRPTR)device, unit, (struct IORequest *)req,
-	    0) == 0) {
+	if (amibsdnet_open_sana(device, unit, (struct IORequest *)req, 0) == 0) {
 		if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR, 8192, 2048))) {
 			req->ios2_Req.io_Command = S2_GETNETWORKS;
 			req->ios2_Data = pool;
 			req->ios2_StatData = NULL;
 			req->ios2_DataLength = 0;
-			if (DoIO((struct IORequest *)req) == 0) {
+			SendIO((struct IORequest *)req);
+			for (ticks = 0; !CheckIO((struct IORequest *)req);
+			    ticks += 5) {
+				int c = cancelled();
+
+				if (c || ticks >= SCAN_SECONDS * 50) {
+					rv = c ? SCAN_CANCELLED : SCAN_TIMEOUT;
+					AbortIO((struct IORequest *)req);
+					for (ticks = 0; ticks < 100 &&
+					    !CheckIO((struct IORequest *)req);
+					    ticks += 5)
+						Delay(5);
+					stuck = !CheckIO((struct IORequest *)req);
+					break;
+				}
+				Delay(5);
+			}
+			if (stuck) {
+				/* the driver keeps the request: leave it be */
+				return rv;
+			}
+			WaitIO((struct IORequest *)req);
+			if (rv == SCAN_FAILED && req->ios2_Req.io_Error == 0) {
 				struct TagItem **lists = req->ios2_StatData;
 
 				for (i = 0; lists && i < req->ios2_DataLength; i++) {
@@ -294,16 +328,47 @@ set_list(struct List *l)
 	GT_SetGadgetAttrsA(g_list, win, NULL, t);
 }
 
+/* during a scan: keep the window answering; Close, Esc or the close
+   gadget stop the scan (and close the window) */
+static int scan_quit;
+
+static int
+scan_cancelled(void)
+{
+	struct IntuiMessage *im;
+
+	while ((im = GT_GetIMsg(win->UserPort)) != NULL) {
+		ULONG cls = im->Class;
+		UWORD code = im->Code;
+		struct Gadget *gad = (struct Gadget *)im->IAddress;
+
+		GT_ReplyIMsg(im);
+		if (cls == IDCMP_CLOSEWINDOW ||
+		    (cls == IDCMP_VANILLAKEY && (code == 27 || code == 'l' ||
+		    code == 'L')) ||
+		    (cls == IDCMP_GADGETUP && gad->GadgetID == GID_CLOSE))
+			scan_quit = 1;
+		else if (cls == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(win);
+			GT_EndRefresh(win, TRUE);
+		}
+	}
+	return scan_quit;
+}
+
 static void
 do_scan(const struct NetCtrlIface *ifc)
 {
 	int n;
 
-	set_status("Scanning...");
+	set_status("Scanning... (Close stops it)");
 	set_list((struct List *)~0);
-	n = scan(ifc->device, ifc->unit);
+	n = scan(ifc->device, ifc->unit, scan_cancelled);
 	set_list(&netlist);
-	set_status(n < 0 ? "The driver cannot scan" :
+	set_status(n == SCAN_CANCELLED ? "Scan stopped" :
+	    n == SCAN_TIMEOUT ? "The scan did not finish (is the Wi-Fi driver "
+	    "working?)" :
+	    n < 0 ? "The driver cannot scan" :
 	    n == 0 ? "No networks found" : "Choose a network and Connect");
 }
 
@@ -473,9 +538,10 @@ wifi_window(const struct NetCtrlIface *ifc)
 			goto freegads;
 	}
 	GT_RefreshWindow(win, NULL);
+	scan_quit = 0;
 	do_scan(ifc);
 
-	while (!quit) {
+	while (!quit && !scan_quit) {
 		WaitPort(win->UserPort);
 		while ((im = GT_GetIMsg(win->UserPort)) != NULL) {
 			ULONG cls = im->Class;

@@ -21,6 +21,7 @@
 #include "../host/sana2.h"
 #include <amibsdnet/probe.h>
 #include <amibsdnet/control.h>
+#include <amibsdnet/devopen.h>
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
@@ -109,8 +110,7 @@ probe_one(const char *name, ULONG unit)
 		return -1;
 	}
 	req->ios2_BufferManagement = bufftags;
-	if (OpenDevice((CONST_STRPTR)name, unit, (struct IORequest *)req,
-	    0) == 0) {
+	if (amibsdnet_open_sana(name, unit, (struct IORequest *)req, 0) == 0) {
 		struct IOStdReq *io = (struct IOStdReq *)req;
 		UWORD *cmd;
 

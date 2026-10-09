@@ -250,6 +250,7 @@ iface_bringup(struct iface *ifc)
 		    amiga_rump_errno());
 		return;
 	}
+	ifc->attached = 1;
 	{
 		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
 
@@ -407,6 +408,8 @@ stack_reconfigure(void)
 	for (i = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 
+		if (!ifc->attached)	/* its driver never opened */
+			continue;
 		P("%s: removing\n", ifc->name);
 		if (ifc->addr)
 			rump_amibsdnet_ifdeladdr4(ifc->name, ifc->addr);

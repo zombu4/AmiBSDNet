@@ -23,11 +23,13 @@
 #include <proto/dos.h>
 
 #include <amibsdnet/wm.h>
+#include <amibsdnet/devopen.h>
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
 
 #define	WM_COMMAND	"C:WirelessManager"
+#define	WM_LOG		"T:WirelessManager.log"
 #define	PREFS_ENV	"ENV:Sys/Wireless.prefs"
 #define	PREFS_ENVARC	"ENVARC:Sys/Wireless.prefs"
 
@@ -140,20 +142,30 @@ wm_stop(void)
 	return wm_running() ? -1 : 0;
 }
 
+/*
+ * WirelessManager's messages go to T:WirelessManager.log (VERBOSE if the
+ * variable AmiBSDNet/Debug is set); the file stays readable while it runs.
+ */
 int
 wm_start(const char *device, unsigned long unit)
 {
-	char cmd[160], *p = cmd;
+	char cmd[200], devarg[96], dbg[4], *p = cmd;
 	const char *s;
 	BPTR in, out;
 
 	if (!wm_installed())
 		return -1;
+	/* a driver not yet in memory is opened from DEVS:Networks */
+	amibsdnet_device_arg(SysBase, device, devarg, sizeof(devarg));
 	for (s = WM_COMMAND " \""; *s; )
 		*p++ = *s++;
-	for (s = device; *s && p < cmd + 120; )
+	for (s = devarg; *s && p < cmd + 140; )
 		*p++ = *s++;
 	*p++ = '"';
+	if (GetVar((CONST_STRPTR)"AmiBSDNet/Debug", (STRPTR)dbg, sizeof(dbg),
+	    0) >= 0)
+		for (s = " VERBOSE"; *s; )
+			*p++ = *s++;
 	if (unit) {
 		char tmp[12];
 		int i = 0;
@@ -169,7 +181,12 @@ wm_start(const char *device, unsigned long unit)
 	}
 	*p = '\0';
 	in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
-	out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+	if ((out = Open((CONST_STRPTR)WM_LOG, MODE_NEWFILE)) != 0) {
+		Close(out);
+		out = Open((CONST_STRPTR)WM_LOG, MODE_READWRITE);
+	}
+	if (out == 0)
+		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 	if (SystemTags((CONST_STRPTR)cmd, SYS_Asynch, TRUE, SYS_Input, in,
 	    SYS_Output, out, NP_StackSize, 65536, TAG_DONE) != 0) {
 		if (in) Close(in);

@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.2")
+(set #ver "0.3")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))

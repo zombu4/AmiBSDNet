@@ -1,4 +1,4 @@
-AmiBSDNet 0.2
+AmiBSDNet 0.3
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -85,7 +85,14 @@ Wi-Fi interface if it is not already running. The installer asks for
 the network name and passphrase; to change networks later, double-click
 the status icon and choose Wi-Fi...: the window lists the networks in
 range (strongest first), and Connect stores the network, restarts
-WirelessManager and fetches a new address.
+WirelessManager and fetches a new address. A scan can be stopped with
+Close; it gives up by itself after 30 seconds.
+
+The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
+the network; DHCP starts as soon as it has. WirelessManager's messages
+are in T:WirelessManager.log (more of them after "SetEnv AmiBSDNet/Debug
+1" and a reboot). If the status window says "DRIVER NOT FOUND", the
+driver named in the settings is not in DEVS:Networks.
 
 The status icon
 ---------------

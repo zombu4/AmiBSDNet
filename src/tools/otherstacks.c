@@ -44,9 +44,9 @@ static struct stack stacks[] = {
 	{ "Roadshow",
 	  { "C:AddNetInterface", "C:RoadshowControl", "S:Network-Startup",
 	    "DEVS:NetInterfaces", NULL },
-	  { "Network-Startup", "AddNetInterface", "RoadshowControl",
-	    "NetLogViewer", NULL },
-	  { "NetLogViewer", NULL } },
+	  { "Network-Startup", "AddNetInterface", "Roadshow", "NetLogViewer",
+	    NULL },
+	  { "NetLogViewer", "Roadshow", NULL } },
 	{ "Miami",
 	  { "Miami:", NULL },
 	  { "Miami", NULL },
@@ -67,6 +67,17 @@ static const char *startup_files[] = {
 };
 
 static int disk_bsdsocket;
+
+/* if set, told about every match (NetCtrl CHECK lists them) */
+void (*otherstacks_say)(const char *where, const char *what, int len);
+
+static void
+say(const char *where, const char *what, int len)
+{
+
+	if (otherstacks_say)
+		otherstacks_say(where, what, len);
+}
 
 /* ------------------------------------------------------------------------ */
 
@@ -207,9 +218,14 @@ scan_wbstartup(int mark)
 					for (j = 0; stacks[i].wbstartup[j]; j++)
 						if (starts_nocase((const char *)
 						    fib->fib_FileName,
-						    stacks[i].wbstartup[j]) && mark)
+						    stacks[i].wbstartup[j]) && mark) {
 							stacks[i].found =
 							    stacks[i].atboot = 1;
+							say("SYS:WBStartup",
+							    (const char *)
+							    fib->fib_FileName, -1);
+							break;
+						}
 		UnLock(l);
 	}
 	FreeDosObject(DOS_FIB, fib);
@@ -227,8 +243,10 @@ otherstacks_check(char *names, int size)
 	for (i = 0; i < NSTACKS; i++) {
 		stacks[i].found = stacks[i].atboot = 0;
 		for (j = 0; stacks[i].files[j]; j++)
-			if (exists(stacks[i].files[j]))
+			if (exists(stacks[i].files[j])) {
 				stacks[i].found = 1;
+				say("installed", stacks[i].files[j], -1);
+			}
 	}
 	for (i = 0; startup_files[i]; i++) {
 		if ((buf = read_file(startup_files[i], &len)) == NULL)
@@ -238,13 +256,16 @@ otherstacks_check(char *names, int size)
 
 			for (e = p; e < buf + len && *e != '\n'; e++)
 				;
-			if ((s = line_stack(p, e - p, 0)) != NULL)
+			if ((s = line_stack(p, e - p, 0)) != NULL) {
 				s->found = s->atboot = 1;
+				say(startup_files[i], p, e - p);
+			}
 		}
 		FreeVec(buf);
 	}
 	scan_wbstartup(1);
-	disk_bsdsocket = exists("LIBS:bsdsocket.library");
+	if ((disk_bsdsocket = exists("LIBS:bsdsocket.library")) != 0)
+		say("installed", "LIBS:bsdsocket.library", -1);
 	loud(old);
 
 	names[0] = '\0';

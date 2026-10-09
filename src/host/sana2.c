@@ -18,10 +18,13 @@
 #include <exec/memory.h>
 #include <exec/ports.h>
 #include <exec/io.h>
+#include <exec/errors.h>
 #include <exec/execbase.h>
 #include <dos/dos.h>
 #include <utility/tagitem.h>
 #include <proto/exec.h>
+
+#include <amibsdnet/devopen.h>
 
 #include "rumpuser_amiga.h"
 #include "sana2.h"
@@ -216,7 +219,11 @@ queue_event(struct virtif_user *viu, struct MsgPort *port)
 	struct s2req *r = viu->evreq;
 	ULONG mask;
 
-	if (viu->link)
+	if (viu->wireless && viu->events == 2)
+		/* association, not the unit's online state (which drivers
+		   report at once and which says nothing about the radio) */
+		mask = viu->link ? S2EVENT_DISCONNECT : S2EVENT_CONNECT;
+	else if (viu->link)
 		mask = S2EVENT_OFFLINE | (viu->events == 2 ? S2EVENT_DISCONNECT : 0);
 	else
 		mask = S2EVENT_ONLINE | (viu->events == 2 ? S2EVENT_CONNECT : 0);
@@ -388,10 +395,12 @@ sana_iothread(void *arg)
 	if (base == NULL)
 		goto fail;
 	base->ios2_BufferManagement = s2_buffertags;
-	if (OpenDevice((CONST_STRPTR)viu->devname, viu->unit,
+	/* drivers live in DEVS:Networks: tries "Networks/<name>" as well */
+	if (amibsdnet_open_sana(viu->devname, viu->unit,
 	    (struct IORequest *)base, 0) != 0) {
-		amiga_rump_printf("sana: cannot open %s unit %lu (error %d)\n",
-		    viu->devname, viu->unit, base->ios2_Req.io_Error);
+		amiga_rump_printf("sana: cannot open %s unit %lu (error %d; "
+		    "not found in DEVS:Networks?)\n", viu->devname, viu->unit,
+		    base->ios2_Req.io_Error);
 		goto fail;
 	}
 	opened = 1;
@@ -416,6 +425,22 @@ sana_iothread(void *arg)
 	base->ios2_Req.io_Command = S2_ONLINE;
 	DoIO((struct IORequest *)base);
 	viu->link = 1;
+	/*
+	 * Wi-Fi: the link is the association with the access point, which
+	 * WirelessManager makes later.  S2_GETSIGNALQUALITY only succeeds
+	 * while associated (drivers without it count as linked).
+	 */
+	if (viu->wireless) {
+		LONG sq[2];
+
+		base->ios2_Req.io_Command = S2_GETSIGNALQUALITY;
+		base->ios2_StatData = sq;
+		if (DoIO((struct IORequest *)base) != 0 &&
+		    base->ios2_Req.io_Error != IOERR_NOCMD &&
+		    base->ios2_Req.io_Error != S2ERR_NOT_SUPPORTED)
+			viu->link = 0;
+		base->ios2_StatData = NULL;
+	}
 
 	for (t = 0; t < NRXTYPES; t++) {
 		for (i = 0; i < NRX_PER_TYPE; i++) {
