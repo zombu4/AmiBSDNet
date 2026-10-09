@@ -350,6 +350,59 @@ amiga_rump_vprintf(const char *fmt, va_list ap)
 	ReleaseSemaphore(&logsem);
 }
 
+/*
+ * Format with Amiga-style arguments: a packed array of LONGs (RawDoFmt /
+ * vsyslog() convention).  %s %c %d %i %u %x %p %%, 'l' accepted.
+ */
+void
+amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
+{
+	ObtainSemaphore(&logsem);
+	for (; *fmt; fmt++) {
+		const char *str;
+		LONG v;
+
+		if (*fmt != '%') {
+			log_putc_locked(*fmt);
+			continue;
+		}
+		fmt++;
+		while (*fmt == 'l')
+			fmt++;
+		switch (*fmt) {
+		case 'd':
+		case 'i':
+			v = args ? *args++ : 0;
+			fmt_num(v < 0 ? -(unsigned long long)v : v, 10, v < 0, 0,
+			    ' ');
+			break;
+		case 'u':
+		case 'x':
+		case 'p':
+			v = args ? *args++ : 0;
+			fmt_num((ULONG)v, *fmt == 'u' ? 10 : 16, 0, 0, ' ');
+			break;
+		case 'c':
+			log_putc_locked(args ? (int)*args++ : '?');
+			break;
+		case 's':
+			str = args ? (const char *)*args++ : NULL;
+			if (str == NULL)
+				str = "(null)";
+			while (*str)
+				log_putc_locked(*str++);
+			break;
+		case '\0':
+			fmt--;
+			break;
+		default:
+			log_putc_locked(*fmt);
+			break;
+		}
+	}
+	ReleaseSemaphore(&logsem);
+}
+
 void
 amiga_rump_printf(const char *fmt, ...)
 {

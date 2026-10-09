@@ -19,8 +19,12 @@ Early development.
       (`src/test/rumptest.c`, run in WinUAE)
 - [x] SANA-II network interface `sana0` on any SANA-II driver: TCP and
       UDP/DNS to the internet pass in WinUAE (`src/test/nettest.c`)
-- [ ] `bsdsocket.library` so existing Amiga network software works
-- [ ] Starts at boot; configuration (DHCP, static, DNS)
+- [x] `bsdsocket.library` (AmiTCP/Roadshow API, 66 of 113 calls; rest
+      return ENOSYS): sockets, WaitSelect, break signals, DNS resolver,
+      getaddrinfo, socket passing (`src/test/socktest.c` passes)
+- [x] Stack program `AmiBSDNet`: detaches, reads a config file, DHCP
+      client with renewal, static addresses, routes, DNS
+- [ ] Starts at boot (User-Startup), offline/online control
 - [ ] Workbench status AppIcon / Commodity
 - [ ] Installer script for Workbench 3.2+
 
@@ -37,6 +41,10 @@ python -I tools/run_emu.py build/rumptest
 
 tools/link_test.sh src/test/nettest.c build/nettest
 python -I tools/run_emu.py build/nettest --net --echo 7777
+
+tools/build_stack.sh                   # -> build/AmiBSDNet
+tools/build_amiga.sh src/test/socktest.c build/socktest
+python -I tools/run_emu.py build/socktest --stack tests/slirp.conf --echo 7777
 ```
 
 `tools/run_emu.py` boots WinUAE headless with its built-in AROS Kickstart
@@ -48,7 +56,10 @@ AmigaOS itself. ROMs are never part of this repository.
 | Path | Contents |
 |---|---|
 | `src/host/` | AmigaOS side: rumpuser hypercalls, debug crash handler |
-| `src/kern/` | kernel-side additions (m68k atomic operations) |
+| `src/kern/` | kernel-side additions (atomics, interface config, socket passing) |
+| `src/lib/` | bsdsocket.library |
+| `src/stack/` | the AmiBSDNet program: startup, configuration, DHCP |
+| `src/include/` | headers for AmiBSDNet's own client programs |
 | `src/test/` | test programs run in the emulator |
 | `tools/` | build driver, ELF-to-hunk converter, emulator runner |
 | `docs/` | design notes |

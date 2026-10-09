@@ -25,6 +25,7 @@
 
 #include "rumpuser_amiga.h"
 #include "sana2.h"
+#include "sana2_host.h"
 
 extern struct ExecBase *SysBase;
 
@@ -75,7 +76,14 @@ struct virtif_user {
 	struct s2req *txreqs[NTX];
 
 	volatile ULONG rx_packets, rx_dropped, tx_packets, tx_dropped;
+
+	/* host-side frame tap (DHCP client): sees frames before the kernel */
+	sana_tap_fn tap;
+	void	*tapctx;
+	struct virtif_user *next;	/* all interfaces */
 };
+
+static struct virtif_user *allviu;
 
 /* ------------------------------------------------------------------------
  * buffer management hooks: called by the driver with register arguments
@@ -197,17 +205,27 @@ is_zero_mac(const UBYTE *m)
 	return !(m[0] | m[1] | m[2] | m[3] | m[4] | m[5]);
 }
 
+static void rebuild_header(struct s2req *);
+
+/* give the host tap a look first; returns 1 if it consumed the frame */
+static int
+tapped(struct virtif_user *viu, struct s2req *r)
+{
+	sana_tap_fn fn = viu->tap;
+
+	if (fn == NULL)
+		return 0;
+	rebuild_header(r);
+	return fn(viu->tapctx, r->buf,
+	    ETHER_HDR_LEN + r->ios2.ios2_DataLength);
+}
+
 static void
-deliver(struct virtif_user *viu, struct s2req *r)
+rebuild_header(struct s2req *r)
 {
 	UBYTE *hdr = r->buf;
-	struct hiovec iov;
 	int i;
 
-	/*
-	 * Deliver as ONE contiguous frame: if_virt.c's VIF_DELIVERPKT
-	 * miscounts when given more than one iovec ("m_copyback failed").
-	 */
 	for (i = 0; i < ETHER_ADDR_LEN; i++) {
 		hdr[i] = r->ios2.ios2_DstAddr[i];
 		hdr[ETHER_ADDR_LEN + i] = r->ios2.ios2_SrcAddr[i];
@@ -218,8 +236,19 @@ deliver(struct virtif_user *viu, struct s2req *r)
 			hdr[i] = 0xff;
 	hdr[12] = (UBYTE)(r->ios2.ios2_PacketType >> 8);
 	hdr[13] = (UBYTE)r->ios2.ios2_PacketType;
+}
 
-	iov.iov_base = hdr;
+/*
+ * Deliver as ONE contiguous frame: if_virt.c's VIF_DELIVERPKT miscounts
+ * when given more than one iovec ("m_copyback failed").
+ */
+static void
+deliver(struct virtif_user *viu, struct s2req *r)
+{
+	struct hiovec iov;
+
+	rebuild_header(r);
+	iov.iov_base = r->buf;
 	iov.iov_len = ETHER_HDR_LEN + r->ios2.ios2_DataLength;
 
 	rumpuser_component_schedule(NULL);
@@ -313,7 +342,8 @@ sana_iothread(void *arg)
 		/* completed requests */
 		while ((r = (struct s2req *)GetMsg(ioport)) != NULL) {
 			if (r->kind == REQ_RX) {
-				if (r->ios2.ios2_Req.io_Error == 0)
+				if (r->ios2.ios2_Req.io_Error == 0 &&
+				    !tapped(viu, r))
 					deliver(viu, r);
 				else
 					viu->rx_dropped++;
@@ -406,6 +436,10 @@ rumpcomp_sana_create(const char *linkstr, struct virtif_sc *sc,
 
 	CopyMem(viu->mac, enaddr, ETHER_ADDR_LEN);
 	*viup = viu;
+	Forbid();
+	viu->next = allviu;
+	allviu = viu;
+	Permit();
 	return 0;
 }
 
@@ -425,6 +459,17 @@ rumpcomp_sana_destroy(struct virtif_user *viu)
 	Signal(viu->iotask, SIGBREAKF_CTRL_C);
 	rumpuser_thread_join(viu->iothread);
 	rumpuser_component_schedule(cookie);
+	Forbid();
+	{
+		struct virtif_user **pp;
+
+		for (pp = &allviu; *pp; pp = &(*pp)->next)
+			if (*pp == viu) {
+				*pp = viu->next;
+				break;
+			}
+	}
+	Permit();
 	FreeVec(viu);
 }
 
@@ -485,4 +530,69 @@ rumpcomp_sana_send(struct virtif_user *viu, struct hiovec *iov, size_t iovlen)
 		r->ios2.ios2_Req.io_Command = CMD_WRITE;
 
 	PutMsg(port, &r->ios2.ios2_Req.io_Message);
+}
+
+/* ------------------------------------------------------------------------
+ * host-side access (sana2_host.h)
+ */
+
+static int
+name_eq(const char *a, const char *b)
+{
+
+	while (*a && *a == *b)
+		a++, b++;
+	return *a == *b;
+}
+
+struct virtif_user *
+sana_find(const char *devname, ULONG unit)
+{
+	struct virtif_user *v;
+
+	Forbid();
+	for (v = allviu; v; v = v->next)
+		if (v->unit == unit && name_eq(v->devname, devname))
+			break;
+	Permit();
+	return v;
+}
+
+const UBYTE *
+sana_macaddr(struct virtif_user *viu)
+{
+
+	return viu->mac;
+}
+
+void
+sana_set_tap(struct virtif_user *viu, sana_tap_fn fn, void *ctx)
+{
+
+	Forbid();
+	viu->tapctx = ctx;
+	viu->tap = fn;
+	Permit();
+}
+
+/* send a complete Ethernet frame bypassing the kernel */
+void
+sana_raw_send(struct virtif_user *viu, const UBYTE *frame, ULONG len)
+{
+	struct hiovec iov;
+
+	iov.iov_base = (void *)frame;
+	iov.iov_len = len;
+	rumpcomp_sana_send(viu, &iov, 1);
+}
+
+void
+sana_stats(struct virtif_user *viu, ULONG *rx, ULONG *tx, ULONG *rxdrop,
+    ULONG *txdrop)
+{
+
+	*rx = viu->rx_packets;
+	*tx = viu->tx_packets;
+	*rxdrop = viu->rx_dropped;
+	*txdrop = viu->tx_dropped;
 }
