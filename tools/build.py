@@ -26,7 +26,7 @@ NM = os.path.join(TC, "m68k-amiga-elf-nm.exe")
 OBJCOPY = os.path.join(TC, "m68k-amiga-elf-objcopy.exe")
 AR = os.path.join(TC, "m68k-amiga-elf-ar.exe")
 
-CPU = os.environ.get("RUMP_CPU", "-m68040")
+CPU = os.environ.get("RUMP_CPU", "-m68020-60")
 
 # ---------------------------------------------------------------------------
 # minimal bmake reader

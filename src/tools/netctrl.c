@@ -1,7 +1,10 @@
 /*
  * NetCtrl: control the AmiBSDNet stack from the Shell.
  *
- *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG]
+ *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] [TIMEOUT=<seconds>]
+ *
+ * WAIT returns when the network is up (or fails after TIMEOUT seconds,
+ * default 30), for scripts that need the network.
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -63,14 +66,16 @@ _start(void)
 {
 	struct NetCtrlMsg *m;
 	struct RDArgs *rda;
-	LONG arg[1] = { 0 };
+	LONG arg[2] = { 0, 0 };
+	LONG timeout = 30;
 	ULONG cmd = NETCTRL_STATUS;
 	int rc = RETURN_OK;
 
 	SysBase = *(struct ExecBase **)4;
 	if ((DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37)) == NULL)
 		return RETURN_FAIL;
-	if ((rda = ReadArgs((CONST_STRPTR)"COMMAND", arg, NULL)) == NULL) {
+	if ((rda = ReadArgs((CONST_STRPTR)"COMMAND,TIMEOUT/K/N", arg, NULL)) ==
+	    NULL) {
 		PrintFault(IoErr(), (CONST_STRPTR)"NetCtrl");
 		rc = RETURN_ERROR;
 		goto out;
@@ -82,12 +87,16 @@ _start(void)
 		else if (streq(c, "ONLINE")) cmd = NETCTRL_ONLINE;
 		else if (streq(c, "OFFLINE")) cmd = NETCTRL_OFFLINE;
 		else if (streq(c, "RECONFIG")) cmd = NETCTRL_RECONFIG;
+		else if (streq(c, "WAIT")) cmd = 0;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
-			    "[STATUS|ONLINE|OFFLINE|RECONFIG]\n");
+			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT] "
+			    "[TIMEOUT=<seconds>]\n");
 			rc = RETURN_ERROR;
 		}
 	}
+	if (arg[1])
+		timeout = *(LONG *)arg[1];
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
@@ -96,7 +105,22 @@ _start(void)
 		rc = RETURN_FAIL;
 		goto out;
 	}
-	if (netctrl_send(cmd, m) != 0) {
+	if (cmd == 0) {
+		/* WAIT: poll until online (the stack may still be starting) */
+		LONG ticks;
+
+		for (ticks = 0; ticks <= timeout * 50; ticks += 25) {
+			if (netctrl_send(NETCTRL_STATE, m) == 0 && m->online)
+				break;
+			if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C)
+				break;
+			Delay(25);
+		}
+		if (!m->online) {
+			PutStr((CONST_STRPTR)"NetCtrl: network not up\n");
+			rc = RETURN_WARN;
+		}
+	} else if (netctrl_send(cmd, m) != 0) {
 		PutStr((CONST_STRPTR)"NetCtrl: AmiBSDNet is not running\n");
 		rc = RETURN_WARN;
 	} else if (cmd == NETCTRL_STATUS) {

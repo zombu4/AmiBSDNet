@@ -5,8 +5,8 @@ from the **NetBSD 11 kernel's networking code**: the real BSD TCP/IP,
 IPv4 and IPv6 implementations rather than a reimplementation. It runs as
 a [rump kernel](https://man.netbsd.org/rumpkernel.7) hosted on Exec.
 
-Primary target: an Amiga with a PiStorm accelerator (Emu68, 68040 code,
-plenty of Fast RAM). Everything the stack allocates comes from Fast RAM.
+Primary target: an Amiga with a PiStorm accelerator (Emu68). The code runs
+on any 68020-68060; everything the stack allocates comes from Fast RAM.
 
 ## Status
 
@@ -25,9 +25,12 @@ Early development.
 - [x] Stack program `AmiBSDNet`: detaches, reads a config file, DHCP
       client with renewal, static addresses, routes, DNS
 - [x] Control port + `NetCtrl` (STATUS/ONLINE/OFFLINE/RECONFIG), `Ping`
-- [ ] Starts at boot (User-Startup)
-- [ ] Workbench status AppIcon / Commodity
-- [ ] Installer script for Workbench 3.2+
+- [x] Starts at boot from S:User-Startup without delaying it
+      (`NetCtrl WAIT` for scripts that need the network)
+- [x] Workbench status AppIcon + Exchange commodity (`AmiBSDNetStatus`)
+- [x] Installer script for Workbench 3.2+, generated icons, LHA/ZIP
+      packaging (`tools/package.py`)
+- [ ] Tested on real Kickstart/Workbench 3.2 and PiStorm hardware
 
 ## Building
 
@@ -46,6 +49,8 @@ python -I tools/run_emu.py build/nettest --net --echo 7777
 tools/build_stack.sh                   # -> build/AmiBSDNet
 tools/build_amiga.sh src/test/socktest.c build/socktest
 python -I tools/run_emu.py build/socktest --stack tests/slirp.conf --echo 7777
+
+python -I tools/package.py             # release build -> build/AmiBSDNet.lha
 ```
 
 `tools/run_emu.py` boots WinUAE headless with its built-in AROS Kickstart
@@ -61,7 +66,8 @@ AmigaOS itself. ROMs are never part of this repository.
 | `src/lib/` | bsdsocket.library |
 | `src/stack/` | the AmiBSDNet program: startup, configuration, DHCP |
 | `src/include/` | headers for AmiBSDNet's own client programs |
-| `src/tools/` | NetCtrl, Ping |
+| `src/tools/` | NetCtrl, Ping, AmiBSDNetStatus |
+| `dist/` | Installer script, user documentation, Aminet readme |
 | `src/test/` | test programs run in the emulator |
 | `tools/` | build driver, ELF-to-hunk converter, emulator runner |
 | `docs/` | design notes |

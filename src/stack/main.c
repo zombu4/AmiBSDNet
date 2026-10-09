@@ -72,9 +72,6 @@ stack_main(void)
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
 		goto fail;
 	}
-	if (stack_configure(cfgpath) != 0 &&
-	    stack_configure(FALLBACK_CONFIG) != 0)
-		P("AmiBSDNet: no configuration found, loopback only\n");
 	if (bsdsocket_create() == NULL) {
 		P("AmiBSDNet: cannot create bsdsocket.library\n");
 		goto fail;
@@ -82,8 +79,17 @@ stack_main(void)
 	if (control_init() != 0)
 		P("AmiBSDNet: no control port\n");
 	P("AmiBSDNet: bsdsocket.library ready\n");
+	/*
+	 * Let the Shell continue now: interface setup (DHCP may take a while
+	 * when no server answers) must not hold up the boot.
+	 * "NetCtrl WAIT" blocks until the network is up.
+	 */
 	startup_result = 0;
 	Signal(launcher, SIGBREAKF_CTRL_F);
+
+	if (stack_configure(cfgpath) != 0 &&
+	    stack_configure(FALLBACK_CONFIG) != 0)
+		P("AmiBSDNet: no configuration found, loopback only\n");
 
 	for (;;) {
 		ULONG s = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D |
@@ -115,23 +121,35 @@ _start(void)
 {
 	struct CommandLineInterface *cli;
 	struct RDArgs *rda;
+	struct Process *me;
+	struct Message *wbmsg = NULL;
 	LONG argv[3] = { 0, 0, 0 };
 	BPTR out;
 
 	SysBase = *(struct ExecBase **)4;
+	me = (struct Process *)SysBase->ThisTask;
+	if (me->pr_CLI == 0) {
+		/* started from Workbench */
+		WaitPort(&me->pr_MsgPort);
+		wbmsg = GetMsg(&me->pr_MsgPort);
+	}
 	DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37);
 	if (DOSBase == NULL)
 		return RETURN_FAIL;
-	out = Output();
+	out = wbmsg ? 0 : Output();
 
 	if (FindName(&SysBase->LibList, "bsdsocket.library")) {
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: a TCP/IP stack is "
 			    "already running\n");
 		CloseLibrary((struct Library *)DOSBase);
+		if (wbmsg) {
+			Forbid();
+			ReplyMsg(wbmsg);
+		}
 		return RETURN_WARN;
 	}
-	if ((rda = ReadArgs((CONST_STRPTR)"CONFIG/K,LOG/K,DEBUG/S", argv,
+	if (!wbmsg && (rda = ReadArgs((CONST_STRPTR)"CONFIG/K,LOG/K,DEBUG/S", argv,
 	    NULL)) != NULL) {
 		if (argv[0])
 			sb_copy(cfgpath, (const char *)argv[0], sizeof(cfgpath));
@@ -161,5 +179,14 @@ _start(void)
 	 */
 	if ((cli = Cli()) != NULL)
 		cli->cli_Module = 0;
+	if (wbmsg) {
+		/*
+		 * Workbench unloads a program when its startup message is
+		 * replied; keep it so the code stays resident, and leave this
+		 * launcher process sleeping.
+		 */
+		for (;;)
+			Wait(0x80000000UL);
+	}
 	return startup_result == 0 ? RETURN_OK : RETURN_FAIL;
 }

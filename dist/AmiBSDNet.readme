@@ -1,0 +1,35 @@
+Short:        NetBSD 11 TCP/IP stack for AmigaOS (bsdsocket)
+Author:       zombu4 (https://github.com/zombu4)
+Uploader:     zombu4 (https://github.com/zombu4)
+Type:         comm/tcp
+Version:      0.1
+Architecture: m68k-amigaos >= 3.1.0
+Requires:     68020+, Fast RAM, a SANA-II network driver
+Distribution: NoCD
+
+AmiBSDNet is a complete TCP/IP network stack for classic AmigaOS,
+built from the networking code of the NetBSD 11 kernel - the real BSD
+TCP/IP, IPv4 and IPv6 implementation - running on top of Exec.
+Applications use the standard bsdsocket.library (AmiTCP / Roadshow
+API), so existing network software works unchanged.
+
+- NetBSD 11 TCP/IP: modern TCP (CUBIC, SACK, window scaling), UDP,
+  ICMP, raw sockets, IPv4 and IPv6 in the kernel
+- works with any SANA-II network driver
+- DHCP client with lease renewal, or a fixed address
+- DNS resolver, hosts file, getaddrinfo()
+- runs entirely from Fast RAM; built for the PiStorm (Emu68), works on
+  any 68020-68060
+- Workbench status icon and Exchange commodity: online/offline at a
+  glance, double-click for details
+- NetCtrl (status, online/offline, wait for network) and Ping
+- Installer script for Workbench 3.2
+
+Install: double-click "Install" in the AmiBSDNet drawer.
+
+Source code and issue tracker: https://github.com/zombu4/AmiBSDNet
+
+Licence: AmiBSDNet's own code is under the PolyForm Noncommercial
+License 1.0.0 - free to use, modify and share for noncommercial
+purposes; it may not be sold or bundled into commercial products. The
+NetBSD code remains under NetBSD's BSD-style licence.
