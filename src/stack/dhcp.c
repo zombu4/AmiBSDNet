@@ -378,6 +378,7 @@ dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 struct renewer {
 	struct dhcpctx c;
 	struct lease l;
+	ULONG generation;
 };
 
 static void *
@@ -396,6 +397,10 @@ dhcp_renew_thread(void *arg)
 			amiga_host_sleep_ms(chunk * 1000);
 			t -= chunk;
 		}
+		if (r->generation != config_generation)
+			break;		/* reconfigured: a new renewer exists */
+		if (!r->c.ifc->up)
+			continue;	/* offline: try again next period */
 		sana_set_tap(r->c.viu, dhcp_tap, &r->c);
 		if (dhcp_acquire(&r->c, &l, &r->l) == 0) {
 			if (l.addr != r->l.addr)
@@ -406,6 +411,7 @@ dhcp_renew_thread(void *arg)
 			    r->c.ifc->name, "the current");
 		sana_set_tap(r->c.viu, NULL, NULL);
 	}
+	FreeVec(r);
 	return NULL;
 }
 
@@ -419,6 +425,7 @@ dhcp_configure(struct iface *ifc)
 		return -1;
 	r->c.ifc = ifc;
 	r->c.task = SysBase->ThisTask;
+	r->generation = config_generation;
 	if ((r->c.viu = sana_find(ifc->device, ifc->unit)) == NULL) {
 		FreeVec(r);
 		return -1;

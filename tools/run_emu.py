@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--net", action="store_true")
     ap.add_argument("--echo", type=int, default=0)
     ap.add_argument("--stack", default=None)
+    ap.add_argument("--file", action="append", default=[])
+    ap.add_argument("--cmd", action="append", default=[])
     ap.add_argument("--show", action="store_true")
     a = ap.parse_args()
 
@@ -108,8 +110,13 @@ def main():
             shutil.copy(a.stack, os.path.join(HD, "AmiBSDNet.conf"))
             f.write("DH0:AmiBSDNet CONFIG=DH0:AmiBSDNet.conf "
                     "LOG=DH0:rump.log\n")
-        f.write(f"DH0:{name} >DH0:stdout.txt\n"
-                "Echo >DH0:done \"rc=$RC\"\n")
+        for extra in a.file:
+            shutil.copy(extra, os.path.join(HD, os.path.basename(extra)))
+        f.write(f"DH0:{name} >DH0:stdout.txt\n")
+        for c in a.cmd:
+            f.write(f"Echo >>DH0:stdout.txt \"1> {c}\"\n"
+                    f"{c} >>DH0:stdout.txt\n")
+        f.write("Echo >DH0:done \"rc=$RC\"\n")
     cfg = os.path.join(EMU, "test.uae")
     with open(cfg, "w", newline="\n") as f:
         f.write(CONFIG.format(rom=a.rom, hd=HD))

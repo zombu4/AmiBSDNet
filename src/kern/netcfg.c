@@ -33,6 +33,7 @@ ssize_t	rump___sysimpl_write(int, const void *, size_t);
 int	rump_amibsdnet_ifcreate(const char *, const char *);
 int	rump_amibsdnet_ifaddr4(const char *, uint32_t, uint32_t);
 int	rump_amibsdnet_ifflags(const char *, int, int);
+int	rump_amibsdnet_ifdeladdr4(const char *, uint32_t);
 int	rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t);
 
 static int
@@ -96,6 +97,27 @@ rump_amibsdnet_ifaddr4(const char *ifname, uint32_t addr, uint32_t mask)
 	sin->sin_addr.s_addr = addr | ~mask;
 
 	rv = rump___sysimpl_ioctl(s, SIOCAIFADDR, &ifra);
+	rump___sysimpl_close(s);
+	return rv;
+}
+
+/* remove an IPv4 address from an interface */
+int
+rump_amibsdnet_ifdeladdr4(const char *ifname, uint32_t addr)
+{
+	struct ifreq ifr;
+	struct sockaddr_in *sin;
+	int s, rv;
+
+	if ((s = inet_socket()) < 0)
+		return -1;
+	memset(&ifr, 0, sizeof(ifr));
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	sin = (struct sockaddr_in *)&ifr.ifr_addr;
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = addr;
+	rv = rump___sysimpl_ioctl(s, SIOCDIFADDR, &ifr);
 	rump___sysimpl_close(s);
 	return rv;
 }

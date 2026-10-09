@@ -79,12 +79,18 @@ stack_main(void)
 		P("AmiBSDNet: cannot create bsdsocket.library\n");
 		goto fail;
 	}
+	if (control_init() != 0)
+		P("AmiBSDNet: no control port\n");
 	P("AmiBSDNet: bsdsocket.library ready\n");
 	startup_result = 0;
 	Signal(launcher, SIGBREAKF_CTRL_F);
 
 	for (;;) {
-		ULONG s = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D);
+		ULONG s = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D |
+		    control_sigmask());
+
+		if (s & control_sigmask())
+			control_handle();
 
 		if (s & SIGBREAKF_CTRL_C) {
 			P("AmiBSDNet: going offline\n");
@@ -92,7 +98,7 @@ stack_main(void)
 		}
 		if (s & SIGBREAKF_CTRL_D) {
 			P("AmiBSDNet: reconfiguring\n");
-			stack_configure(cfgpath);
+			stack_reconfigure();
 		}
 	}
 

@@ -24,7 +24,8 @@ Early development.
       getaddrinfo, socket passing (`src/test/socktest.c` passes)
 - [x] Stack program `AmiBSDNet`: detaches, reads a config file, DHCP
       client with renewal, static addresses, routes, DNS
-- [ ] Starts at boot (User-Startup), offline/online control
+- [x] Control port + `NetCtrl` (STATUS/ONLINE/OFFLINE/RECONFIG), `Ping`
+- [ ] Starts at boot (User-Startup)
 - [ ] Workbench status AppIcon / Commodity
 - [ ] Installer script for Workbench 3.2+
 
@@ -60,6 +61,7 @@ AmigaOS itself. ROMs are never part of this repository.
 | `src/lib/` | bsdsocket.library |
 | `src/stack/` | the AmiBSDNet program: startup, configuration, DHCP |
 | `src/include/` | headers for AmiBSDNet's own client programs |
+| `src/tools/` | NetCtrl, Ping |
 | `src/test/` | test programs run in the emulator |
 | `tools/` | build driver, ELF-to-hunk converter, emulator runner |
 | `docs/` | design notes |

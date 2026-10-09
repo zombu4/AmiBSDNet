@@ -18,6 +18,11 @@ int nifaces;
 static ULONG cfg_ns[4];
 static int cfg_nns;
 static ULONG cfg_gateway;
+static char cfgfile[256];
+
+/* bumped on every (re)configuration; DHCP renewers of an older
+   generation stop */
+volatile ULONG config_generation;
 
 void
 sb_copy(char *d, const char *s, unsigned long n)
@@ -137,7 +142,8 @@ iface_bringup(struct iface *ifc)
 	}
 	link[l] = '\0';
 
-	if (rump_amibsdnet_ifcreate(ifc->name, link) != 0) {
+	if (rump_amibsdnet_ifcreate(ifc->name, link) != 0 &&
+	    amiga_rump_errno() != 17 /* EEXIST: reconfiguring */) {
 		P("%s: cannot attach %s (errno %d)\n", ifc->name, link,
 		    amiga_rump_errno());
 		return;
@@ -170,7 +176,9 @@ stack_configure(const char *path)
 
 	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0)
 		return -1;
+	sb_copy(cfgfile, path, sizeof(cfgfile));
 	P("AmiBSDNet: reading %s\n", path);
+	config_generation++;
 	nifaces = 0;
 	cfg_nns = 0;
 	cfg_gateway = 0;
@@ -237,6 +245,44 @@ stack_offline(void)
 		rump_amibsdnet_ifflags(ifaces[i].name, 0, NB_IFF_UP);
 		ifaces[i].up = 0;
 	}
+}
+
+void
+stack_online(void)
+{
+	int i;
+
+	for (i = 0; i < nifaces; i++) {
+		struct iface *ifc = &ifaces[i];
+
+		rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
+		if (ifc->dhcp && !ifc->addr)
+			dhcp_configure(ifc);
+		else if (ifc->addr)
+			ifc->up = 1;
+	}
+}
+
+/* drop all addresses and the default route, then read the file again */
+int
+stack_reconfigure(void)
+{
+	int i;
+
+	if (!cfgfile[0])
+		return -1;
+	for (i = 0; i < nifaces; i++) {
+		struct iface *ifc = &ifaces[i];
+
+		if (ifc->addr)
+			rump_amibsdnet_ifdeladdr4(ifc->name, ifc->addr);
+		if (ifc->gateway)
+			rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, ifc->gateway);
+		ifc->up = 0;
+	}
+	if (cfg_gateway)
+		rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, cfg_gateway);
+	return stack_configure(cfgfile);
 }
 
 ULONG
