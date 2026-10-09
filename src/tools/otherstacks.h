@@ -9,6 +9,10 @@
 #define	OTHERS_REMOVE	1
 #define	OTHERS_RESTORE	2
 
+/* if set, called for every file and startup line that was matched
+   (len -1: what is a C string) */
+extern void (*otherstacks_say)(const char *where, const char *what, int len);
+
 /* names of the installed stacks ("Roadshow, Miami"); returns how many */
 int	otherstacks_check(char *names, int size);
 /* after otherstacks_check(): those still started at boot */

@@ -22,6 +22,7 @@ struct iface {
 	volatile int link;		/* driver reports a link (default yes) */
 	volatile int dhcp_event;	/* wakes the DHCP client */
 	int wireless;			/* driver supports SANA-II wireless */
+	int attached;			/* the driver could be opened */
 	int link_logged;
 };
 

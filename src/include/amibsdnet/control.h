@@ -28,6 +28,7 @@
 #define	NETIF_DHCP		0x08
 #define	NETIF_WIRELESS		0x10	/* SANA-II wireless driver */
 #define	NETIF_LINKEVENTS	0x20	/* driver reports link changes */
+#define	NETIF_NODRIVER		0x40	/* the SANA-II driver did not open */
 
 struct NetCtrlIface {
 	char	name[16];		/* "sana0" */

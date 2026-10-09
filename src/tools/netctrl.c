@@ -38,7 +38,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.2 (09.10.2026)";
+    "\0$VER: NetCtrl 0.3 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -142,12 +142,34 @@ others(int mode)
  * AmiBSDNet/OtherRunning if one is running now) and whether this is an
  * Emu68 (PiStorm) system (AmiBSDNet/Emu68).
  */
+/* CHECK lists what it found, so a report shows what was matched */
+static void
+say_match(const char *where, const char *what, int len)
+{
+	char line[200];
+	int i;
+
+	if (len < 0)
+		for (len = 0; what[len]; len++)
+			;
+	for (i = 0; i < len && i < (int)sizeof(line) - 1 && what[i] != '\r';
+	    i++)
+		line[i] = what[i];
+	line[i] = '\0';
+	PutStr((CONST_STRPTR)"  ");
+	PutStr((CONST_STRPTR)where);
+	PutStr((CONST_STRPTR)": ");
+	PutStr((CONST_STRPTR)line);
+	PutStr((CONST_STRPTR)"\n");
+}
+
 static int
 check(void)
 {
 	char names[128];
 	int running;
 
+	otherstacks_say = say_match;
 	if (otherstacks_check(names, sizeof(names))) {
 		PutStr((CONST_STRPTR)"other TCP/IP stacks: ");
 		PutStr((CONST_STRPTR)names);

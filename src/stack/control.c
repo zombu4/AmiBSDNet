@@ -117,7 +117,8 @@ iface_list(struct NetCtrlMsg *m)
 		    (ifc->admin ? NETIF_ADMIN : 0) |
 		    (ifc->link ? NETIF_LINK : 0) |
 		    (ifc->dhcp ? NETIF_DHCP : 0) |
-		    (ifc->wireless ? NETIF_WIRELESS : 0);
+		    (ifc->wireless ? NETIF_WIRELESS : 0) |
+		    (ifc->attached ? 0 : NETIF_NODRIVER);
 	}
 }
 
@@ -144,7 +145,7 @@ status_report(struct NetCtrlMsg *m)
 	ULONG ns[4], rx, tx, rxd, txd;
 	int i, j, n;
 
-	tb_s(&b, "AmiBSDNet 0.2 - NetBSD 11 TCP/IP\n\n");
+	tb_s(&b, "AmiBSDNet 0.3 - NetBSD 11 TCP/IP\n\n");
 	for (i = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
@@ -154,7 +155,8 @@ status_report(struct NetCtrlMsg *m)
 		tb_s(&b, ifc->device);
 		tb_s(&b, " unit ");
 		tb_u(&b, ifc->unit);
-		tb_s(&b, ifc->up ? "  UP" : !ifc->admin ? "  OFFLINE" :
+		tb_s(&b, !ifc->attached ? "  DRIVER NOT FOUND" :
+		    ifc->up ? "  UP" : !ifc->admin ? "  OFFLINE" :
 		    !ifc->link ? "  NO LINK" : ifc->dhcp ? "  WAITING FOR DHCP" :
 		    "  DOWN");
 		if (ifc->dhcp)
