@@ -11,6 +11,10 @@ Usage:  python -I tools/run_emu.py <amiga-exe> [options]
                   reachable from the emulated Amiga as 10.0.2.2:PORT
   --stack CONF    start build/AmiBSDNet with configuration file CONF
                   before the program (implies --net)
+  --forward PORT  forward host TCP port PORT to the Amiga (10.0.2.15:PORT)
+                  and connect to it from the host, expecting an echo
+  --slow          emulate a 68030 at about 28 MHz without JIT (a classic
+                  accelerator card) instead of the fastest possible 68040
   --show          leave the emulator running afterwards
 
 Test programs write DH0:done themselves and log to DH0:rump.log; both,
@@ -81,6 +85,26 @@ def echo_server(port, stop):
     srv.close()
 
 
+def forward_client(port, stop, result):
+    """connect to the Amiga through SLIRP's port forward, expect an echo"""
+    msg = b"hello from the emulator host"
+    while not stop.is_set():
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
+                c.sendall(msg)
+                got = b""
+                while len(got) < len(msg):
+                    d = c.recv(4096)
+                    if not d:
+                        break
+                    got += d
+                result.append("echo ok" if got == msg else f"bad echo {got!r}")
+                print(f"[forward] {result[-1]}", flush=True)
+                return
+        except OSError:
+            time.sleep(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exe")
@@ -91,6 +115,8 @@ def main():
     ap.add_argument("--stack", default=None)
     ap.add_argument("--file", action="append", default=[])
     ap.add_argument("--args", default="")
+    ap.add_argument("--forward", type=int, default=0)
+    ap.add_argument("--slow", action="store_true")
     ap.add_argument("--cmd", action="append", default=[])
     ap.add_argument("--show", action="store_true")
     a = ap.parse_args()
@@ -123,13 +149,30 @@ def main():
         f.write("Echo >DH0:done \"rc=$RC\"\n")
     cfg = os.path.join(EMU, "test.uae")
     with open(cfg, "w", newline="\n") as f:
-        f.write(CONFIG.format(rom=a.rom, hd=HD))
-        if a.net:
+        cfgtext = CONFIG.format(rom=a.rom, hd=HD)
+        if a.slow:
+            for k, v in (("cpu_type", "68030"), ("cpu_model", "68030"),
+                         ("fpu_model", "68882"), ("cpu_speed", "real"),
+                         ("cachesize", "0")):
+                cfgtext = "\n".join(
+                    f"{k}={v}" if line.startswith(k + "=") else line
+                    for line in cfgtext.split("\n"))
+            cfgtext += "cpu_multiplier=8\n"  # 8 x 3.55 MHz: about 28 MHz
+        f.write(cfgtext)
+        if a.net or a.forward:
             f.write("sana2=true\n")
+        if a.forward:
+            f.write(f"slirp_ports={a.forward}\n")
 
     stop = threading.Event()
     if a.echo:
         threading.Thread(target=echo_server, args=(a.echo, stop),
+                         daemon=True).start()
+
+    fwd_result = []
+    if a.forward:
+        threading.Thread(target=forward_client,
+                         args=(a.forward, stop, fwd_result),
                          daemon=True).start()
 
     log = open(os.path.join(EMU, "winuae.log"), "w")
