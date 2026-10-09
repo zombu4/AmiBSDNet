@@ -38,8 +38,13 @@ Early development.
       retrying, so cables/routers appearing after boot are picked up;
       WirelessManager started automatically for Wi-Fi interfaces
 - [x] Installer script for Workbench 3.2+ that detects the network
-      adapters (`NetCtrl PROBE`), generated icons, LHA/ZIP packaging
-      (`tools/package.py`)
+      adapters (`NetCtrl PROBE`) and other TCP/IP stacks (Roadshow,
+      Miami, AmiTCP, Genesis), offers to disable (reversibly) or remove
+      them and verifies they no longer start at boot; generated icons,
+      LHA/ZIP packaging (`tools/package.py`)
+- [x] Wi-Fi bundled: WirelessManager (WPA/WPA2) and, for the PiStorm,
+      wifipi.device with firmware (third-party, see
+      `dist/Docs/ThirdParty.txt`)
 - [x] Installed and tested with the official Workbench 3.2 installer
       (Kickstart 3.2.2, 68040) in WinUAE
 - [ ] Tested on PiStorm hardware (wifipi.device, genet.device)
@@ -47,10 +52,12 @@ Early development.
 ## Building
 
 Windows host, native tools only (no containers or VMs): Python 3,
-Git for Windows (Git Bash).
+Git for Windows (Git Bash), 7-Zip (to unpack the WirelessManager LHA
+archive from Aminet).
 
 ```sh
-python -I tools/bootstrap.py           # toolchain, NetBSD sources, WinUAE
+python -I tools/bootstrap.py           # toolchain, NetBSD sources, WinUAE,
+                                       # bundled Wi-Fi files
 python -I tools/build.py               # rump kernel libraries -> build/
 tools/link_test.sh src/test/rumptest.c build/rumptest
 python -I tools/run_emu.py build/rumptest

@@ -49,7 +49,7 @@ struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.1 (09.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.2 (09.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -338,9 +338,20 @@ show_status(struct MsgPort *appport)
 	es.es_TextFormat = (UBYTE *)"%s";
 
 	if (stack_cmd(NETCTRL_STATUS) != 0) {
+		int other;
+
+		/* a bsdsocket.library without AmiBSDNet: another stack runs */
+		Forbid();
+		other = FindName(&SysBase->LibList,
+		    (CONST_STRPTR)"bsdsocket.library") != NULL;
+		Permit();
 		es.es_GadgetFormat = (UBYTE *)"Start AmiBSDNet|Settings...|Cancel";
-		choice = EasyRequest(NULL, &es, NULL,
-		    (ULONG)"The AmiBSDNet network stack is not running.");
+		choice = EasyRequest(NULL, &es, NULL, (ULONG)(other ?
+		    "The AmiBSDNet network stack is not running:\n"
+		    "another TCP/IP stack is running.\n\n"
+		    "Take it out of the boot (\"NetCtrl DISABLEOTHERS\" in a\n"
+		    "Shell) and reboot." :
+		    "The AmiBSDNet network stack is not running."));
 		if (choice == 1)
 			start_stack();
 		else if (choice == 2) {

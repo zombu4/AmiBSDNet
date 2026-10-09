@@ -22,7 +22,7 @@ import mkicon  # noqa: E402
 
 BUILD = os.path.join(TOP, "build")
 STAGE = os.path.join(BUILD, "dist")
-VERSION = "0.1"
+VERSION = "0.2"
 
 BASH = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
 
@@ -39,7 +39,8 @@ def build():
     run([sys.executable, "-I", "tools/build.py"], env)
     run([BASH, "tools/build_stack.sh", "build/AmiBSDNet"])
     for src, out, extra in (
-            ("src/tools/netctrl.c", "build/NetCtrl", ["src/common/probe.c"]),
+            ("src/tools/netctrl.c", "build/NetCtrl",
+             ["src/common/probe.c", "src/tools/otherstacks.c"]),
             ("src/tools/ping.c", "build/Ping", []),
             ("src/tools/status.c", "build/AmiBSDNetStatus",
              ["src/tools/wifiwin.c", "src/tools/settingswin.c",
@@ -106,6 +107,22 @@ def stage():
 
     for name in ("AmiBSDNet", "NetCtrl", "Ping"):
         shutil.copy(os.path.join(BUILD, name), os.path.join(root, "C", name))
+
+    # third-party pieces for Wi-Fi (fetched by tools/bootstrap.py; their
+    # licences are in Docs/ThirdParty.txt)
+    dl = os.path.join(TOP, "downloads")
+    wm = os.path.join(dl, "WirelessManager")
+    wifi = os.path.join(dl, "Emu68-WiFi")
+    if not os.path.exists(wm) or not os.path.isdir(wifi):
+        sys.exit("package: WirelessManager / Emu68-WiFi missing; run "
+                 "python -I tools/bootstrap.py")
+    shutil.copy(wm, os.path.join(root, "C", "WirelessManager"))
+    shutil.copytree(os.path.join(wifi, "Networks"),
+                    os.path.join(root, "Devs", "Networks"))
+    shutil.copytree(os.path.join(wifi, "Firmware"),
+                    os.path.join(root, "Devs", "Firmware"))
+    shutil.copy(os.path.join(TOP, "dist", "Docs", "ThirdParty.txt"),
+                os.path.join(root, "Docs", "ThirdParty.txt"))
     shutil.copy(os.path.join(BUILD, "AmiBSDNetStatus"),
                 os.path.join(root, "Status", "AmiBSDNetStatus"))
     shutil.copy(os.path.join(TOP, "dist", "Install"),
@@ -131,7 +148,7 @@ def stage():
                       "tool", mkicon.ART_STATUS, stack=8192,
                       tooltypes=("DONOTWAIT", "STACK=C:AmiBSDNet",
                                  "INTERVAL=2"))
-    for doc in ("AmiBSDNet.txt", "LICENSE.txt"):
+    for doc in ("AmiBSDNet.txt", "LICENSE.txt", "ThirdParty.txt"):
         mkicon.write_icon(os.path.join(root, "Docs", doc + ".info"),
                           "project", mkicon.ART_DOC,
                           default_tool="SYS:Utilities/MultiView")

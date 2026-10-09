@@ -1,4 +1,4 @@
-AmiBSDNet 0.1
+AmiBSDNet 0.2
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -12,15 +12,37 @@ Requirements
 ------------
 - a 68020 or better CPU; a PiStorm (Emu68) is the main target
 - Fast RAM: the stack uses about 3.5 MB, all of it Fast RAM (no Chip RAM)
-- a network card with a SANA-II driver (PiStorm Wi-Fi under Emu68:
-  wifipi.device; WinUAE: uaenet.device; Zorro cards such as the A2065,
-  Ariadne or X-Surf: their own driver)
-- no other TCP/IP stack running at the same time
+- a network card with a SANA-II driver. The PiStorm's Wi-Fi driver
+  (wifipi.device) is included; WinUAE: uaenet.device; Zorro cards such
+  as the A2065, Ariadne or X-Surf: their own driver
+- no other TCP/IP stack running at the same time (the installer offers
+  to take an installed one out of the boot)
 
 Installation
 ------------
-Double-click "Install". The installer finds your network adapters by
-itself (every SANA-II driver in DEVS:Networks, and drivers built into
+Double-click "Install". First the installer looks for another TCP/IP
+stack (Roadshow, Miami, AmiTCP, Genesis, or any bsdsocket.library on
+disk). If one is found it offers to:
+
+  Disable it   its startup lines in S:Startup-Sequence and S:User-Startup
+               are commented out ("; [AmiBSDNet] ..."), and its WBStartup
+               items and LIBS:bsdsocket.library are moved to
+               SYS:Storage/AmiBSDNet-Disabled. "NetCtrl RESTOREOTHERS"
+               puts everything back.
+  Remove it    the same, but those lines and files are deleted. The
+               other stack's program drawer is left for you to delete.
+  Keep it      nothing is changed.
+
+The startup files are saved as S:<name>.amibsdnet-backup before the
+first change. Afterwards the installer checks again and tells you if
+anything of the other stack would still be started at boot. AmiBSDNet
+itself refuses to start while another stack is running.
+
+It then installs the programs, WirelessManager and, on a PiStorm, the
+Wi-Fi driver wifipi.device with its firmware (DEVS:Networks,
+DEVS:Firmware; an existing wifipi.device is kept as wifipi.device.old).
+
+The installer finds your network adapters by itself (every SANA-II driver in DEVS:Networks, and drivers built into
 ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
 you have both, both are set up. For Wi-Fi it asks for the network name
 and passphrase (or leave them empty and choose the network later from
@@ -55,9 +77,10 @@ fetched again when it returns. The status icon shows "No cable" or
 Wi-Fi
 -----
 Wireless drivers such as Emu68's wifipi.device associate with the
-network; the WPA handshake is done by WirelessManager (part of the
-Emu68 Wi-Fi package, C:WirelessManager), which reads
-ENV:Sys/Wireless.prefs. AmiBSDNet starts WirelessManager itself for a
+network; the WPA handshake is done by WirelessManager (Neil Cafferkey's
+wpa_supplicant port, installed to C:WirelessManager), which reads
+ENV:Sys/Wireless.prefs. Both are included in this package (see
+ThirdParty.txt for their authors and licences). AmiBSDNet starts WirelessManager itself for a
 Wi-Fi interface if it is not already running. The installer asks for
 the network name and passphrase; to change networks later, double-click
 the status icon and choose Wi-Fi...: the window lists the networks in
@@ -92,7 +115,7 @@ AmiBSDNet [CONFIG=<file>] [LOG=<file>] [DEBUG]
     Starts the stack. Configuration defaults to
     ENV:AmiBSDNet/AmiBSDNet.conf, the log to T:AmiBSDNet.log.
 
-NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] [TIMEOUT=<seconds>]
+NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|...] [TIMEOUT=<s>]
     STATUS    interfaces, addresses, traffic counters, name servers
     ONLINE    bring the network up
     OFFLINE   take the network down
@@ -102,6 +125,15 @@ NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE] [TIMEOUT=<seconds>]
 NetCtrl PROBE
     Lists the network adapters and whether each is Ethernet or Wi-Fi;
     sets the variables AmiBSDNet/Ethernet and AmiBSDNet/WiFi.
+
+NetCtrl CHECK
+    Lists other installed TCP/IP stacks and what of them is still
+    started at boot.
+
+NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS
+    Takes other TCP/IP stacks out of the boot (can be undone), removes
+    their startup entries and files, or undoes DISABLEOTHERS. Reboot
+    afterwards.
 
 Ping HOST [COUNT=<n>]
     Send ICMP echo requests.

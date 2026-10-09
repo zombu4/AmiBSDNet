@@ -2,7 +2,7 @@ Short:        NetBSD 11 TCP/IP stack for AmigaOS (bsdsocket)
 Author:       zombu4 (https://github.com/zombu4)
 Uploader:     zombu4 (https://github.com/zombu4)
 Type:         comm/tcp
-Version:      0.1
+Version:      0.2
 Architecture: m68k-amigaos >= 3.1.0
 Requires:     68020+, Fast RAM, a SANA-II network driver
 Distribution: NoCD
@@ -20,10 +20,17 @@ API), so existing network software works unchanged.
 - DNS resolver, hosts file, getaddrinfo()
 - runs entirely from Fast RAM; built for the PiStorm (Emu68), works on
   any 68020-68060
+- Ethernet and Wi-Fi at the same time; Internet traffic follows the
+  cable when one is plugged in
+- Wi-Fi included: WirelessManager (WPA/WPA2) and, for the PiStorm, the
+  wifipi.device driver with the Raspberry Pi Wi-Fi firmware
 - Workbench status icon and Exchange commodity: online/offline at a
-  glance, double-click for details
+  glance, double-click for details; Settings window for drivers,
+  DHCP or fixed address, DNS and the Wi-Fi network, applied at once
 - NetCtrl (status, online/offline, wait for network) and Ping
-- Installer script for Workbench 3.2
+- Installer for Workbench 3.2: finds the network adapters itself and
+  offers to disable or remove another TCP/IP stack (Roadshow, Miami,
+  AmiTCP, Genesis)
 
 Install: double-click "Install" in the AmiBSDNet drawer.
 
@@ -32,4 +39,5 @@ Source code and issue tracker: https://github.com/zombu4/AmiBSDNet
 Licence: AmiBSDNet's own code is under the PolyForm Noncommercial
 License 1.0.0 - free to use, modify and share for noncommercial
 purposes; it may not be sold or bundled into commercial products. The
-NetBSD code remains under NetBSD's BSD-style licence.
+NetBSD code remains under NetBSD's BSD-style licence. The included
+third-party Wi-Fi files keep their own licences (Docs/ThirdParty.txt).

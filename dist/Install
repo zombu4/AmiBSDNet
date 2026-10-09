@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.1")
+(set #ver "0.2")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -17,13 +17,78 @@
 (message
 	"\nAmiBSDNet " #ver "\n\n"
 	"The NetBSD 11 TCP/IP network stack for AmigaOS.\n\n"
-	"Installs the stack and the NetCtrl and Ping commands\n"
-	"to C:, the status icon, and starts the network at\n"
-	"every boot.\n\n"
-	"Do not run another TCP/IP stack (Roadshow, Miami,\n"
-	"AmiTCP) at the same time.")
+	"Installs the stack, its commands, Wi-Fi support\n"
+	"(WirelessManager, and on a PiStorm the Wi-Fi driver)\n"
+	"and the status icon, and starts the network at every\n"
+	"boot.")
 
 (complete 0)
+
+; -------------------------------------------------------------------
+; other TCP/IP stacks, and whether this is an Emu68 (PiStorm) system:
+; NetCtrl CHECK (from this package) sets AmiBSDNet/OtherStacks,
+; AmiBSDNet/OtherRunning and AmiBSDNet/Emu68
+
+(working "Checking the system...")
+(run "C/NetCtrl CHECK >NIL:" (safe))
+(set #others (getenv "AmiBSDNet/OtherStacks"))
+(set #otherrunning (= (getenv "AmiBSDNet/OtherRunning") "1"))
+(set #emu68 (= (getenv "AmiBSDNet/Emu68") "1"))
+
+(if (<> #others "")
+	(
+		(set #othersdo
+			(askchoice
+				(prompt "Another TCP/IP stack is installed:\n" #others
+					"\n\nOnly one TCP/IP stack can run at a time. "
+					"What should be done with it?")
+				(help "Disable: it is no longer started at boot. Its "
+					"startup lines in S:Startup-Sequence and "
+					"S:User-Startup are commented out, and its "
+					"WBStartup items and LIBS:bsdsocket.library are "
+					"moved to SYS:Storage/AmiBSDNet-Disabled. "
+					"\"NetCtrl RESTOREOTHERS\" undoes this.\n\n"
+					"Remove: the same, but the startup lines and those "
+					"files are deleted. Its program drawer is left "
+					"alone; delete it yourself if you want.\n\n"
+					"The startup files are saved as "
+					"<name>.amibsdnet-backup first.\n\n"
+					"Keep: nothing is changed; do not start both stacks.")
+				(choices "Disable it (can be undone)" "Remove it"
+					"Keep it (I will take care of it)")
+				(default 0)))
+		(if (= #othersdo 0)
+			(run "C/NetCtrl DISABLEOTHERS >NIL:"
+				(prompt "Disabling " #others)
+				(help @run-help)))
+		(if (= #othersdo 1)
+			(run "C/NetCtrl REMOVEOTHERS >NIL:"
+				(prompt "Removing " #others " from the startup")
+				(help @run-help)))
+		; look again: is anything of it still started at boot?
+		(run "C/NetCtrl CHECK >NIL:" (safe))
+		(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
+		(if (and (< #othersdo 2) (<> #atboot ""))
+			(message "Not everything could be taken out of the boot:\n"
+				#atboot "\n\n"
+				"Please check S:Startup-Sequence, S:User-Startup and "
+				"SYS:WBStartup yourself before rebooting: AmiBSDNet "
+				"does not start while another TCP/IP stack is "
+				"running."))
+		(if (and (< #othersdo 2) (= #atboot ""))
+			(message #others " is no longer started at boot."
+				(if (= #othersdo 0)
+					(cat "\n\nTo undo this later, type "
+						"\"NetCtrl RESTOREOTHERS\" in a Shell.")
+					"")))
+		(if (and (= #othersdo 2) (<> #atboot ""))
+			(message "Note: " #atboot " is still started at boot.\n\n"
+				"AmiBSDNet does not start while another TCP/IP stack "
+				"is running, so take it out of the startup before "
+				"rebooting."))
+	))
+
+(complete 10)
 
 ; -------------------------------------------------------------------
 ; programs
@@ -35,6 +100,43 @@
 	(dest "C:")
 	(choices "AmiBSDNet" "NetCtrl" "Ping")
 	(nogauge))
+
+; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt); a newer
+; one already in C: is kept
+(copylib
+	(prompt "Installing WirelessManager (Wi-Fi encryption) to C:")
+	(help @copylib-help)
+	(source "C/WirelessManager")
+	(dest "C:")
+	(confirm "expert"))
+
+; on a PiStorm: the Raspberry Pi Wi-Fi driver and its firmware.  An
+; existing wifipi.device is kept as wifipi.device.old.
+(if #emu68
+	(
+		(makedir "DEVS:Networks")
+		(makedir "DEVS:Firmware")
+		(if (exists "DEVS:Networks/wifipi.device")
+			(copyfiles
+				(source "DEVS:Networks/wifipi.device")
+				(dest "DEVS:Networks")
+				(newname "wifipi.device.old")
+				(nogauge)))
+		(copyfiles
+			(prompt "Installing the PiStorm Wi-Fi driver (wifipi.device)")
+			(help @copyfiles-help)
+			(source "Devs/Networks/")
+			(dest "DEVS:Networks")
+			(all)
+			(nogauge))
+		(copyfiles
+			(prompt "Installing the PiStorm Wi-Fi firmware")
+			(help @copyfiles-help)
+			(source "Devs/Firmware/")
+			(dest "DEVS:Firmware")
+			(all)
+			(nogauge))
+	))
 
 (complete 20)
 
@@ -130,11 +232,6 @@
 ; WirelessManager (started by AmiBSDNet) uses to join the network
 (if (<> #wlan "")
 	(
-		(if (not (exists "C:WirelessManager"))
-			(message "Note: C:WirelessManager was not found.\n\n"
-				"It is needed for WPA-protected Wi-Fi and comes with the "
-				"Emu68 Wi-Fi package (wifipi.device). Install it, then "
-				"AmiBSDNet starts it by itself."))
 		(set #write-wifi 1)
 		(if (exists "ENVARC:Sys/Wireless.prefs")
 			(set #write-wifi
@@ -288,7 +385,16 @@
 
 (complete 100)
 
-(exit
-	"AmiBSDNet is installed.\n\n"
-	"Reboot to start the network, or type C:AmiBSDNet in a Shell now.\n"
-	"\"NetCtrl\" shows the network status.")
+(if (or #otherrunning (and #emu68 (<> #wlan "")))
+	(exit
+		"AmiBSDNet is installed.\n\n"
+		"Reboot to start the network"
+		(if #otherrunning
+			(cat " (the other TCP/IP stack is still running "
+				"until then)")
+			" (the new Wi-Fi driver is loaded then)")
+		".\n\"NetCtrl\" shows the network status.")
+	(exit
+		"AmiBSDNet is installed.\n\n"
+		"Reboot to start the network, or type C:AmiBSDNet in a Shell "
+		"now.\n\"NetCtrl\" shows the network status."))
