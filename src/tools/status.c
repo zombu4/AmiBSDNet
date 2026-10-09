@@ -278,7 +278,8 @@ update_icon(struct MsgPort *appport)
 		RemoveAppIcon(appicon);
 	appicon = AddAppIconA(0, 0, (UBYTE *)label, appport, 0,
 	    &dobj[state == 1 ? 1 : 0], NULL);
-	shown_state = state;
+	/* if Workbench was not ready, try again at the next update */
+	shown_state = appicon ? state : -1;
 }
 
 /* ------------------------------------------------------------------------
