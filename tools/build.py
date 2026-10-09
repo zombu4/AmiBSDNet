@@ -175,10 +175,24 @@ def comp_rumpnet_net():
     return c
 
 
+def comp_amibsdnet():
+    # SANA-II network interfaces (sana0, ...): NetBSD's virtif driver with
+    # our host backend (src/host/sana2.c), plus the configuration helpers
+    vif = os.path.join(RUMPTOP, "net", "lib", "libvirtif")
+    return {
+        "srcs": ["if_virt.c", "netcfg.c"],
+        "path": [vif, os.path.join(TOP, "src", "kern")],
+        "cppflags": ["-DVIRTIF_BASE=sana", "-DRUMP_VIF_LINKSTR",
+                     "-DINET", "-DINET6"],
+        "extra_inc": [os.path.join(RUMPTOP, "librump", "rumpkern"), vif],
+    }
+
+
 COMPONENTS = {
     "rumpkern": comp_rumpkern,
     "rumpnet": comp_rumpnet,
     "rumpnet_net": comp_rumpnet_net,
+    "amibsdnet": comp_amibsdnet,
 }
 
 # ---------------------------------------------------------------------------

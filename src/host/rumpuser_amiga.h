@@ -51,6 +51,19 @@ void	amiga_rump_loginit(long log);
 void	*memset(void *, int, size_t);
 void	*memcpy(void *, const void *, size_t);
 
+/* rumpuser_component(3): host driver code entering/leaving the kernel */
+struct lwp;
+void	*rumpuser_component_unschedule(void);
+void	rumpuser_component_schedule(void *);
+void	rumpuser_component_kthread(void);
+void	rumpuser_component_kthread_release(void);
+struct lwp *rumpuser_component_curlwp(void);
+void	rumpuser_component_switchlwp(struct lwp *);
+int	rumpuser_component_errtrans(int);
+
+/* sleep the calling host thread (must not be scheduled in the kernel) */
+void	amiga_host_sleep_ms(unsigned long);
+
 /* debug: report CPU exceptions of the calling task on the rump console */
 void	crash_install(void);
 

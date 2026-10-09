@@ -1353,6 +1353,79 @@ rumpuser_cv_has_waiters(struct rumpuser_cv *cv, int *nwaiters)
 }
 
 /* ------------------------------------------------------------------------
+ * rumpuser_component(3): lets host-side driver code (e.g. the SANA-II
+ * backend) enter and leave the rump kernel.  Same as librumpuser.
+ */
+
+void *
+rumpuser_component_unschedule(void)
+{
+	int nlocks;
+
+	rumpkern_unsched(&nlocks, NULL);
+	return (void *)(intptr_t)nlocks;
+}
+
+void
+rumpuser_component_schedule(void *cookie)
+{
+
+	rumpkern_sched((int)(intptr_t)cookie, NULL);
+}
+
+void
+rumpuser_component_kthread(void)
+{
+
+	hyp.hyp_schedule();
+	hyp.hyp_lwproc_newlwp(0);
+	hyp.hyp_unschedule();
+}
+
+void
+rumpuser_component_kthread_release(void)
+{
+
+	hyp.hyp_schedule();
+	hyp.hyp_lwproc_release();
+	hyp.hyp_unschedule();
+}
+
+struct lwp *
+rumpuser_component_curlwp(void)
+{
+	struct lwp *l;
+
+	hyp.hyp_schedule();
+	l = hyp.hyp_lwproc_curlwp();
+	hyp.hyp_unschedule();
+	return l;
+}
+
+void
+rumpuser_component_switchlwp(struct lwp *l)
+{
+
+	hyp.hyp_schedule();
+	hyp.hyp_lwproc_switch(l);
+	hyp.hyp_unschedule();
+}
+
+int
+rumpuser_component_errtrans(int hosterr)
+{
+
+	return hosterr;		/* host code already uses NetBSD errno values */
+}
+
+void
+amiga_host_sleep_ms(unsigned long ms)
+{
+
+	host_sleep((int64_t)(ms / 1000), (long)(ms % 1000) * 1000000L);
+}
+
+/* ------------------------------------------------------------------------
  * dynamic loading, daemonising, syscall proxy: not applicable.
  * With RUMP_USE_CTOR, components register themselves from constructors.
  */

@@ -17,7 +17,8 @@ Early development.
 - [x] `rumpuser` hypercall layer on Exec/DOS (`src/host/`)
 - [x] Kernel boots under AmigaOS; TCP over the loopback interface passes
       (`src/test/rumptest.c`, run in WinUAE)
-- [ ] SANA-II network interface (real Ethernet/Wi-Fi drivers)
+- [x] SANA-II network interface `sana0` on any SANA-II driver: TCP and
+      UDP/DNS to the internet pass in WinUAE (`src/test/nettest.c`)
 - [ ] `bsdsocket.library` so existing Amiga network software works
 - [ ] Starts at boot; configuration (DHCP, static, DNS)
 - [ ] Workbench status AppIcon / Commodity
@@ -33,6 +34,9 @@ python -I tools/bootstrap.py           # toolchain, NetBSD sources, WinUAE
 python -I tools/build.py               # rump kernel libraries -> build/
 tools/link_test.sh src/test/rumptest.c build/rumptest
 python -I tools/run_emu.py build/rumptest
+
+tools/link_test.sh src/test/nettest.c build/nettest
+python -I tools/run_emu.py build/nettest --net --echo 7777
 ```
 
 `tools/run_emu.py` boots WinUAE headless with its built-in AROS Kickstart

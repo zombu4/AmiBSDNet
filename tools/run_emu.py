@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Boot WinUAE with emu/hd mounted as DH0:, run a program from
-S:Startup-Sequence, wait for it to write DH0:done, then close WinUAE.
+S:Startup-Sequence and wait until DH0:done appears, then close WinUAE.
 
-Usage:  python -I tools/run_emu.py <amiga-exe> [--timeout SEC] [--rom PATH]
-        [--show]
+Usage:  python -I tools/run_emu.py <amiga-exe> [options]
 
-Without --rom WinUAE's built-in AROS Kickstart replacement is used.
-The program's output is expected in DH0:result.txt (printed afterwards);
-the startup sequence creates DH0:done once the program has returned.
+  --timeout SEC   give up after SEC seconds (default 60)
+  --rom PATH      Kickstart ROM file (default: WinUAE's built-in AROS ROM)
+  --net           enable uaenet.device (SANA-II); unit 0 is SLIRP NAT
+  --echo PORT     run a TCP echo server on the host at 127.0.0.1:PORT,
+                  reachable from the emulated Amiga as 10.0.2.2:PORT
+  --show          leave the emulator running afterwards
+
+Test programs write DH0:done themselves and log to DH0:rump.log; both,
+and the program's Shell output, are printed afterwards.
 """
 import argparse
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 
 TOP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,13 +29,12 @@ HD = os.path.join(EMU, "hd")
 WINUAE = os.path.join(EMU, "winuae", "winuae64.exe")
 
 CONFIG = """\
-config_description=amiga-tcpip test
+config_description=AmiBSDNet test
 use_gui=no
 use_debugger=false
 win32.start_not_captured=true
 win32.inactive_pause=false
 win32.inactive_nosound=true
-win32.minimize_inactive=false
 sound_output=none
 nr_floppies=0
 floppy0type=-1
@@ -48,9 +54,29 @@ z3mem_size=128
 bogomem_size=0
 filesystem2=rw,DH0:Test:{hd},0
 uaehf0=dir,rw,DH0:Test:{hd},0
-serial_port={serial}
-serial_direct=true
 """
+
+
+def echo_server(port, stop):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(5)
+    srv.settimeout(0.5)
+    while not stop.is_set():
+        try:
+            conn, peer = srv.accept()
+        except socket.timeout:
+            continue
+        print(f"[echo] connection from {peer[0]}:{peer[1]}", flush=True)
+        with conn:
+            conn.settimeout(10)
+            try:
+                while data := conn.recv(4096):
+                    conn.sendall(data)
+            except OSError:
+                pass
+    srv.close()
 
 
 def main():
@@ -58,24 +84,32 @@ def main():
     ap.add_argument("exe")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--rom", default=":AROS")
-    ap.add_argument("--show", action="store_true",
-                    help="leave the emulator running for inspection")
+    ap.add_argument("--net", action="store_true")
+    ap.add_argument("--echo", type=int, default=0)
+    ap.add_argument("--show", action="store_true")
     a = ap.parse_args()
 
     os.makedirs(os.path.join(HD, "S"), exist_ok=True)
     name = os.path.basename(a.exe)
     shutil.copy(a.exe, os.path.join(HD, name))
-    for f in ("result.txt", "done", "rump.log", "stdout.txt", "serial.log"):
-        p = os.path.join(HD if f != "serial.log" else EMU, f)
+    for f in ("done", "rump.log", "stdout.txt", "result.txt"):
+        p = os.path.join(HD, f)
         if os.path.exists(p):
             os.remove(p)
-    with open(os.path.join(HD, "S", "Startup-Sequence"), "w", newline="\n") as f:
+    with open(os.path.join(HD, "S", "Startup-Sequence"), "w",
+              newline="\n") as f:
         f.write(f"DH0:{name} >DH0:stdout.txt\n"
                 "Echo >DH0:done \"rc=$RC\"\n")
-    serial = os.path.join(EMU, "serial.log")
     cfg = os.path.join(EMU, "test.uae")
     with open(cfg, "w", newline="\n") as f:
-        f.write(CONFIG.format(rom=a.rom, hd=HD, serial=serial))
+        f.write(CONFIG.format(rom=a.rom, hd=HD))
+        if a.net:
+            f.write("sana2=true\n")
+
+    stop = threading.Event()
+    if a.echo:
+        threading.Thread(target=echo_server, args=(a.echo, stop),
+                         daemon=True).start()
 
     log = open(os.path.join(EMU, "winuae.log"), "w")
     proc = subprocess.Popen([WINUAE, "-portable", "-log", "-f", cfg],
@@ -91,15 +125,14 @@ def main():
     finished = os.path.exists(done)
     if not a.show and proc.poll() is None:
         proc.kill()
-    print(f"[run_emu] {'finished' if finished else 'TIMEOUT'} after {elapsed:.1f}s")
+    stop.set()
+    print(f"[run_emu] {'finished' if finished else 'TIMEOUT'} "
+          f"after {elapsed:.1f}s")
     for f in ("done", "stdout.txt", "result.txt", "rump.log"):
         p = os.path.join(HD, f)
         if os.path.exists(p):
             with open(p, errors="replace") as fh:
                 print(f"--- {f}\n{fh.read().rstrip()}")
-    if os.path.exists(serial):
-        with open(serial, errors="replace") as fh:
-            print(f"--- serial.log\n{fh.read().rstrip()}")
     sys.exit(0 if finished else 1)
 
 
