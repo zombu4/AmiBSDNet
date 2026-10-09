@@ -149,16 +149,17 @@ wm_stop(void)
 int
 wm_start(const char *device, unsigned long unit)
 {
-	char cmd[200], devarg[96], dbg[4], *p = cmd;
+	/* the argument line; kept static, a new process may read it late */
+	static char cmd[200];
+	char devarg[96], dbg[4], *p = cmd;
 	const char *s;
-	BPTR in, out;
+	BPTR in, out, seg;
 
 	if (!wm_installed())
 		return -1;
 	/* a driver not yet in memory is opened from DEVS:Networks */
 	amibsdnet_device_arg(SysBase, device, devarg, sizeof(devarg));
-	for (s = WM_COMMAND " \""; *s; )
-		*p++ = *s++;
+	*p++ = '"';
 	for (s = devarg; *s && p < cmd + 140; )
 		*p++ = *s++;
 	*p++ = '"';
@@ -179,6 +180,7 @@ wm_start(const char *device, unsigned long unit)
 		while (i)
 			*p++ = tmp[--i];
 	}
+	*p++ = '\n';
 	*p = '\0';
 	in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
 	if ((out = Open((CONST_STRPTR)WM_LOG, MODE_NEWFILE)) != 0) {
@@ -187,8 +189,20 @@ wm_start(const char *device, unsigned long unit)
 	}
 	if (out == 0)
 		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
-	if (SystemTags((CONST_STRPTR)cmd, SYS_Asynch, TRUE, SYS_Input, in,
-	    SYS_Output, out, NP_StackSize, 65536, TAG_DONE) != 0) {
+	/*
+	 * Its own process with a 64 KB stack: started through a Shell
+	 * (System()) a command gets the Shell's default stack, often 4 KB,
+	 * far too little for wpa_supplicant.  The task name is how
+	 * wm_running() finds it.
+	 */
+	if ((seg = LoadSeg((CONST_STRPTR)WM_COMMAND)) == 0 ||
+	    CreateNewProcTags(NP_Seglist, seg, NP_FreeSeglist, TRUE,
+	    NP_Name, (ULONG)"WirelessManager", NP_StackSize, 65536,
+	    NP_Cli, TRUE, NP_Arguments, (ULONG)cmd,
+	    NP_Input, in, NP_Output, out, NP_CloseInput, TRUE,
+	    NP_CloseOutput, TRUE, TAG_DONE) == NULL) {
+		if (seg)
+			UnLoadSeg(seg);
 		if (in) Close(in);
 		if (out) Close(out);
 		return -1;

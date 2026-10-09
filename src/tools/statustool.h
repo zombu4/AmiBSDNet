@@ -12,6 +12,8 @@ struct NetCtrlMsg *status_msg(void);
 
 /* the Wi-Fi window for a wireless interface */
 void	wifi_window(const struct NetCtrlIface *);
+/* a scan process is still running (wifiwin.c) */
+int	wifi_scan_busy(void);
 
 /* the settings window: 0 = cancelled, 1 = applied, 2 = written but the
    stack is not running (start it) */

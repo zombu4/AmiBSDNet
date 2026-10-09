@@ -1,4 +1,4 @@
-AmiBSDNet 0.3
+AmiBSDNet 0.4
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -24,23 +24,36 @@ Double-click "Install". First the installer looks for another TCP/IP
 stack (Roadshow, Miami, AmiTCP, Genesis, or any bsdsocket.library on
 disk). If one is found it offers to:
 
-  Disable it   its startup lines in S:Startup-Sequence and S:User-Startup
+  Switch       its startup lines in S:Startup-Sequence and S:User-Startup
                are commented out ("; [AmiBSDNet] ..."), and its WBStartup
                items and LIBS:bsdsocket.library are moved to
-               SYS:Storage/AmiBSDNet-Disabled. "NetCtrl RESTOREOTHERS"
-               puts everything back.
-  Remove it    the same, but those lines and files are deleted. The
-               other stack's program drawer is left for you to delete.
+               SYS:Storage/AmiBSDNet-Disabled.
   Keep it      nothing is changed.
+
+Switching is a trial. After the next boot AmiBSDNet has three minutes
+to get connected. If it does, the switch stays. If it does not, it goes
+back by itself ("NetCtrl FALLBACK"): the other stack and the Wi-Fi
+driver and firmware it replaced are put back, AmiBSDNet is taken out of
+the boot, its logs are saved in SYS:Storage/AmiBSDNet-Logs, and a
+requester asks you to reboot. You are never left without a network:
+a trial boot that ends without a connection (the machine hangs, crashes
+or is reset before AmiBSDNet has connected) also counts as failed, and
+the next boot goes back by itself. So after switching, leave the
+machine running until the status icon shows an address.
+"NetCtrl FALLBACK" also goes back by hand at any time; once you are
+happy with AmiBSDNet, "NetCtrl REMOVEOTHERS" deletes the other stack's
+startup entries for good.
 
 The startup files are saved as S:<name>.amibsdnet-backup before the
 first change. Afterwards the installer checks again and tells you if
 anything of the other stack would still be started at boot. AmiBSDNet
-itself refuses to start while another stack is running.
+itself does not start while another stack is running (and never stops
+the rest of S:User-Startup).
 
 It then installs the programs, WirelessManager and, on a PiStorm, the
 Wi-Fi driver wifipi.device with its firmware (DEVS:Networks,
-DEVS:Firmware; an existing wifipi.device is kept as wifipi.device.old).
+DEVS:Firmware). What was there before is saved first, once:
+wifipi.device.old and DEVS:Firmware.old.
 
 The installer finds your network adapters by itself (every SANA-II driver in DEVS:Networks, and drivers built into
 ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
@@ -137,10 +150,12 @@ NetCtrl CHECK
     Lists other installed TCP/IP stacks and what of them is still
     started at boot.
 
-NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS
+NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS | FALLBACK
     Takes other TCP/IP stacks out of the boot (can be undone), removes
-    their startup entries and files, or undoes DISABLEOTHERS. Reboot
-    afterwards.
+    their startup entries and files, or undoes DISABLEOTHERS. FALLBACK
+    goes back completely: the other stack and the original Wi-Fi driver
+    and firmware come back, AmiBSDNet is taken out of the boot, and its
+    logs are saved in SYS:Storage/AmiBSDNet-Logs. Reboot afterwards.
 
 Ping HOST [COUNT=<n>]
     Send ICMP echo requests.

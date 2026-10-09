@@ -157,6 +157,29 @@ valid_ip(const char *s, int prefix_ok)
 	return !*s;
 }
 
+/* "255.255.255.0" -> 24; -1 if it is not a netmask */
+static int
+mask_prefix(const char *s)
+{
+	ULONG m = 0, part;
+	int i, plen = 0;
+
+	for (i = 0; i < 4; i++) {
+		if (*s < '0' || *s > '9')
+			return -1;
+		for (part = 0; *s >= '0' && *s <= '9'; s++)
+			part = part * 10 + (*s - '0');
+		if (part > 255 || (i < 3 && *s++ != '.'))
+			return -1;
+		m = (m << 8) | part;
+	}
+	while (m & 0x80000000UL) {
+		plen++;
+		m <<= 1;
+	}
+	return m ? -1 : plen;
+}
+
 /* ------------------------------------------------------------------------
  * reading and writing the configuration
  */
@@ -227,6 +250,21 @@ load(struct settings *s)
 						s->fixed = 1;
 						scpy(s->addr, tok[i + 1],
 						    sizeof(s->addr));
+					}
+				/* "netmask a.b.c.d" instead of a /prefix: keep
+				   the mask when the file is written again */
+				for (i = 4; i + 1 < n; i++)
+					if (seq_nocase(tok[i], "netmask") &&
+					    s->fixed && !has_word(s->addr, "/")) {
+						int plen = mask_prefix(tok[i + 1]);
+
+						if (plen >= 0) {
+							char *p = s->addr + slen(s->addr);
+
+							*p++ = '/';
+							put_num(&p, (ULONG)plen);
+							*p = '\0';
+						}
 					}
 			}
 		}
@@ -570,6 +608,11 @@ apply(int save)
 		wm_stop();
 	if (stack_cmd(NETCTRL_RECONFIG) != 0)
 		return 1;		/* not running: the caller starts it */
+	if (status_msg()->result != 0) {
+		status("Saved, but the stack could not apply it (see "
+		    "T:AmiBSDNet.log); try again");
+		return -1;
+	}
 	CopyMem(&cur, &orig, sizeof(orig));
 	return 0;
 }

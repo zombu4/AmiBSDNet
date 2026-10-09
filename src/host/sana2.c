@@ -19,6 +19,7 @@
 #include <exec/ports.h>
 #include <exec/io.h>
 #include <exec/errors.h>
+#include <devices/timer.h>
 #include <exec/execbase.h>
 #include <dos/dos.h>
 #include <utility/tagitem.h>
@@ -236,13 +237,40 @@ queue_event(struct virtif_user *viu, struct MsgPort *port)
 }
 
 static void
+set_link(struct virtif_user *viu, int up)
+{
+	sana_link_fn fn;
+
+	if (up != viu->link) {
+		viu->link = up;
+		if ((fn = viu->linkhook) != NULL)
+			fn(viu->linkctx, up);
+	}
+}
+
+static void
 event_done(struct virtif_user *viu, struct s2req *r, struct MsgPort *port)
 {
 	ULONG ev = r->ios2.ios2_WireError;
+	BYTE err = r->ios2.ios2_Req.io_Error;
 	int up = viu->link;
-	sana_link_fn fn;
 
-	if (r->ios2.ios2_Req.io_Error) {
+	if (err) {
+		/*
+		 * Aborted (another opener's CMD_FLUSH aborts everybody's event
+		 * requests): ask again.  Only "not supported" means no events.
+		 */
+		if (err == IOERR_ABORTED) {
+			if (!viu->stopping)
+				queue_event(viu, port);
+			return;
+		}
+		if (viu->wireless) {
+			/* never fall back to ONLINE/OFFLINE for Wi-Fi: it says
+			   nothing about the radio; the poll decides */
+			viu->events = 0;
+			return;
+		}
 		/* not supported: try plain ONLINE/OFFLINE, then give up */
 		if (viu->events == 2) {
 			viu->events = 1;
@@ -255,13 +283,41 @@ event_done(struct virtif_user *viu, struct s2req *r, struct MsgPort *port)
 		up = 0;
 	if (ev & (S2EVENT_ONLINE | S2EVENT_CONNECT))
 		up = 1;
-	if (up != viu->link) {
-		viu->link = up;
-		if ((fn = viu->linkhook) != NULL)
-			fn(viu->linkctx, up);
-	}
+	set_link(viu, up);
 	if (!viu->stopping)
 		queue_event(viu, port);
+}
+
+/*
+ * Wi-Fi: associated with an access point?  S2_GETSIGNALQUALITY only
+ * succeeds while associated.  1 yes, 0 no, -1 the driver cannot tell.
+ * Uses its own request and port, so the I/O port's signals are not eaten.
+ */
+static int
+wireless_associated(struct IOSana2Req *base)
+{
+	struct MsgPort *port = CreateMsgPort();
+	struct IOSana2Req *q;
+	LONG sq[2];
+	int rv = -1;
+
+	if (port == NULL)
+		return -1;
+	if ((q = (struct IOSana2Req *)CreateIORequest(port, sizeof(*q))) != NULL) {
+		CopyMem(base, q, sizeof(*q));
+		q->ios2_Req.io_Message.mn_ReplyPort = port;
+		q->ios2_Req.io_Command = S2_GETSIGNALQUALITY;
+		q->ios2_Req.io_Flags = 0;
+		q->ios2_StatData = sq;
+		if (DoIO((struct IORequest *)q) == 0)
+			rv = 1;
+		else if (q->ios2_Req.io_Error != IOERR_NOCMD &&
+		    q->ios2_Req.io_Error != S2ERR_NOT_SUPPORTED)
+			rv = 0;
+		DeleteIORequest((struct IORequest *)q);
+	}
+	DeleteMsgPort(port);
+	return rv;
 }
 
 /*
@@ -322,12 +378,23 @@ static void rebuild_header(struct s2req *);
 static int
 tapped(struct virtif_user *viu, struct s2req *r)
 {
-	sana_tap_fn fn = viu->tap;
+	sana_tap_fn fn;
+	int taken;
 
-	if (fn == NULL)
+	if (viu->tap == NULL)
 		return 0;
 	rebuild_header(r);
-	if (!fn(viu->tapctx, r->buf, ETHER_HDR_LEN + r->ios2.ios2_DataLength))
+	/*
+	 * Under Forbid(): the DHCP client may clear the tap and free its
+	 * context at any time.  Tap functions must not block (the DHCP one
+	 * only copies and signals).
+	 */
+	Forbid();
+	fn = viu->tap;
+	taken = fn != NULL && fn(viu->tapctx, r->buf,
+	    ETHER_HDR_LEN + r->ios2.ios2_DataLength);
+	Permit();
+	if (!taken)
 		return 0;
 	viu->rx_packets++;	/* received, even if not by the kernel */
 	return 1;
@@ -378,10 +445,11 @@ static void *
 sana_iothread(void *arg)
 {
 	struct virtif_user *viu = arg;
-	struct MsgPort *ioport = NULL, *txport = NULL;
+	struct MsgPort *ioport = NULL, *txport = NULL, *tport = NULL;
+	struct timerequest *treq = NULL;
 	struct IOSana2Req *base = NULL;
 	struct s2req *r;
-	ULONG iomask, txmask, sigs;
+	ULONG iomask, txmask, tmask = 0, sigs;
 	int opened = 0, nrx = 0, ntx = 0, stuck = 0;
 	unsigned i, t;
 
@@ -422,25 +490,43 @@ sana_iothread(void *arg)
 			CopyMem(base->ios2_SrcAddr, viu->mac, ETHER_ADDR_LEN);
 	}
 	viu->wireless = probe_wireless(base);
+	/* NSCMD_DEVICEQUERY's io_Data/io_Length overlay ios2_SrcAddr, which
+	   every request below inherits */
+	CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
 	base->ios2_Req.io_Command = S2_ONLINE;
 	DoIO((struct IORequest *)base);
 	viu->link = 1;
 	/*
-	 * Wi-Fi: the link is the association with the access point, which
-	 * WirelessManager makes later.  S2_GETSIGNALQUALITY only succeeds
-	 * while associated (drivers without it count as linked).
+	 * Multicast groups IPv6 (and mDNS) need: some drivers (wifipi) drop
+	 * every multicast frame that was not registered.  Single addresses
+	 * only (a range is expanded address by address by some drivers).
 	 */
-	if (viu->wireless) {
-		LONG sq[2];
+	{
+		static const UBYTE groups[4][ETHER_ADDR_LEN] = {
+			{ 0x33, 0x33, 0x00, 0x00, 0x00, 0x01 },	/* all nodes */
+			{ 0x33, 0x33, 0xff, 0, 0, 0 },		/* solicited */
+			{ 0x01, 0x00, 0x5e, 0x00, 0x00, 0x01 },	/* all hosts */
+			{ 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb },	/* mDNS */
+		};
+		int g;
 
-		base->ios2_Req.io_Command = S2_GETSIGNALQUALITY;
-		base->ios2_StatData = sq;
-		if (DoIO((struct IORequest *)base) != 0 &&
-		    base->ios2_Req.io_Error != IOERR_NOCMD &&
-		    base->ios2_Req.io_Error != S2ERR_NOT_SUPPORTED)
-			viu->link = 0;
-		base->ios2_StatData = NULL;
+		for (g = 0; g < 4; g++) {
+			CopyMem((APTR)groups[g], base->ios2_SrcAddr,
+			    ETHER_ADDR_LEN);
+			if (g == 1)
+				CopyMem(viu->mac + 3, base->ios2_SrcAddr + 3, 3);
+			base->ios2_Req.io_Command = S2_ADDMULTICASTADDRESS;
+			DoIO((struct IORequest *)base);
+		}
+		CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
 	}
+	/*
+	 * Wi-Fi: the link is the association with the access point, which
+	 * WirelessManager makes later (drivers that cannot tell count as
+	 * linked).  Checked again every few seconds below.
+	 */
+	if (viu->wireless && wireless_associated(base) == 0)
+		viu->link = 0;
 
 	for (t = 0; t < NRXTYPES; t++) {
 		for (i = 0; i < NRX_PER_TYPE; i++) {
@@ -470,8 +556,43 @@ sana_iothread(void *arg)
 	iomask = 1UL << ioport->mp_SigBit;
 	txmask = 1UL << txport->mp_SigBit;
 
+	/*
+	 * Wi-Fi: besides the CONNECT/DISCONNECT events, look at the
+	 * association every few seconds (first after one second, which also
+	 * covers an association made while the event request was queued).
+	 * Events can be missed or not offered; this cannot.
+	 */
+	if (viu->wireless && (tport = CreateMsgPort()) != NULL) {
+		treq = (struct timerequest *)CreateIORequest(tport,
+		    sizeof(*treq));
+		if (treq == NULL || OpenDevice((CONST_STRPTR)TIMERNAME,
+		    UNIT_VBLANK, (struct IORequest *)treq, 0) != 0) {
+			if (treq)
+				DeleteIORequest((struct IORequest *)treq);
+			treq = NULL;
+		} else {
+			tmask = 1UL << tport->mp_SigBit;
+			treq->tr_node.io_Command = TR_ADDREQUEST;
+			treq->tr_time.tv_secs = 1;
+			treq->tr_time.tv_micro = 0;
+			SendIO((struct IORequest *)treq);
+		}
+	}
+
 	while (!viu->stopping) {
-		sigs = Wait(iomask | txmask | SIGBREAKF_CTRL_C);
+		sigs = Wait(iomask | txmask | tmask | SIGBREAKF_CTRL_C);
+
+		if (treq && (sigs & tmask) && CheckIO((struct IORequest *)treq)) {
+			int a;
+
+			WaitIO((struct IORequest *)treq);
+			if ((a = wireless_associated(base)) >= 0)
+				set_link(viu, a);
+			treq->tr_node.io_Command = TR_ADDREQUEST;
+			treq->tr_time.tv_secs = 5;
+			treq->tr_time.tv_micro = 0;
+			SendIO((struct IORequest *)treq);
+		}
 
 		/* frames posted by the kernel */
 		while ((r = (struct s2req *)GetMsg(txport)) != NULL) {
@@ -487,11 +608,16 @@ sana_iothread(void *arg)
 				continue;
 			}
 			if (r->kind == REQ_RX) {
-				if (r->ios2.ios2_Req.io_Error == 0 &&
-				    !tapped(viu, r))
-					deliver(viu, r);
-				else
+				if (r->ios2.ios2_Req.io_Error == 0) {
+					if (!tapped(viu, r))
+						deliver(viu, r);
+				} else {
 					viu->rx_dropped++;
+					/* a driver that rejects reads (offline)
+					   must not make this loop spin */
+					if (!viu->stopping)
+						amiga_host_sleep_ms(40);
+				}
 				if (!viu->stopping)
 					queue_read(r, ioport,
 					    (UWORD)r->ios2.ios2_PacketType);
@@ -514,6 +640,15 @@ sana_iothread(void *arg)
 	   WaitIO() on a request already taken off the reply port would
 	   Remove() it a second time and corrupt the port's list. */
 	viu->txport = NULL;
+	if (treq) {
+		if (!CheckIO((struct IORequest *)treq))
+			AbortIO((struct IORequest *)treq);
+		WaitIO((struct IORequest *)treq);
+		CloseDevice((struct IORequest *)treq);
+		DeleteIORequest((struct IORequest *)treq);
+	}
+	if (tport)
+		DeleteMsgPort(tport);
 	for (i = 0; i < (unsigned)nrx; i++)
 		if (reap(viu->rxreqs[i], 1))
 			stuck++;

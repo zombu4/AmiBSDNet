@@ -19,5 +19,10 @@ int	otherstacks_check(char *names, int size);
 int	otherstacks_atboot(char *names, int size);
 /* returns 0, or -1 if something could not be changed */
 int	otherstacks_apply(int mode);
+/* S:User-Startup starts AmiBSDNet */
+int	otherstacks_self_atboot(void);
+/* back to the previous stack and Wi-Fi driver, AmiBSDNet out of the
+   boot, logs kept; msg gets a text for the user */
+int	otherstacks_fallback(char *msg, int size);
 
 #endif

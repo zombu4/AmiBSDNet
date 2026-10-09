@@ -23,7 +23,7 @@ int nifaces;
 static ULONG cfg_ns[4];
 static int cfg_nns;
 static ULONG cfg_gateway;
-static char cfgfile[256];
+static char cfgfile[256], cfgfallback[256];	/* ENV: and ENVARC: copies */
 
 /* bumped on every (re)configuration; DHCP renewers of an older
    generation stop */
@@ -90,8 +90,8 @@ stack_update_dns(void)
 				all[n++] = list[j];
 		}
 	}
-	if (n)
-		netdb_set_nameservers(all, n);
+	/* also when none are left: the old network's servers are gone */
+	netdb_set_nameservers(all, n);
 	ReleaseSemaphore(&routesem);
 }
 
@@ -154,16 +154,20 @@ parse_ip(const char *s, ULONG *addr, ULONG *mask)
 		if (i < 3 && *s++ != '.')
 			return 0;
 	}
-	*addr = v;
+	/* nothing is stored unless the whole text is valid */
 	if (*s == '/' && mask) {
 		ULONG plen;
 
 		if (!parse_ulong(s + 1, &plen) || plen > 32)
 			return 0;
+		*addr = v;
 		*mask = plen ? 0xffffffffUL << (32 - plen) : 0;
 		return 1;
 	}
-	return *s == '\0';
+	if (*s != '\0')
+		return 0;
+	*addr = v;
+	return 1;
 }
 
 static int
@@ -244,11 +248,22 @@ iface_bringup(struct iface *ifc)
 	}
 	link[l] = '\0';
 
-	if (rump_amibsdnet_ifcreate(ifc->name, link) != 0 &&
-	    amiga_rump_errno() != 17 /* EEXIST: reconfiguring */) {
-		P("%s: cannot attach %s (errno %d)\n", ifc->name, link,
-		    amiga_rump_errno());
-		return;
+	if (rump_amibsdnet_ifcreate(ifc->name, link) != 0) {
+		int err = amiga_rump_errno();
+
+		/* EEXIST is fine only for an interface with a working driver
+		   behind it; anything else is removed and made again */
+		if (err == 17 && sana_find(ifc->device, ifc->unit) == NULL) {
+			rump_amibsdnet_ifflags(ifc->name, 0, NB_IFF_UP);
+			rump_amibsdnet_ifdestroy(ifc->name);
+			err = rump_amibsdnet_ifcreate(ifc->name, link) == 0 ? 0 :
+			    amiga_rump_errno();
+		}
+		if (err != 0 && err != 17) {
+			P("%s: cannot attach %s (errno %d)\n", ifc->name, link,
+			    err);
+			return;
+		}
 	}
 	ifc->attached = 1;
 	{
@@ -295,7 +310,6 @@ stack_configure(const char *path)
 	}
 	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0)
 		return -1;
-	sb_copy(cfgfile, path, sizeof(cfgfile));
 	stacktask = SysBase->ThisTask;
 	P("AmiBSDNet: reading %s\n", path);
 	config_generation++;
@@ -358,6 +372,7 @@ stack_offline(void)
 
 	for (i = 0; i < nifaces; i++) {
 		ifaces[i].admin = 0;
+		ifaces[i].release = 1;
 		ifaces[i].dhcp_event = 1;
 		rump_amibsdnet_ifflags(ifaces[i].name, 0, NB_IFF_UP);
 		ifaces[i].up = 0;
@@ -382,6 +397,32 @@ stack_online(void)
 	stack_update_route();
 }
 
+/* the configuration file (ENV:), else its saved copy (ENVARC:) */
+static int
+configure_any(void)
+{
+
+	if (stack_configure(cfgfile) == 0)
+		return 0;
+	if (cfgfallback[0] && stack_configure(cfgfallback) == 0)
+		return 0;
+	return -1;
+}
+
+/*
+ * First configuration at startup.  Both paths are kept, so a later
+ * reconfiguration reads the file the settings window writes even if none
+ * existed at boot.
+ */
+int
+stack_configure_from(const char *path, const char *fallback)
+{
+
+	sb_copy(cfgfile, path, sizeof(cfgfile));
+	sb_copy(cfgfallback, fallback ? fallback : "", sizeof(cfgfallback));
+	return configure_any();
+}
+
 /*
  * Apply a changed configuration file (from the settings window or
  * NetCtrl RECONFIG): stop the DHCP clients and remove the interfaces, so
@@ -398,8 +439,13 @@ stack_reconfigure(void)
 	config_generation++;
 	for (waited = 0; dhcp_clients > 0 && waited < 200; waited++)
 		Delay(5);		/* they stop within a second */
-	if (dhcp_clients > 0)
-		P("AmiBSDNet: DHCP clients still running\n");
+	if (dhcp_clients > 0) {
+		/* removing interfaces under a running client would leave it
+		   with freed memory: refuse, the settings window says so */
+		P("AmiBSDNet: DHCP clients still running; configuration not "
+		    "applied, try again\n");
+		return -1;
+	}
 	for (i = 0; i < nifaces; i++) {
 		ifaces[i].up = 0;
 		ifaces[i].gateway = 0;
@@ -420,7 +466,35 @@ stack_reconfigure(void)
 			    amiga_rump_errno());
 	}
 	nifaces = 0;
-	return stack_configure(cfgfile);
+	return configure_any();
+}
+
+/*
+ * Is the network really working (for the trial switch)?  An address is
+ * not enough: with DHCP a server must have answered (a lease), with a
+ * fixed address frames must have arrived from the network.
+ */
+int
+stack_connected(void)
+{
+	int i;
+
+	for (i = 0; i < nifaces; i++) {
+		struct iface *ifc = &ifaces[i];
+		struct virtif_user *v;
+		ULONG rx = 0, tx, rxd, txd;
+
+		if (!ifc->up || !ifc->addr)
+			continue;
+		if (ifc->dhcp)
+			return 1;
+		if ((v = sana_find(ifc->device, ifc->unit)) != NULL) {
+			sana_stats(v, &rx, &tx, &rxd, &txd);
+			if (rx > 0)
+				return 1;
+		}
+	}
+	return 0;
 }
 
 ULONG

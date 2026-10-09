@@ -43,7 +43,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.3 (10.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.4 (10.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -71,7 +71,7 @@ stack_main(void)
 	crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.3 starting\n");
+	P("AmiBSDNet 0.4 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
@@ -92,8 +92,7 @@ stack_main(void)
 	startup_result = 0;
 	Signal(launcher, SIGBREAKF_CTRL_F);
 
-	if (stack_configure(cfgpath) != 0 &&
-	    stack_configure(FALLBACK_CONFIG) != 0)
+	if (stack_configure_from(cfgpath, FALLBACK_CONFIG) != 0)
 		P("AmiBSDNet: no configuration found, loopback only\n");
 
 	for (;;) {
@@ -118,6 +117,7 @@ stack_main(void)
 
 fail:
 	startup_result = 20;
+	trial_failed();		/* a trial switch goes back at once */
 	Signal(launcher, SIGBREAKF_CTRL_F);
 	/* kernel threads may exist: never return into unloaded code */
 	for (;;)
@@ -182,20 +182,50 @@ _start(void)
 				    "AmiBSDNet is already running\n" :
 				    "AmiBSDNet: another TCP/IP stack is running "
 				    "(bsdsocket.library is in use); not started\n"));
-			return ours ? RETURN_WARN : RETURN_FAIL;
+			return RETURN_WARN;	/* never abort S:User-Startup */
 		}
 	}
 
 	for (void (**c)(void) = __init_array_start; c < __init_array_end; c++)
 		(*c)();
 
+	/*
+	 * A trial switch from another stack (see trial.c): if the last trial
+	 * boot never connected, go back to the other stack instead of
+	 * starting again.  From here on a process may run our code, so the
+	 * segments must stay loaded on every path below.
+	 */
+	if (trial_begin() < 0) {
+		if (out)
+			PutStr((CONST_STRPTR)"AmiBSDNet: the switch to AmiBSDNet "
+			    "did not work; going back to the previous TCP/IP "
+			    "stack\n");
+		CloseLibrary((struct Library *)DOSBase);
+		if (wbmsg) {
+			Forbid();
+			ReplyMsg(wbmsg);
+		}
+		return RETURN_WARN;
+	}
+
 	launcher = SysBase->ThisTask;
 	if (CreateNewProcTags(NP_Entry, (ULONG)stack_main,
 	    NP_Name, (ULONG)"AmiBSDNet", NP_StackSize, 256 * 1024,
 	    NP_Priority, 1, TAG_DONE) == NULL)
-		return RETURN_FAIL;
-	Wait(SIGBREAKF_CTRL_F);
-	if (startup_result != 0) {
+		trial_failed();
+	else {
+		/* the kernel starts in seconds; never hold up the boot for long */
+		int ticks;
+
+		for (ticks = 0; ticks < 120 * 50 && !(SetSignal(0, 0) &
+		    SIGBREAKF_CTRL_F); ticks += 10)
+			Delay(10);
+		SetSignal(0, SIGBREAKF_CTRL_F);
+		if (startup_result < 0 && out)
+			PutStr((CONST_STRPTR)"AmiBSDNet: still starting in the "
+			    "background\n");
+	}
+	if (startup_result > 0) {
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: startup failed, see "
 			    "the log\n");
@@ -215,5 +245,5 @@ _start(void)
 		for (;;)
 			Wait(0x80000000UL);
 	}
-	return startup_result == 0 ? RETURN_OK : RETURN_FAIL;
+	return startup_result == 0 ? RETURN_OK : RETURN_WARN;
 }

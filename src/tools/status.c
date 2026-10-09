@@ -49,7 +49,7 @@ struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.3 (10.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.4 (10.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -614,6 +614,10 @@ out:
 		FreeVec(chipimg[1]);
 	if (ctl)
 		FreeVec(ctl);
+	/* a Wi-Fi scan process still runs this program's code: unloading
+	   now would crash it, so wait until the driver has answered */
+	while (wifi_scan_busy())
+		Delay(50);
 	return rc;
 }
 

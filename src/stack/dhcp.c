@@ -440,6 +440,16 @@ dhcp_thread(void *arg)
 
 	c->task = SysBase->ThisTask;
 	while (d->generation == config_generation) {
+		/* offline (also a quick offline + online, "Reconnect"): the
+		   lease is given up, a new one fetched */
+		if (ifc->release) {
+			ifc->release = 0;
+			if (bound) {
+				P("%s: releasing the DHCP address\n", ifc->name);
+				drop_lease(c);
+				bound = 0;
+			}
+		}
 		if (!ifc->admin || !ifc->link) {
 			if (bound) {
 				P("%s: %s, releasing %s\n", ifc->name,
