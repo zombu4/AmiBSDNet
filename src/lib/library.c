@@ -568,7 +568,7 @@ bsdsocket_remove(void)
 		    master->lib.lib_NegSize + master->lib.lib_PosSize);
 		master = NULL;
 		mgr_request(MGR_QUIT, NULL);
-		rumpuser_thread_join(mgrthread);
+		amiga_host_thread_join(mgrthread);	/* not on a rump CPU */
 		mgrport = NULL;
 	}
 	return rv;

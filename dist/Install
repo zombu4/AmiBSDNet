@@ -16,15 +16,12 @@
 
 (message
 	"\nAmiBSDNet " #ver "\n\n"
-	"A complete TCP/IP network stack for AmigaOS, built from the\n"
-	"NetBSD 11 kernel's networking code.\n\n"
-	"This installs:\n"
-	"  C:AmiBSDNet       the network stack\n"
-	"  C:NetCtrl, C:Ping  control and diagnostic commands\n"
-	"  the AmiBSDNetStatus Workbench icon (optional)\n\n"
-	"and adds the stack to S:User-Startup.\n\n"
-	"Another TCP/IP stack (Roadshow, Miami, AmiTCP) must not be\n"
-	"started at the same time.")
+	"The NetBSD 11 TCP/IP network stack for AmigaOS.\n\n"
+	"Installs the stack and the NetCtrl and Ping commands\n"
+	"to C:, the status icon, and starts the network at\n"
+	"every boot.\n\n"
+	"Do not run another TCP/IP stack (Roadshow, Miami,\n"
+	"AmiTCP) at the same time.")
 
 (complete 0)
 
@@ -69,27 +66,69 @@
 ; -------------------------------------------------------------------
 ; network configuration
 
-(set #devfile
-	(askfile
-		(prompt "Choose the SANA-II driver of your network hardware "
-			"(PiStorm Wi-Fi: wifipi.device, WinUAE: uaenet.device)")
-		(help "AmiBSDNet talks to your network card through its SANA-II "
-			"driver, normally found in DEVS:Networks/. Your card's "
-			"documentation names the driver.")
-		(default "DEVS:Networks/")))
-(set #device (fileonly #devfile))
+; find the network adapters: NetCtrl PROBE opens every SANA-II driver
+; and sets AmiBSDNet/Ethernet and AmiBSDNet/WiFi
+(working "Looking for network adapters...")
+(run "C:NetCtrl PROBE >NIL:" (safe))
+(set #eth (getenv "AmiBSDNet/Ethernet"))
+(set #wlan (getenv "AmiBSDNet/WiFi"))
+(set #ethunit 0)
+(set #wlanunit 0)
+
+(set #manual 1)
+(if (or (<> #eth "") (<> #wlan ""))
+	(set #manual
+		(not (askbool
+			(prompt "Network adapters found:\n\n"
+				(if (<> #eth "") (cat "Ethernet:  " #eth "\n") "")
+				(if (<> #wlan "") (cat "Wi-Fi:  " #wlan "\n") "")
+				"\nUse "
+				(if (and (<> #eth "") (<> #wlan "")) "both adapters"
+					"this adapter")
+				" for the network?"
+				(if (and (<> #eth "") (<> #wlan ""))
+					"\n(They work at the same time; Ethernet is used\nfor the Internet while its cable is connected.)" ""))
+			(help "AmiBSDNet found these SANA-II drivers in DEVS:Networks. "
+				"Choose No to pick the driver yourself. The adapters can "
+				"be changed later in the status icon's Settings window.")
+			(choices "Yes" "Choose myself")
+			(default 1)))))
+
+(if #manual
+	(
+		(set #devfile
+			(askfile
+				(prompt "Choose the SANA-II driver of your network hardware "
+					"(PiStorm Wi-Fi: wifipi.device, WinUAE: uaenet.device; "
+					"type the name if it is not listed)")
+				(help "AmiBSDNet talks to your network card through its SANA-II "
+					"driver, normally found in DEVS:Networks/. Your card's "
+					"documentation names the driver. If it is not listed "
+					"(for example because it is built into ROM), type its "
+					"name into the file field.")
+				(default "DEVS:Networks/")))
+		(set #device (fileonly #devfile))
+		(set #unit
+			(asknumber
+				(prompt "Unit number of the network card (usually 0)")
+				(help "Only needed when one driver handles several cards.")
+				(range 0 31)
+				(default 0)))
+		(if (askbool
+				(prompt "Is " #device " a Wi-Fi adapter (for example the "
+					"PiStorm's wifipi.device)?")
+				(help "For Wi-Fi, AmiBSDNet needs the network name and "
+					"passphrase. You can change them later in the status "
+					"icon's Settings window.")
+				(default (if (patmatch "#?(wifi|wlan|prism|wireless)#?"
+					#device) 1 0)))
+			((set #eth "") (set #wlan #device) (set #wlanunit #unit))
+			((set #eth #device) (set #ethunit #unit) (set #wlan "")))
+	))
 
 ; Wi-Fi: the network name and passphrase go to Wireless.prefs, which
 ; WirelessManager (started by AmiBSDNet) uses to join the network
-(set #wifi
-	(askbool
-		(prompt "Is " #device " a Wi-Fi adapter (for example the "
-			"PiStorm's wifipi.device)?")
-		(help "For Wi-Fi, AmiBSDNet needs the network name and passphrase. "
-			"You can change them later from the status icon (Wi-Fi...).")
-		(default (if (patmatch "#?(wifi|wlan|prism|wireless)#?" #device) 1 0))))
-
-(if #wifi
+(if (<> #wlan "")
 	(
 		(if (not (exists "C:WirelessManager"))
 			(message "Note: C:WirelessManager was not found.\n\n"
@@ -108,45 +147,45 @@
 			(
 				(set #ssid
 					(askstring
-						(prompt "Name (SSID) of your Wi-Fi network")
+						(prompt "Name (SSID) of your Wi-Fi network\n"
+							"(leave empty to choose it later from the "
+							"status icon)")
 						(help "Exactly as shown by your router, including "
 							"upper and lower case.")
 						(default "")))
-				(set #psk
-					(askstring
-						(prompt "Wi-Fi passphrase (leave empty for an "
-							"open network)")
-						(help "8 to 63 characters for WPA/WPA2.")
-						(default "")))
-				(makedir "ENVARC:Sys")
-				(if (= #psk "")
-					(textfile
-						(dest "ENVARC:Sys/Wireless.prefs")
-						(append "network={\n\tssid=\"" #ssid "\"\n"
-							"\tkey_mgmt=NONE\n}\n"))
-					(textfile
-						(dest "ENVARC:Sys/Wireless.prefs")
-						(append "network={\n\tssid=\"" #ssid "\"\n"
-							"\tpsk=\"" #psk "\"\n"
-							"\tkey_mgmt=WPA-PSK\n}\n")))
-				(makedir "ENV:Sys")
-				(copyfiles (source "ENVARC:Sys/Wireless.prefs")
-					(dest "ENV:Sys") (nogauge))
+				(if (<> #ssid "")
+					(
+						(set #psk
+							(askstring
+								(prompt "Wi-Fi passphrase (leave empty for "
+									"an open network)")
+								(help "8 to 63 characters for WPA/WPA2.")
+								(default "")))
+						(makedir "ENVARC:Sys")
+						(if (= #psk "")
+							(textfile
+								(dest "ENVARC:Sys/Wireless.prefs")
+								(append "network={\n\tssid=\"" #ssid "\"\n"
+									"\tkey_mgmt=NONE\n}\n"))
+							(textfile
+								(dest "ENVARC:Sys/Wireless.prefs")
+								(append "network={\n\tssid=\"" #ssid "\"\n"
+									"\tpsk=\"" #psk "\"\n"
+									"\tkey_mgmt=WPA-PSK\n}\n")))
+						(makedir "ENV:Sys")
+						(copyfiles (source "ENVARC:Sys/Wireless.prefs")
+							(dest "ENV:Sys") (nogauge))
+					))
 			))
 	))
-
-(set #unit
-	(asknumber
-		(prompt "Unit number of the network card (usually 0)")
-		(help "Only needed when one driver handles several cards.")
-		(range 0 31)
-		(default 0)))
 
 (set #mode
 	(askchoice
 		(prompt "How does this Amiga get its network address?")
 		(help "Most home networks hand out addresses automatically (DHCP). "
-			"Choose a fixed address only if your network needs one.")
+			"Choose a fixed address only if your network needs one; it is "
+			"used for Ethernet if there is an Ethernet adapter, else for "
+			"Wi-Fi.")
 		(choices "Automatically (DHCP)" "Fixed address")
 		(default 0)))
 
@@ -156,21 +195,10 @@
 		(help "Letters, digits and '-' only.")
 		(default "amiga")))
 
-(set #confdir "ENVARC:AmiBSDNet")
-(makedir #confdir)
-(set #conf (tackon #confdir "AmiBSDNet.conf"))
-
-(if (= #mode 0)
-	(
-		(textfile
-			(prompt "Writing the network configuration")
-			(help @textfile-help)
-			(dest #conf)
-			(append "# AmiBSDNet configuration (see the AmiBSDNet "
-				"documentation)\n")
-			(append "hostname   " #hostname "\n")
-			(append "interface  sana0 " #device " " #unit " dhcp\n"))
-	)
+(set #addr "")
+(set #gw "")
+(set #dns "")
+(if (= #mode 1)
 	(
 		(set #addr
 			(askstring
@@ -188,18 +216,39 @@
 				(prompt "Address of your DNS server (often the router)")
 				(help @askstring-help)
 				(default #gw)))
-		(textfile
-			(prompt "Writing the network configuration")
-			(help @textfile-help)
-			(dest #conf)
-			(append "# AmiBSDNet configuration (see the AmiBSDNet "
-				"documentation)\n")
-			(append "hostname   " #hostname "\n")
-			(append "interface  sana0 " #device " " #unit " address "
-				#addr "\n")
-			(append "gateway    " #gw "\n")
-			(append "nameserver " #dns "\n"))
 	))
+
+; one interface per adapter, Ethernet first (the preferred route); a
+; fixed address goes to the first one
+(set #fixedtext (cat " address " #addr))
+(set #ethline "")
+(set #wlanline "")
+(set #next "sana0")
+(if (<> #eth "")
+	(
+		(set #ethline (cat "interface  sana0 " #eth " " #ethunit
+			(if (= #mode 1) #fixedtext " dhcp") "\n"))
+		(set #next "sana1")
+	))
+(if (<> #wlan "")
+	(set #wlanline (cat "interface  " #next " " #wlan " " #wlanunit
+		(if (and (= #mode 1) (= #eth "")) #fixedtext " dhcp")
+		" wifi\n")))
+
+(set #confdir "ENVARC:AmiBSDNet")
+(makedir #confdir)
+(set #conf (tackon #confdir "AmiBSDNet.conf"))
+(textfile
+	(prompt "Writing the network configuration")
+	(help @textfile-help)
+	(dest #conf)
+	(append "# AmiBSDNet configuration (see the AmiBSDNet documentation; "
+		"the status icon's Settings window edits it)\n")
+	(append "hostname   " #hostname "\n")
+	(append #ethline)
+	(append #wlanline)
+	(append (if (<> #gw "") (cat "gateway    " #gw "\n") ""))
+	(append (if (<> #dns "") (cat "nameserver " #dns "\n") "")))
 
 ; the running system reads ENV:
 (makedir "ENV:AmiBSDNet")

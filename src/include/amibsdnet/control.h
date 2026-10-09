@@ -49,6 +49,8 @@ struct NetCtrlMsg {
 	char	text[NETCTRL_TEXTSIZE];
 	ULONG	nifaces;		/* NETCTRL_IFLIST */
 	struct NetCtrlIface ifaces[NETCTRL_MAXIFACES];
+	ULONG	ndns;			/* NETCTRL_IFLIST: name servers in use */
+	ULONG	dns[4];
 };
 
 #endif /* AMIBSDNET_CONTROL_H */

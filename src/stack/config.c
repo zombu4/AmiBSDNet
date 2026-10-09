@@ -3,6 +3,7 @@
  */
 
 #include <exec/types.h>
+#include <exec/semaphores.h>
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <exec/execbase.h>
@@ -27,6 +28,72 @@ static char cfgfile[256];
 /* bumped on every (re)configuration; DHCP renewers of an older
    generation stop */
 volatile ULONG config_generation;
+
+/*
+ * All interfaces work at the same time, each with its own address and
+ * its own network.  The default route goes through the first usable
+ * interface that has a router, in configuration order (the installer
+ * lists Ethernet before Wi-Fi), so plugging in a cable takes over from
+ * Wi-Fi and unplugging it falls back.  Called by the DHCP clients and
+ * the stack task.
+ */
+static struct SignalSemaphore routesem;
+static int routesem_ready;
+static ULONG route_gw;
+
+void
+stack_update_route(void)
+{
+	ULONG gw = 0;
+	int i;
+
+	ObtainSemaphore(&routesem);
+	for (i = 0; i < nifaces; i++)
+		if (ifaces[i].up && ifaces[i].gateway) {
+			gw = ifaces[i].gateway;
+			break;
+		}
+	if (gw != route_gw) {
+		if (route_gw)
+			rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, route_gw);
+		route_gw = 0;
+		if (gw) {
+			if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, gw) == 0) {
+				route_gw = gw;
+				P("default route via %lu.%lu.%lu.%lu\n", gw >> 24,
+				    (gw >> 16) & 255, (gw >> 8) & 255, gw & 255);
+			} else
+				P("default route: errno %d\n", amiga_rump_errno());
+		}
+	}
+	ReleaseSemaphore(&routesem);
+}
+
+/* name servers of all usable interfaces (primary first), then the
+   configured ones */
+void
+stack_update_dns(void)
+{
+	ULONG all[4];
+	int i, j, k, n = 0;
+
+	ObtainSemaphore(&routesem);
+	for (i = 0; i <= nifaces; i++) {
+		const ULONG *list = i < nifaces ? ifaces[i].dns : cfg_ns;
+		int cnt = i < nifaces ? (ifaces[i].up ? ifaces[i].ndns : 0) :
+		    cfg_nns;
+
+		for (j = 0; j < cnt && n < 4; j++) {
+			for (k = 0; k < n && all[k] != list[j]; k++)
+				;
+			if (k == n)
+				all[n++] = list[j];
+		}
+	}
+	if (n)
+		netdb_set_nameservers(all, n);
+	ReleaseSemaphore(&routesem);
+}
 
 void
 sb_copy(char *d, const char *s, unsigned long n)
@@ -149,6 +216,7 @@ stack_link_changed(void)
 			P("%s: link %s\n", ifaces[i].name,
 			    ifaces[i].link ? "up" : "down");
 		}
+	stack_update_route();
 }
 
 static void
@@ -203,7 +271,8 @@ iface_bringup(struct iface *ifc)
 			P("%s: cannot set address (errno %d)\n", ifc->name,
 			    amiga_rump_errno());
 		else {
-			ifc->up = 1;
+			ifc->gateway = cfg_gateway;
+			ifc->up = ifc->link;
 			P("%s: %lu.%lu.%lu.%lu\n", ifc->name, ifc->addr >> 24,
 			    (ifc->addr >> 16) & 255, (ifc->addr >> 8) & 255,
 			    ifc->addr & 255);
@@ -219,6 +288,10 @@ stack_configure(const char *path)
 	BPTR fh;
 	int n, i, lineno = 0;
 
+	if (!routesem_ready) {
+		InitSemaphore(&routesem);
+		routesem_ready = 1;
+	}
 	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0)
 		return -1;
 	sb_copy(cfgfile, path, sizeof(cfgfile));
@@ -272,16 +345,8 @@ stack_configure(const char *path)
 
 	for (i = 0; i < nifaces; i++)
 		iface_bringup(&ifaces[i]);
-	if (cfg_gateway) {
-		if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, cfg_gateway) != 0)
-			P("default route: errno %d\n", amiga_rump_errno());
-		else
-			P("default route via %lu.%lu.%lu.%lu\n", cfg_gateway >> 24,
-			    (cfg_gateway >> 16) & 255, (cfg_gateway >> 8) & 255,
-			    cfg_gateway & 255);
-	}
-	if (cfg_nns)
-		netdb_set_nameservers(cfg_ns, cfg_nns);
+	stack_update_route();
+	stack_update_dns();
 	return 0;
 }
 
@@ -296,6 +361,7 @@ stack_offline(void)
 		rump_amibsdnet_ifflags(ifaces[i].name, 0, NB_IFF_UP);
 		ifaces[i].up = 0;
 	}
+	stack_update_route();
 }
 
 void
@@ -312,27 +378,45 @@ stack_online(void)
 		if (!ifc->dhcp && ifc->addr)
 			ifc->up = ifc->link;
 	}
+	stack_update_route();
 }
 
-/* drop all addresses and the default route, then read the file again */
+/*
+ * Apply a changed configuration file (from the settings window or
+ * NetCtrl RECONFIG): stop the DHCP clients and remove the interfaces, so
+ * their drivers are closed and may change, then set everything up again.
+ */
 int
 stack_reconfigure(void)
 {
-	int i;
+	int i, waited;
 
 	if (!cfgfile[0])
 		return -1;
+	P("AmiBSDNet: applying the new configuration\n");
+	config_generation++;
+	for (waited = 0; dhcp_clients > 0 && waited < 200; waited++)
+		Delay(5);		/* they stop within a second */
+	if (dhcp_clients > 0)
+		P("AmiBSDNet: DHCP clients still running\n");
+	for (i = 0; i < nifaces; i++) {
+		ifaces[i].up = 0;
+		ifaces[i].gateway = 0;
+	}
+	stack_update_route();
 	for (i = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 
+		P("%s: removing\n", ifc->name);
 		if (ifc->addr)
 			rump_amibsdnet_ifdeladdr4(ifc->name, ifc->addr);
-		if (ifc->gateway)
-			rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, ifc->gateway);
-		ifc->up = 0;
+		/* virtif refuses to remove an interface that is up */
+		rump_amibsdnet_ifflags(ifc->name, 0, NB_IFF_UP);
+		if (rump_amibsdnet_ifdestroy(ifc->name) != 0)
+			P("%s: cannot remove (errno %d)\n", ifc->name,
+			    amiga_rump_errno());
 	}
-	if (cfg_gateway)
-		rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, cfg_gateway);
+	nifaces = 0;
 	return stack_configure(cfgfile);
 }
 

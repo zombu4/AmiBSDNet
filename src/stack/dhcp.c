@@ -67,6 +67,7 @@ struct dhcpctx {
 	UBYTE mac[6];
 	ULONG xid;
 	struct Task *task;
+	ULONG generation;		/* configuration this client belongs to */
 
 	/* filled by the tap (on the I/O process) */
 	volatile int have_reply;
@@ -282,7 +283,7 @@ dhcp_wait(struct dhcpctx *c, ULONG ms, int want1, int want2,
 	ULONG waited = 0;
 	int type;
 
-	while (waited < ms) {
+	while (waited < ms && c->generation == config_generation) {
 		if (c->have_reply) {
 			type = dhcp_parse(c->reply, c->replylen, l);
 			c->have_reply = 0;
@@ -318,6 +319,7 @@ apply_lease(struct dhcpctx *c, const struct lease *l)
 {
 	struct iface *ifc = c->ifc;
 	char a[16], g[16];
+	int i;
 
 	if (rump_amibsdnet_ifaddr4(ifc->name, l->addr, l->mask) != 0) {
 		P("%s: DHCP address rejected (errno %d)\n", ifc->name,
@@ -326,14 +328,13 @@ apply_lease(struct dhcpctx *c, const struct lease *l)
 	}
 	ifc->addr = l->addr;
 	ifc->mask = l->mask;
+	ifc->gateway = l->router;
+	for (i = 0; i < l->ndns && i < 4; i++)
+		ifc->dns[i] = l->dns[i];
+	ifc->ndns = i;
 	ifc->up = 1;
-	if (l->router) {
-		rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, ifc->gateway);
-		if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, l->router) == 0)
-			ifc->gateway = l->router;
-	}
-	if (l->ndns)
-		netdb_set_nameservers(l->dns, l->ndns);
+	stack_update_route();
+	stack_update_dns();
 	if (l->domain[0])
 		netdb_set_domain(l->domain);
 	fmt_ip(a, l->addr);
@@ -381,13 +382,14 @@ drop_lease(struct dhcpctx *c)
 {
 	struct iface *ifc = c->ifc;
 
-	if (ifc->gateway)
-		rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, ifc->gateway);
+	ifc->up = 0;
+	ifc->gateway = 0;
+	ifc->ndns = 0;
+	stack_update_route();
+	stack_update_dns();
 	if (ifc->addr)
 		rump_amibsdnet_ifdeladdr4(ifc->name, ifc->addr);
 	ifc->addr = 0;
-	ifc->gateway = 0;
-	ifc->up = 0;
 }
 
 struct dhcpclient {
@@ -499,9 +501,16 @@ dhcp_thread(void *arg)
 	}
 	if (bound)
 		drop_lease(c);
+	sana_set_tap(c->viu, NULL, NULL);
 	FreeVec(d);
+	Forbid();
+	dhcp_clients--;
+	Permit();
 	return NULL;
 }
+
+/* running clients: a reconfiguration waits for the old ones to end */
+volatile int dhcp_clients;
 
 /* start the DHCP client of an interface; returns at once */
 int
@@ -513,7 +522,7 @@ dhcp_configure(struct iface *ifc)
 	if ((d = AllocVec(sizeof(*d), MEMF_FAST | MEMF_CLEAR)) == NULL)
 		return -1;
 	d->c.ifc = ifc;
-	d->generation = config_generation;
+	d->generation = d->c.generation = config_generation;
 	if ((d->c.viu = sana_find(ifc->device, ifc->unit)) == NULL) {
 		FreeVec(d);
 		return -1;
@@ -521,8 +530,14 @@ dhcp_configure(struct iface *ifc)
 	for (i = 0; i < 6; i++)
 		d->c.mac[i] = sana_macaddr(d->c.viu)[i];
 	rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
+	Forbid();
+	dhcp_clients++;
+	Permit();
 	if (rumpuser_thread_create(dhcp_thread, d, "AmiBSDNet DHCP", 0, 0, -1,
 	    NULL) != 0) {
+		Forbid();
+		dhcp_clients--;
+		Permit();
 		FreeVec(d);
 		return -1;
 	}

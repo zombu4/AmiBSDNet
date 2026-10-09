@@ -307,3 +307,52 @@ wm_has_network(const char *ssid)
 	}
 	return r;
 }
+
+/* the preferred (first) network in Wireless.prefs; 0 if there is one */
+static int
+get_value(const char *b, const char *end, const char *key, char *out, int n)
+{
+	int kl = slen(key), i;
+
+	for (; b + kl + 2 < end && *b != '}'; b++)
+		if ((b[-1] == '\t' || b[-1] == ' ' || b[-1] == '\n' ||
+		    b[-1] == '{') && b[kl] == '=' && b[kl + 1] == '"') {
+			for (i = 0; i < kl && b[i] == key[i]; i++)
+				;
+			if (i < kl)
+				continue;
+			b += kl + 2;
+			for (i = 0; b < end && *b != '"' && i < n - 1; i++)
+				out[i] = *b++;
+			out[i] = '\0';
+			return 1;
+		}
+	return 0;
+}
+
+int
+wm_get_network(char *ssid, int ssidlen, char *psk, int psklen)
+{
+	LONG len;
+	char *buf = read_file(PREFS_ENV, &len), *p, *end;
+	int r = -1;
+
+	if (buf == NULL)
+		buf = read_file(PREFS_ENVARC, &len);
+	ssid[0] = psk[0] = '\0';
+	if (buf) {
+		end = buf + len;
+		for (p = buf; p + 9 < end; p++)
+			if (p[0] == 'n' && p[1] == 'e' && p[2] == 't' &&
+			    p[3] == 'w' && p[4] == 'o' && p[5] == 'r' &&
+			    p[6] == 'k' && p[7] == '=' && p[8] == '{') {
+				if (get_value(p + 9, end, "ssid", ssid, ssidlen)) {
+					get_value(p + 9, end, "psk", psk, psklen);
+					r = 0;
+				}
+				break;
+			}
+		FreeVec(buf);
+	}
+	return r;
+}
