@@ -148,6 +148,23 @@ _start(void)
 	out = wbmsg ? 0 : Output();
 
 	if (FindName(&SysBase->LibList, "bsdsocket.library")) {
+		/*
+		 * Another stack runs at boot again: a failed trial's fallback
+		 * (see trial.c) is done, also if FALLBACK could not take
+		 * AmiBSDNet out of the boot.  A trial still to come ("1": the
+		 * installer ran, the old stack runs until the reboot) stays.
+		 */
+		if (FindPort((CONST_STRPTR)"AmiBSDNet") == NULL) {
+			APTR oldwin = me->pr_WindowPtr;
+			char v[4];
+
+			me->pr_WindowPtr = (APTR)-1;
+			if (GetVar((CONST_STRPTR)"AmiBSDNet/Trial", (STRPTR)v,
+			    sizeof(v), GVF_GLOBAL_ONLY) >= 0 && v[0] != '1')
+				DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+				    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+			me->pr_WindowPtr = oldwin;
+		}
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: a TCP/IP stack is "
 			    "already running\n");
@@ -178,17 +195,6 @@ _start(void)
 		    (CONST_STRPTR)"bsdsocket.library") != NULL;
 		Permit();
 		if (ours || other) {
-			/* the other stack runs again: a trial (see trial.c) is
-			   over, its fallback done, also if FALLBACK could not
-			   take AmiBSDNet out of the boot */
-			if (other) {
-				APTR oldwin = me->pr_WindowPtr;
-
-				me->pr_WindowPtr = (APTR)-1;
-				DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
-				    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
-				me->pr_WindowPtr = oldwin;
-			}
 			if (out)
 				PutStr((CONST_STRPTR)(ours ?
 				    "AmiBSDNet is already running\n" :

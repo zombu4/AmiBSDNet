@@ -687,8 +687,14 @@ answer:
 			return HOST_NOT_FOUND;
 		if (rcode != 0)
 			return rcode == 2 ? TRY_AGAIN : NO_RECOVERY;
-		while (qd-- > 0 && pos >= 0)
-			pos = dns_skip_name(r, n, pos) + 4;
+		while (qd-- > 0 && pos >= 0) {
+			pos = dns_skip_name(r, n, pos);
+			if (pos < 0)
+				break;		/* malformed: no answers */
+			pos += 4;
+		}
+		if (pos < 0)
+			return NO_RECOVERY;
 		sb_strlcpy(res->cname, name, sizeof(res->cname));
 		res->naddr = 0;
 		res->ptrname[0] = '\0';
@@ -838,7 +844,8 @@ sb_gethostbyname_r(struct SocketBase *sb, STRPTR name, struct hostent *hp,
 	LONG e;
 
 	/* layout in buf: aliases[1], addrs[n+1], address bytes, name */
-	if (buflen < 64 || (res = AllocVec(sizeof(*res), MEMF_ANY)) == NULL) {
+	if (name == NULL || buf == NULL || hp == NULL || buflen < 64 ||
+	    (res = AllocVec(sizeof(*res), MEMF_ANY)) == NULL) {
 		if (he)
 			*he = NO_RECOVERY;
 		return NULL;
@@ -1089,8 +1096,15 @@ srv_gai(struct SocketBase *sb, struct gai_args *a)
 {
 
 	a->rv4 = a->rv6 = HOST_NOT_FOUND;
-	if (a->family == AF_UNSPEC || a->family == AF_INET)
-		a->rv4 = resolve4(sb, a->host, a->r4);
+	/* an IPv6 literal ("::1") is never looked up as an IPv4 name (that
+	   would ask the name servers first, for nothing) */
+	{
+		UBYTE t6[16];
+
+		if ((a->family == AF_UNSPEC || a->family == AF_INET) &&
+		    !pton6(a->host, t6))
+			a->rv4 = resolve4(sb, a->host, a->r4);
+	}
 	if (a->family == AF_UNSPEC || a->family == AF_INET6) {
 		UBYTE tmp[16];
 

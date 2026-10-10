@@ -39,6 +39,7 @@ struct stack {
 	const char *wbstartup[3];	/* WBStartup items starting so */
 	int found;			/* installed */
 	int atboot;			/* still started at boot */
+	int inscript;			/* ... by a startup script line */
 };
 
 static struct stack stacks[] = {
@@ -68,6 +69,7 @@ static const char *startup_files[] = {
 };
 
 static int disk_bsdsocket;
+static int startup_rv;		/* otherstacks_apply(): the script edits */
 
 /* if set, told about every match (NetCtrl CHECK lists them) */
 void (*otherstacks_say)(const char *where, const char *what, int len);
@@ -270,7 +272,7 @@ otherstacks_check(char *names, int size)
 	char *buf, *p, *e;
 
 	for (i = 0; i < NSTACKS; i++) {
-		stacks[i].found = stacks[i].atboot = 0;
+		stacks[i].found = stacks[i].atboot = stacks[i].inscript = 0;
 		for (j = 0; stacks[i].files[j]; j++)
 			if (exists(stacks[i].files[j])) {
 				stacks[i].found = 1;
@@ -286,7 +288,7 @@ otherstacks_check(char *names, int size)
 			for (e = p; e < buf + len && *e != '\n'; e++)
 				;
 			if ((s = line_stack(p, e - p, 0)) != NULL) {
-				s->found = s->atboot = 1;
+				s->found = s->atboot = s->inscript = 1;
 				say(startup_files[i], p, e - p);
 			}
 		}
@@ -735,42 +737,78 @@ otherstacks_self_atboot(void)
 int
 otherstacks_fallback(char *msg, int size)
 {
+	char names[128];
 	APTR old;
-	int rv, tries, restored;
+	int rv, tries, back = 0, inscript = 0, offok = 0;
+	unsigned i;
 	BPTR l;
 
 	/*
-	 * At boot the startup scripts may still be running (and so cannot be
-	 * replaced): try again for up to two minutes.
+	 * Put the other stack back into the startup scripts.  At boot the
+	 * scripts may still be running (and so cannot be replaced): try
+	 * again for up to two minutes.  "Back" means: every script edit
+	 * worked and the other stack starts at boot again (a script line
+	 * or its WBStartup item; LIBS:bsdsocket.library alone does not
+	 * start it).  Only then does AmiBSDNet leave the boot: never
+	 * neither.
 	 */
-	restored = 0;
 	for (tries = 0; tries < 24; tries++) {
-		char names[128];
-
 		rv = otherstacks_apply(OTHERS_RESTORE);
-		/*
-		 * AmiBSDNet leaves the boot only once the other stack is back
-		 * in it (never neither of them).  "Back" is what counts, also
-		 * if some other part could not be put back (a WBStartup item
-		 * or LIBS:bsdsocket.library: reported, not retried).
-		 */
 		otherstacks_check(names, sizeof(names));
-		if (!restored && (rv == 0 || otherstacks_atboot(names,
-		    sizeof(names)) > 0)) {
-			restored = 1;
+		/* started by a script line or its WBStartup item (Miami);
+		   LIBS:bsdsocket.library alone starts nothing */
+		for (inscript = 0, i = 0; i < NSTACKS; i++)
+			if (stacks[i].atboot)
+				inscript = 1;
+		if (startup_rv == 0 && !inscript)
+			break;		/* nothing there to go back to */
+		if (startup_rv == 0) {
+			back = 1;
 			old = quiet();
-			if (own_startup_off() != 0) {
-				restored = 0;	/* still in the boot: retry */
-				rv = -1;
-			}
+			offok = own_startup_off() == 0;
 			loud(old);
+			if (offok)
+				break;
 		}
-		if (restored)
-			break;
 		Delay(250);
 	}
+
 	old = quiet();
-	/* the status icon is not wanted without the stack */
+	/* T: is gone after the reboot: keep the logs */
+	if ((l = CreateDir((CONST_STRPTR)"SYS:Storage/AmiBSDNet-Logs")) != 0)
+		UnLock(l);
+	copy_file("T:AmiBSDNet.log", "SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log");
+	copy_file("T:WirelessManager.log",
+	    "SYS:Storage/AmiBSDNet-Logs/WirelessManager.log");
+
+	if (!back || !offok) {
+		/*
+		 * AmiBSDNet stays, with its own Wi-Fi driver: the trial ends
+		 * here, so that it starts normally from the next boot on and
+		 * there is a network (the other stack could not come back,
+		 * or AmiBSDNet could not be taken out of the boot).
+		 */
+		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+		loud(old);
+		cat(msg, !back && startup_rv == 0 ?
+		    "There is no other TCP/IP stack to go back to, so nothing\n"
+		    "was changed: AmiBSDNet stays (it starts at every boot)." :
+		    !back ?
+		    "The previous TCP/IP stack could not be put back into the\n"
+		    "startup files (are they write-protected?). AmiBSDNet stays,\n"
+		    "so that there is a network: reboot to start it. Fix the\n"
+		    "files and run \"NetCtrl FALLBACK\" again to go back." :
+		    "The previous TCP/IP stack is back in the startup files, but\n"
+		    "AmiBSDNet could not be taken out of S:User-Startup: remove\n"
+		    "its line there by hand (it does not start next to another\n"
+		    "stack anyway).", "", size);
+		cat(msg, msg, "\n\nAmiBSDNet's logs were saved in "
+		    "SYS:Storage/AmiBSDNet-Logs.", size);
+		return -1;
+	}
+
+	/* the other stack is back: AmiBSDNet's parts go */
 	park("SYS:WBStartup/AmiBSDNetStatus", "AmiBSDNet", "AmiBSDNetStatus",
 	    0);
 	park("SYS:WBStartup/AmiBSDNetStatus.info", "AmiBSDNet",
@@ -787,28 +825,16 @@ otherstacks_fallback(char *msg, int size)
 	if (exists("DEVS:Firmware.old") &&
 	    copy_dir("DEVS:Firmware.old", "DEVS:Firmware") != 0)
 		rv = -1;
-	/* T: is gone after the reboot: keep the logs */
-	if ((l = CreateDir((CONST_STRPTR)"SYS:Storage/AmiBSDNet-Logs")) != 0)
-		UnLock(l);
-	copy_file("T:AmiBSDNet.log", "SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log");
-	copy_file("T:WirelessManager.log",
-	    "SYS:Storage/AmiBSDNet-Logs/WirelessManager.log");
-	/* not restored: the trial mark stays, so the next boot tries again
-	   (with AmiBSDNet still in the boot) */
-	if (restored)
-		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
-		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+	DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 	loud(old);
 	cat(msg, rv == 0 ? "The previous TCP/IP stack and Wi-Fi driver are "
 	    "back, and AmiBSDNet\nis no longer started at boot. Reboot to use "
-	    "them.\n\nAmiBSDNet's logs were saved in "
-	    "SYS:Storage/AmiBSDNet-Logs." : restored ?
-	    "Not everything could be put back; see \"NetCtrl CHECK\".\n"
-	    "AmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs." :
-	    "The previous TCP/IP stack could not be put back into the\n"
-	    "startup files (are they protected?). AmiBSDNet stays in the\n"
-	    "boot and tries again at the next boot; see \"NetCtrl CHECK\".\n"
-	    "AmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs.", "",
+	    "them." :
+	    "The previous TCP/IP stack is back in the startup files and\n"
+	    "AmiBSDNet is no longer started at boot, but not everything\n"
+	    "could be put back (see \"NetCtrl CHECK\"). Reboot to use it.",
+	    "\n\nAmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs.",
 	    size);
 	return rv;
 }
@@ -823,9 +849,10 @@ otherstacks_apply(int mode)
 	if (mode != 2)
 		otherstacks_check(dummy, sizeof(dummy));
 	old = quiet();
+	startup_rv = 0;
 	for (i = 0; startup_files[i]; i++)
 		if (edit_startup(startup_files[i], mode) < 0)
-			rv = -1;
+			rv = startup_rv = -1;
 	if (move_wbstartup(mode) < 0)
 		rv = -1;
 	if (mode == 2) {
