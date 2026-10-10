@@ -51,6 +51,8 @@ Early development.
       hidden otherwise; its driver is copied from the adapter's disk with
       read-back checking, optional verification against the official
       builds (`src/common/drvcheck.c`); not bundled (no licence)
+- [x] `SerialShell`: a Shell on the serial port (8N1, no handshaking,
+      19200 baud by default), switched on and off in Settings
 - [x] Installed and tested with the official Workbench 3.2 installer
       (Kickstart 3.2.2, 68040) in WinUAE
 - [ ] Tested on PiStorm hardware (wifipi.device, genet.device)

@@ -45,7 +45,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.5 (10.10.2026)";
+    "\0$VER: NetCtrl 0.6 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)

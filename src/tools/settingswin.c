@@ -11,6 +11,8 @@
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <dos/dostags.h>
+#include <dos/var.h>
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
@@ -48,6 +50,8 @@ struct settings {
 	char	crcs[40];		/* accepted driver CRCs, hex, spaces */
 	char	paulaline[200];		/* a hand-written PaulaNET interface */
 	int	paulafixed;		/* ... with a fixed address */
+	int	sershell;		/* Shell on the serial port */
+	int	serbaud;		/* index into bauds[] */
 };
 
 static struct settings cur, orig;
@@ -466,7 +470,8 @@ mkdirs(int envarc)
 enum {
 	GID_ETH = 1, GID_ETHUNIT, GID_WIFI, GID_WIFIUNIT, GID_DETECT,
 	GID_MODE, GID_ADDR, GID_GW, GID_DNS, GID_HOST, GID_SSID, GID_SCAN,
-	GID_PSK, GID_PAULA, GID_VERIFY, GID_CRC, GID_CHECK, GID_STATUS,
+	GID_PSK, GID_PAULA, GID_VERIFY, GID_CRC, GID_CHECK, GID_SERIAL,
+	GID_BAUD, GID_STATUS,
 	GID_SAVE, GID_USE, GID_CANCEL, NGADS
 };
 
@@ -474,6 +479,109 @@ static struct Gadget *gad[NGADS];
 static struct Window *win;
 
 static const char *modes[] = { "Automatic (DHCP)", "Fixed address", NULL };
+
+/* the serial Shell's speeds (8N1, no handshaking) */
+static const ULONG bauds[] = { 9600, 19200, 38400, 57600, 115200 };
+static const char *baudlabels[] = { "9600 baud", "19200 baud", "38400 baud",
+    "57600 baud", "115200 baud", NULL };
+#define	NBAUDS		5
+#define	BAUD_DEFAULT	1	/* 19200 */
+#define	SERVAR		"AmiBSDNet/SerialShell"
+
+/* ENV:AmiBSDNet/SerialShell holds the baud rate while it is switched on */
+static void
+load_serial(struct settings *s)
+{
+	char v[16];
+	ULONG b = 0;
+	int i;
+
+	s->sershell = 0;
+	s->serbaud = BAUD_DEFAULT;
+	if (GetVar((CONST_STRPTR)SERVAR, (STRPTR)v, sizeof(v),
+	    GVF_GLOBAL_ONLY) <= 0)
+		return;
+	s->sershell = 1;
+	for (i = 0; v[i] >= '0' && v[i] <= '9'; i++)
+		b = b * 10 + (v[i] - '0');
+	for (i = 0; i < NBAUDS; i++)
+		if (bauds[i] == b)
+			s->serbaud = i;
+}
+
+static int
+serialshell_running(void)
+{
+	int r;
+
+	Forbid();
+	r = FindPort((CONST_STRPTR)"AmiBSDNet.SerialShell") != NULL;
+	Permit();
+	return r;
+}
+
+/* store it, and start, stop or restart the serial Shell to match;
+   -1: cannot start or store, -2: the running one does not stop */
+static int
+apply_serial(int save)
+{
+	BPTR in, out;
+	int i;
+	char v[12], *p = v;
+	ULONG flags = GVF_GLOBAL_ONLY | (save ? GVF_SAVE_VAR : 0);
+	static char cmd[48];
+
+	if (cur.sershell) {
+		put_num(&p, bauds[cur.serbaud]);
+		*p = '\0';
+		if (!SetVar((CONST_STRPTR)SERVAR, (CONST_STRPTR)v, -1, flags))
+			return -3;
+	} else
+		DeleteVar((CONST_STRPTR)SERVAR, flags);
+	if (cur.sershell == orig.sershell && (!cur.sershell ||
+	    cur.serbaud == orig.serbaud))
+		return 0;
+	/* off, or another speed: the running one goes first */
+	if (orig.sershell) {
+		in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+		SystemTags((CONST_STRPTR)"C:SerialShell STOP", SYS_Input, in,
+		    SYS_Output, out, TAG_DONE);
+		if (in)
+			Close(in);
+		if (out)
+			Close(out);
+		/* gone only once its Shell has ended (a command that ignores
+		   Ctrl-C keeps it): a new one could not start before */
+		for (i = 0; i < 25 && serialshell_running(); i++)
+			Delay(10);
+		if (serialshell_running())
+			return -2;
+	}
+	if (cur.sershell) {
+		BPTR l = Lock((CONST_STRPTR)"C:SerialShell", ACCESS_READ);
+
+		/* (asynchronous: a missing command would not be noticed) */
+		if (l == 0)
+			return -1;
+		UnLock(l);
+		scpy(cmd, "C:SerialShell START BAUD=", sizeof(cmd));
+		scpy(cmd + slen(cmd), v, sizeof(cmd) - slen(cmd));
+		in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+		/* (it keeps running: asynchronous) */
+		if (SystemTags((CONST_STRPTR)cmd, SYS_Input, in, SYS_Output, out,
+		    SYS_Asynch, TRUE, NP_Name, (ULONG)"SerialShell",
+		    TAG_DONE) != 0) {
+			if (in)
+				Close(in);
+			if (out)
+				Close(out);
+			return -1;
+		}
+	}
+	return 0;
+}
 
 static void
 set_attr(int id, ULONG tag, ULONG val)
@@ -612,6 +720,9 @@ show(void)
 	set_attr(GID_PAULA, GTCB_Checked, cur.paulanet);
 	set_attr(GID_VERIFY, GTCB_Checked, cur.verify);
 	set_attr(GID_CRC, GTST_String, (ULONG)cur.crcs);
+	set_attr(GID_SERIAL, GTCB_Checked, cur.sershell);
+	set_attr(GID_BAUD, GTCY_Active, cur.serbaud);
+	set_attr(GID_BAUD, GA_Disabled, !cur.sershell);
 	show_address();
 	ghost_paulanet();
 }
@@ -635,6 +746,7 @@ collect(void)
 	scpy(cur.psk, gstr(GID_PSK), sizeof(cur.psk));
 	cur.paulanet = checked(GID_PAULA);
 	cur.verify = checked(GID_VERIFY);
+	cur.sershell = checked(GID_SERIAL);
 	scpy(cur.crcs, gstr(GID_CRC), sizeof(cur.crcs));
 }
 
@@ -795,7 +907,7 @@ check(void)
 static int
 apply(int save)
 {
-	int wifi_changed;
+	int wifi_changed, i;
 
 	collect();
 	if (check() != 0)
@@ -815,6 +927,15 @@ apply(int save)
 			return -1;
 		}
 	}
+	if ((i = apply_serial(save)) != 0) {
+		status(i == -2 ? "Serial Shell busy: end its command, then "
+		    "try again" : i == -3 ? "Cannot store the serial Shell "
+		    "setting" : "Cannot start C:SerialShell (is it installed?)");
+		return -1;
+	}
+	/* done: a retry after a later failure must not restart it */
+	orig.sershell = cur.sershell;
+	orig.serbaud = cur.serbaud;
 	status("Applying...");
 	/* the stack starts WirelessManager again with the new network */
 	if (wifi_changed && wm_running() && wm_stop() != 0) {
@@ -888,6 +1009,7 @@ settings_window(void)
 	if ((vi = GetVisualInfoA(scr, NULL)) == NULL)
 		goto unlock;
 	load(&cur);
+	load_serial(&cur);
 	CopyMem(&cur, &orig, sizeof(orig));
 	get_live();
 	if (!drv_paulanet_path(probe_paulanet, sizeof(probe_paulanet)))
@@ -898,8 +1020,8 @@ settings_window(void)
 	row = fh + 8;
 	gap = 6;
 	top = scr->WBorTop + fh + 1 + 6;
-	/* 12 rows, 4 gaps: on a short screen (PAL 640x256) closer together */
-	if (top + 12 * row + 4 * gap + 2 + fh + 6 + scr->WBorBottom + 6 >
+	/* 13 rows, 4 gaps: on a short screen (PAL 640x256) closer together */
+	if (top + 13 * row + 4 * gap + 2 + fh + 6 + scr->WBorBottom + 6 >
 	    scr->Height) {
 		row = fh + 6;
 		gap = 2;
@@ -982,6 +1104,17 @@ settings_window(void)
 	ng.ng_Width = 70;
 	g = mk(BUTTON_KIND, g, &ng, GID_CHECK, "Check", PLACETEXT_IN,
 	    TAG_IGNORE, 0, TAG_IGNORE, 0);
+
+	/* a Shell on the serial port (C:SerialShell): 8N1, no handshaking */
+	ng.ng_TopEdge += row;
+	ng.ng_LeftEdge = 10;
+	ng.ng_Width = 26;
+	g = mk(CHECKBOX_KIND, g, &ng, GID_SERIAL, "Shell on the serial port",
+	    PLACETEXT_RIGHT, GTCB_Checked, cur.sershell, GTCB_Scaled, TRUE);
+	ng.ng_LeftEdge = w - 10 - 150;
+	ng.ng_Width = 150;
+	g = mk(CYCLE_KIND, g, &ng, GID_BAUD, NULL, 0, GTCY_Labels,
+	    (ULONG)baudlabels, GTCY_Active, cur.serbaud);
 
 	/* status line and buttons */
 	ng.ng_TopEdge += row + gap;
@@ -1107,6 +1240,13 @@ settings_window(void)
 			case GID_VERIFY:
 				collect();
 				ghost_paulanet();
+				break;
+			case GID_SERIAL:
+				collect();
+				set_attr(GID_BAUD, GA_Disabled, !cur.sershell);
+				break;
+			case GID_BAUD:
+				cur.serbaud = code < NBAUDS ? code : BAUD_DEFAULT;
 				break;
 			case GID_CHECK:
 				check_driver();

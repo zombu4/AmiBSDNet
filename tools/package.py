@@ -22,7 +22,7 @@ import mkicon  # noqa: E402
 
 BUILD = os.path.join(TOP, "build")
 STAGE = os.path.join(BUILD, "dist")
-VERSION = "0.5"
+VERSION = "0.6"
 
 BASH = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
 
@@ -43,6 +43,7 @@ def build():
              ["src/common/probe.c", "src/tools/otherstacks.c",
               "src/common/drvcheck.c"]),
             ("src/tools/ping.c", "build/Ping", []),
+            ("src/tools/serialshell.c", "build/SerialShell", []),
             ("src/tools/status.c", "build/AmiBSDNetStatus",
              ["src/tools/wifiwin.c", "src/tools/settingswin.c",
               "src/common/wm.c", "src/common/probe.c",
@@ -107,7 +108,7 @@ def stage():
     for d in ("C", "Status", "Docs"):
         os.makedirs(os.path.join(root, d))
 
-    for name in ("AmiBSDNet", "NetCtrl", "Ping"):
+    for name in ("AmiBSDNet", "NetCtrl", "Ping", "SerialShell"):
         shutil.copy(os.path.join(BUILD, name), os.path.join(root, "C", name))
 
     # third-party pieces for Wi-Fi (fetched by tools/bootstrap.py; their
@@ -175,7 +176,8 @@ def main():
         for arc, src in files:
             z.write(src, arc)
     sizes = {n: os.path.getsize(os.path.join(BUILD, n))
-             for n in ("AmiBSDNet", "NetCtrl", "Ping", "AmiBSDNetStatus")}
+             for n in ("AmiBSDNet", "NetCtrl", "Ping", "SerialShell",
+                       "AmiBSDNetStatus")}
     print(f"package: {len(files)} files -> {lha} "
           f"({os.path.getsize(lha)} bytes), {zp}")
     for n, sz in sizes.items():

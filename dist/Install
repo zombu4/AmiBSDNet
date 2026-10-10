@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.5")
+(set #ver "0.6")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -79,7 +79,7 @@
 	(help @copyfiles-help)
 	(source "C/")
 	(dest "C:")
-	(choices "AmiBSDNet" "NetCtrl" "Ping")
+	(choices "AmiBSDNet" "NetCtrl" "Ping" "SerialShell")
 	(nogauge))
 
 ; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt); a newer
@@ -520,10 +520,36 @@
 ; -------------------------------------------------------------------
 ; start at boot
 
+; (SerialShell AUTO starts the Shell on the serial port only if it is
+; switched on: ENV:AmiBSDNet/SerialShell, set below or in Settings)
 (startup #app
 	(prompt "AmiBSDNet will be started from S:User-Startup at every boot.")
 	(help @startup-help)
-	(command "C:AmiBSDNet\n"))
+	(command "C:AmiBSDNet\nRun >NIL: C:SerialShell AUTO\n"))
+
+(if (not @pretend)
+	(if (askbool
+			(prompt "Start a Shell on the serial port at every boot?\n\n"
+				"19200 baud, 8 data bits, no parity, 1 stop bit, no "
+				"handshaking (no XON/XOFF, no RTS/CTS). It can be switched "
+				"on and off, and its speed changed, in the status icon's "
+				"Settings window.")
+			(help "For a terminal program on another computer, connected "
+				"with a null-modem cable. Type EndShell to end a Shell; a "
+				"new one starts. \"SerialShell STOP\" stops it until the "
+				"next boot.")
+			(default 0))
+		(
+			(makedir "ENVARC:AmiBSDNet")
+			(textfile (dest "ENVARC:AmiBSDNet/SerialShell") (append "19200"))
+			(textfile (dest "ENV:AmiBSDNet/SerialShell") (append "19200"))
+		)
+		(
+			(if (exists "ENVARC:AmiBSDNet/SerialShell")
+				(delete "ENVARC:AmiBSDNet/SerialShell" (optional "force")))
+			(if (exists "ENV:AmiBSDNet/SerialShell")
+				(delete "ENV:AmiBSDNet/SerialShell" (optional "force")))
+		)))
 
 (if (askbool
 		(prompt "Show the AmiBSDNet status icon on the Workbench at every "
