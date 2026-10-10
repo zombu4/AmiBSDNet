@@ -234,8 +234,10 @@ read_file_err(const char *name, LONG *lenp, int *errp)
 	*lenp = 0;
 	if (fh == 0)
 		return NULL;
-	Seek(fh, 0, OFFSET_END);
-	size = Seek(fh, 0, OFFSET_BEGINNING);
+	if (Seek(fh, 0, OFFSET_END) < 0)
+		size = -1;
+	else
+		size = Seek(fh, 0, OFFSET_BEGINNING);
 	if (size < 0 || size > 1024 * 1024 ||
 	    (buf = AllocVec(size + 1, MEMF_ANY | MEMF_CLEAR)) == NULL) {
 		Close(fh);
@@ -283,23 +285,58 @@ block_end(const char *b, const char *end)
 	return end;
 }
 
-/* does a network={...} block (from p to its end) name this SSID? */
+static int get_value(const char *, const char *, const char *, char *, int);
+
+/* does the network={...} block at p ("network=") name this SSID?  The
+   SSID is read as get_value() reads it, so "a" and "a"b" differ */
 static int
 block_has_ssid(const char *p, const char *end, const char *ssid)
 {
-	int sl = slen(ssid);
+	char v[128];
+	int i;
 
-	for (; p + 6 + sl < end; p++)
-		if (p[0] == 's' && p[1] == 's' && p[2] == 'i' && p[3] == 'd' &&
-		    p[4] == '=' && p[5] == '"') {
-			int i;
+	if (end - p < 9 || !get_value(p + 8, end, "ssid", v, sizeof(v)) ||
+	    slen(v) == sizeof(v) - 1)	/* (cut: not a real SSID) */
+		return 0;
+	for (i = 0; v[i] && v[i] == ssid[i]; i++)
+		;
+	return v[i] == '\0' && ssid[i] == '\0';
+}
 
-			for (i = 0; i < sl && p[6 + i] == ssid[i]; i++)
-				;
-			if (i == sl && p[6 + sl] == '"')
-				return 1;
-		}
-	return 0;
+/* only blanks between the start of p's line and p (so a "# network="
+   comment, or text in a value, is not taken for a keyword) */
+static int
+at_line_start(const char *start, const char *p)
+{
+
+	while (p > start && (p[-1] == ' ' || p[-1] == '\t'))
+		p--;
+	return p == start || p[-1] == '\n' || p[-1] == '\r';
+}
+
+/* a key inside a block: only blanks before it on its line ("#\tssid="
+   is a comment).  There is always a "network=" earlier in the buffer, so
+   this never looks before it. */
+static int
+key_at_line_start(const char *p)
+{
+
+	while (p[-1] == ' ' || p[-1] == '\t')
+		p--;
+	return p[-1] == '\n' || p[-1] == '\r';
+}
+
+/* the next "network=" at the start of a line, from p; NULL if none */
+static const char *
+next_block(const char *start, const char *p, const char *end)
+{
+
+	for (; p + 8 < end; p++)
+		if (p[0] == 'n' && p[1] == 'e' && p[2] == 't' && p[3] == 'w' &&
+		    p[4] == 'o' && p[5] == 'r' && p[6] == 'k' && p[7] == '=' &&
+		    at_line_start(start, p))
+			return p;
+	return NULL;
 }
 
 static int
@@ -325,15 +362,10 @@ write_prefs(const char *name, const char *old, LONG oldlen, const char *ssid,
 
 	/* keep everything else, minus any older block for the same SSID */
 	while (old && p < end) {
-		const char *b = p, *e;
+		const char *b = next_block(old, p, end), *e;
 		int i;
 
-		for (; b + 8 < end; b++)
-			if (b[0] == 'n' && b[1] == 'e' && b[2] == 't' &&
-			    b[3] == 'w' && b[4] == 'o' && b[5] == 'r' &&
-			    b[6] == 'k' && b[7] == '=')
-				break;
-		if (b + 8 >= end) {
+		if (b == NULL) {
 			FWrite(fh, (APTR)p, end - p, 1);
 			break;
 		}
@@ -383,7 +415,12 @@ wm_has_network(const char *ssid)
 	int r = 0;
 
 	if (buf) {
-		r = block_has_ssid(buf, buf + len, ssid);
+		const char *p = buf, *end = buf + len;
+
+		while (!r && (p = next_block(buf, p, end)) != NULL) {
+			r = block_has_ssid(p, end, ssid);
+			p = block_end(p, end);
+		}
 		FreeVec(buf);
 	}
 	return r;
@@ -398,8 +435,7 @@ get_value(const char *b, const char *end, const char *key, char *out, int n)
 
 	end = block_end(b, end);
 	for (; b + kl + 2 < end; b++)
-		if ((b[-1] == '\t' || b[-1] == ' ' || b[-1] == '\n' ||
-		    b[-1] == '{') && b[kl] == '=' && b[kl + 1] == '"') {
+		if (b[kl] == '=' && b[kl + 1] == '"' && key_at_line_start(b)) {
 			for (i = 0; i < kl && b[i] == key[i]; i++)
 				;
 			if (i < kl)
@@ -439,7 +475,8 @@ wm_get_network(char *ssid, int ssidlen, char *psk, int psklen)
 		for (p = buf; p + 9 < end; p++)
 			if (p[0] == 'n' && p[1] == 'e' && p[2] == 't' &&
 			    p[3] == 'w' && p[4] == 'o' && p[5] == 'r' &&
-			    p[6] == 'k' && p[7] == '=' && p[8] == '{') {
+			    p[6] == 'k' && p[7] == '=' && p[8] == '{' &&
+			    at_line_start(buf, p)) {
 				if (get_value(p + 9, end, "ssid", ssid, ssidlen)) {
 					get_value(p + 9, end, "psk", psk, psklen);
 					r = 0;
