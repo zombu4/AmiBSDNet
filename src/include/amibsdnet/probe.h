@@ -16,7 +16,11 @@ struct probe_adapter {
 	int	wireless;		/* Wi-Fi (scans for networks) */
 };
 
-/* returns the number of adapters found, Ethernet ones first */
+/* returns the number of adapters found, Ethernet ones first.
+   PaulaNET.device is not among them (the stack adds it by itself when
+   the adapter is plugged in): probe_paulanet tells where its driver is,
+   "" if nowhere. */
 int	probe_adapters(struct probe_adapter *, int max);
+extern char probe_paulanet[64];
 
 #endif /* AMIBSDNET_PROBE_H */

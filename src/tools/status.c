@@ -38,6 +38,7 @@
 #include <proto/commodities.h>
 
 #include <amibsdnet/control.h>
+#include <amibsdnet/devopen.h>
 
 #include "statustool.h"
 
@@ -49,7 +50,7 @@ struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.4 (10.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.5 (10.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -272,7 +273,10 @@ update_icon(struct MsgPort *appport)
 
 			if (!(f & NETIF_ADMIN))
 				continue;
-			if (f & NETIF_NODRIVER) {
+			if (f & NETIF_UNVERIFIED) {
+				text = "Bad driver";
+				state = 3;
+			} else if (f & NETIF_NODRIVER) {
 				text = "No driver";
 				state = 3;
 			} else if (!(f & NETIF_LINK)) {
@@ -369,7 +373,10 @@ show_status(struct MsgPort *appport)
 		/* is there a wireless interface?  (fetch the text afterwards) */
 		if (stack_cmd(NETCTRL_IFLIST) == 0)
 			for (i = 0; i < ctl->nifaces; i++)
-				if (ctl->ifaces[i].flags & NETIF_WIRELESS) {
+				/* (not PaulaNET: PaulaNET Config sets up its
+				   network, not WirelessManager) */
+				if ((ctl->ifaces[i].flags & NETIF_WIRELESS) &&
+				    !amibsdnet_is_paulanet(ctl->ifaces[i].device)) {
 					wifi = ctl->ifaces[i];
 					haswifi = 1;
 					break;

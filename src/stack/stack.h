@@ -24,6 +24,9 @@ struct iface {
 	int wireless;			/* driver supports SANA-II wireless */
 	int attached;			/* the driver could be opened */
 	volatile int release;		/* went offline: give up the lease */
+	int optional;			/* plug-in adapter: hide if absent */
+	int hidden;			/* optional and its driver did not open */
+	int unverified;			/* driver file failed the check */
 	int link_logged;
 };
 

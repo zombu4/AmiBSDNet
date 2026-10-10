@@ -45,6 +45,10 @@ Early development.
 - [x] Wi-Fi bundled: WirelessManager (WPA/WPA2) and, for the PiStorm,
       wifipi.device with firmware (third-party, see
       `dist/Docs/ThirdParty.txt`)
+- [x] PaulaNET (floppy-port Wi-Fi) used automatically when plugged in,
+      hidden otherwise; its driver is copied from the adapter's disk with
+      read-back checking, optional verification against the official
+      builds (`src/common/drvcheck.c`); not bundled (no licence)
 - [x] Installed and tested with the official Workbench 3.2 installer
       (Kickstart 3.2.2, 68040) in WinUAE
 - [ ] Tested on PiStorm hardware (wifipi.device, genet.device)

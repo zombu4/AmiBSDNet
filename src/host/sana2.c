@@ -164,24 +164,28 @@ static struct TagItem s2_buffertags[] = {
 static int
 parse_linkstr(struct virtif_user *viu, const char *s)
 {
-	size_t i = 0;
+	/* "<driver>[:<unit>]"; the driver may be a path with a volume name
+	   ("PaulaNET:PaulaNET.device:0"), so the unit is after the last ':'
+	   and only if it is all digits */
+	size_t i, len = 0, end;
 	ULONG unit = 0;
-	int digits = 0;
+	const char *p;
 
-	while (*s && *s != ':' && i < sizeof(viu->devname) - 1)
-		viu->devname[i++] = *s++;
-	viu->devname[i] = '\0';
-	if (i == 0)
-		return RUMPUSER_EINVAL;
-	if (*s == ':') {
-		s++;
-		while (*s >= '0' && *s <= '9') {
-			unit = unit * 10 + (*s++ - '0');
-			digits++;
-		}
-		if (!digits || *s)
-			return RUMPUSER_EINVAL;
+	while (s[len])
+		len++;
+	end = len;
+	for (p = s + len; p > s && p[-1] >= '0' && p[-1] <= '9'; p--)
+		;
+	if (p < s + len && p > s && p[-1] == ':') {
+		end = p - 1 - s;
+		for (; *p; p++)
+			unit = unit * 10 + (*p - '0');
 	}
+	if (end == 0 || end >= sizeof(viu->devname))
+		return RUMPUSER_EINVAL;
+	for (i = 0; i < end; i++)
+		viu->devname[i] = s[i];
+	viu->devname[i] = '\0';
 	viu->unit = unit;
 	return 0;
 }

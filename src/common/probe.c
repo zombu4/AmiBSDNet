@@ -22,6 +22,7 @@
 #include <amibsdnet/probe.h>
 #include <amibsdnet/control.h>
 #include <amibsdnet/devopen.h>
+#include <amibsdnet/drvcheck.h>
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
@@ -183,10 +184,17 @@ stack_kind(const char *name)
 	return -1;
 }
 
+char probe_paulanet[64];
+
 static int
 add(struct probe_adapter *a, int n, int max, const char *name)
 {
 	int i, kind;
+
+	/* PaulaNET: opening it without the adapter is slow, and it is
+	   reported separately */
+	if (amibsdnet_is_paulanet(name))
+		return n;
 
 	for (i = 0; i < n; i++)
 		if (eq_nocase(a[i].device, name))
@@ -230,6 +238,8 @@ probe_adapters(struct probe_adapter *a, int max)
 			copy(names[nnames++], resident_names[i], 64);
 	Permit();
 
+	if (!drv_paulanet_path(probe_paulanet, sizeof(probe_paulanet)))
+		probe_paulanet[0] = '\0';
 	ask_stack();
 	for (i = 0; i < nnames; i++)
 		n = add(a, n, max, names[i]);

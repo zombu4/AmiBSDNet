@@ -2,7 +2,7 @@ Short:        NetBSD 11 TCP/IP stack for AmigaOS (bsdsocket)
 Author:       zombu4 (https://github.com/zombu4)
 Uploader:     zombu4 (https://github.com/zombu4)
 Type:         comm/tcp
-Version:      0.4
+Version:      0.5
 Architecture: m68k-amigaos >= 3.1.0
 Requires:     68020+, Fast RAM, a SANA-II network driver
 Distribution: NoCD
@@ -24,6 +24,10 @@ API), so existing network software works unchanged.
   cable when one is plugged in
 - Wi-Fi included: WirelessManager (WPA/WPA2) and, for the PiStorm, the
   wifipi.device driver with the Raspberry Pi Wi-Fi firmware
+- PaulaNET (Wi-Fi through the floppy port) used by itself whenever it
+  is plugged in, hidden otherwise; the installer copies its driver from
+  the adapter's disk and checks the copy (optional verification of the
+  driver against the official releases)
 - Workbench status icon and Exchange commodity: online/offline at a
   glance, double-click for details; Settings window for drivers,
   DHCP or fixed address, DNS and the Wi-Fi network, applied at once
