@@ -575,6 +575,13 @@
 
 (if (and (= #othersdo 1) (<> #others "") (not @pretend))
 	(
+		; "Keep" also after an earlier switch: put the other stack back
+		; (nothing happens if it was never taken out) and end a trial
+		(run "C/NetCtrl RESTOREOTHERS >NIL:" (safe))
+		(if (exists "ENVARC:AmiBSDNet/Trial")
+			(delete "ENVARC:AmiBSDNet/Trial" (optional "force") (safe)))
+		(if (exists "ENV:AmiBSDNet/Trial")
+			(delete "ENV:AmiBSDNet/Trial" (optional "force") (safe)))
 		(run "C/NetCtrl CHECK >NIL:" (safe))
 		(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
 		(if (<> #atboot "")

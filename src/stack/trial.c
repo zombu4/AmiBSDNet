@@ -39,6 +39,16 @@ extern struct ExecBase *SysBase;
 
 static volatile int trial_active, fallback_started;
 
+static int
+netctrl_present(void)
+{
+	BPTR l = Lock((CONST_STRPTR)"C:NetCtrl", ACCESS_READ);
+
+	if (l)
+		UnLock(l);
+	return l != 0;
+}
+
 /* "NetCtrl FALLBACK" in the background (it shows a requester itself) */
 static void
 run_fallback(void)
@@ -54,7 +64,9 @@ run_fallback(void)
 	Permit();
 	in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
 	out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
-	if (SystemTags((CONST_STRPTR)"C:NetCtrl FALLBACK", SYS_Asynch, TRUE,
+	/* (the shell would only say "unknown command" to NIL:) */
+	if (!netctrl_present() ||
+	    SystemTags((CONST_STRPTR)"C:NetCtrl FALLBACK", SYS_Asynch, TRUE,
 	    SYS_Input, in, SYS_Output, out, NP_StackSize, 65536,
 	    TAG_DONE) != 0) {
 		struct Library *IntuitionBase;
@@ -127,10 +139,22 @@ trial_begin(void)
 	me->pr_WindowPtr = oldwin;
 	if (n < 0)
 		return 0;
-	if (v[0] != '1') {
-		/* a trial boot ended without a connection */
+	if (v[0] == '2') {
+		/* a trial boot ended without a connection: go back.  "3"
+		   marks that this was tried (NetCtrl FALLBACK ends the trial
+		   itself, whatever happens) */
+		SetVar((CONST_STRPTR)TRIAL_VAR, (CONST_STRPTR)"3", -1,
+		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 		run_fallback();
 		return -1;
+	}
+	if (v[0] != '1') {
+		/* "3": the fallback was started at the last boot and did not
+		   finish (NetCtrl failed): rather AmiBSDNet than no network */
+		DeleteVar((CONST_STRPTR)TRIAL_VAR, GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+		P("AmiBSDNet: going back to the previous TCP/IP stack did not "
+		    "finish; starting AmiBSDNet\n");
+		return 0;
 	}
 	SetVar((CONST_STRPTR)TRIAL_VAR, (CONST_STRPTR)"2", -1,
 	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);

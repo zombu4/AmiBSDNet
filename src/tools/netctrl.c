@@ -286,8 +286,24 @@ static int
 others(int mode)
 {
 	char names[128];
-	int rv = otherstacks_apply(mode), n;
+	int rv, n;
 
+	/* never neither: the other stack goes only while AmiBSDNet is in
+	   the boot (after a FALLBACK it is not) */
+	if (mode != OTHERS_RESTORE && !otherstacks_self_atboot()) {
+		PutStr((CONST_STRPTR)"NetCtrl: AmiBSDNet is not started at boot "
+		    "(S:User-Startup); not changed.\nRun the AmiBSDNet installer "
+		    "to switch.\n");
+		return RETURN_WARN;
+	}
+	/* removing for good during a trial would leave no way back */
+	if (mode == OTHERS_REMOVE && GetVar((CONST_STRPTR)"AmiBSDNet/Trial",
+	    (STRPTR)names, sizeof(names), GVF_GLOBAL_ONLY) >= 0) {
+		PutStr((CONST_STRPTR)"NetCtrl: the switch to AmiBSDNet is still "
+		    "a trial (until it has connected\nonce); not removed.\n");
+		return RETURN_WARN;
+	}
+	rv = otherstacks_apply(mode);
 	otherstacks_check(names, sizeof(names));
 	n = report_atboot();
 	if (mode != OTHERS_RESTORE && n) {
