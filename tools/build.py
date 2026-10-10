@@ -327,7 +327,10 @@ def cflags(c, gdir, kl):
     ]
     # RUMP_OPT overrides optimisation/debug flags, e.g. "-Os -ffunction-sections"
     opt = os.environ.get("RUMP_OPT", "-O2 -DDIAGNOSTIC").split()
-    f = [CPU] + opt + [
+    # no FPU instructions: Emu68 (PiStorm) emulates the FPU only in part
+    # (no 80-bit precision; it can be switched off), and nothing here
+    # needs floating point
+    f = [CPU, "-msoft-float"] + opt + [
          # natural (4-byte) alignment for 32-bit types: NetBSD asserts it
          # for atomically accessed pointers.  Kernel side only; host code
          # keeps the AmigaOS ABI's 2-byte alignment for NDK structures.

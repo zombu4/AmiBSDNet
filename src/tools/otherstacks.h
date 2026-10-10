@@ -21,6 +21,10 @@ int	otherstacks_atboot(char *names, int size);
 extern const char *otherstacks_only;
 /* returns 0, or -1 if something could not be changed */
 int	otherstacks_apply(int mode);
+/* removes AmiBSDNet: what S:AmiBSDNet-Install.log lists, its own files,
+   its S:User-Startup block (another stack it had switched from comes
+   back first); msg gets a text for the user */
+int	otherstacks_uninstall(char *msg, int size);
 /* S:User-Startup starts AmiBSDNet */
 int	otherstacks_self_atboot(void);
 /* back to the previous stack and Wi-Fi driver, AmiBSDNet out of the

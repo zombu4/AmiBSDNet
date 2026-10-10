@@ -87,6 +87,7 @@ struct virtif_user {
 	struct s2req *evreq;
 	volatile int link;
 	int events;			/* 0 none, 1 ONLINE/OFFLINE, 2 + CONNECT */
+	int evseen;			/* an event has really come */
 	int wireless;
 	sana_link_fn linkhook;
 	void	*linkctx;
@@ -195,7 +196,7 @@ req_alloc(struct IOSana2Req *base, int kind)
 {
 	struct s2req *r;
 
-	if ((r = AllocVec(sizeof(*r), MEMF_FAST | MEMF_CLEAR)) == NULL)
+	if ((r = AllocVec(sizeof(*r), MEMF_PUBLIC | MEMF_CLEAR)) == NULL)
 		return NULL;
 	CopyMem(base, &r->ios2, sizeof(r->ios2));
 	r->kind = kind;
@@ -283,6 +284,7 @@ event_done(struct virtif_user *viu, struct s2req *r, struct MsgPort *port)
 			viu->events = 0;
 		return;
 	}
+	viu->evseen = 1;
 	if (ev & (S2EVENT_OFFLINE | S2EVENT_DISCONNECT))
 		up = 0;
 	if (ev & (S2EVENT_ONLINE | S2EVENT_CONNECT))
@@ -454,7 +456,7 @@ sana_iothread(void *arg)
 	struct IOSana2Req *base = NULL;
 	struct s2req *r;
 	ULONG iomask, txmask, tmask = 0, sigs;
-	int opened = 0, nrx = 0, ntx = 0, stuck = 0;
+	int opened = 0, nrx = 0, ntx = 0, stuck = 0, treqpending = 0, txlogged = 0;
 	unsigned i, t;
 
 	viu->iotask = SysBase->ThisTask;
@@ -487,7 +489,11 @@ sana_iothread(void *arg)
 	/* configure the interface (fails harmlessly if already configured) */
 	base->ios2_Req.io_Command = S2_CONFIGINTERFACE;
 	CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
-	DoIO((struct IORequest *)base);
+	if (DoIO((struct IORequest *)base) != 0 &&
+	    base->ios2_Req.io_Error != S2ERR_BAD_STATE)
+		amiga_rump_printf("sana: %s: S2_CONFIGINTERFACE failed (error "
+		    "%d, %ld)\n", viu->devname, base->ios2_Req.io_Error,
+		    (long)base->ios2_WireError);
 	if (is_zero_mac(viu->mac)) {
 		base->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
 		if (DoIO((struct IORequest *)base) == 0)
@@ -498,7 +504,14 @@ sana_iothread(void *arg)
 	   every request below inherits */
 	CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
 	base->ios2_Req.io_Command = S2_ONLINE;
-	DoIO((struct IORequest *)base);
+	if (DoIO((struct IORequest *)base) != 0)
+		amiga_rump_printf("sana: %s: S2_ONLINE failed (error %d, %ld)\n",
+		    viu->devname, base->ios2_Req.io_Error,
+		    (long)base->ios2_WireError);
+	amiga_rump_printf("sana: %s unit %lu, address %x:%x:%x:%x:%x:%x%s\n",
+	    viu->devname, viu->unit, viu->mac[0], viu->mac[1], viu->mac[2],
+	    viu->mac[3], viu->mac[4], viu->mac[5],
+	    is_zero_mac(viu->mac) ? " (none: the driver gave no address)" : "");
 	viu->link = 1;
 	/*
 	 * Multicast groups IPv6 (and mDNS) need: some drivers (wifipi) drop
@@ -580,24 +593,49 @@ sana_iothread(void *arg)
 			treq->tr_time.tv_secs = 1;
 			treq->tr_time.tv_micro = 0;
 			SendIO((struct IORequest *)treq);
+			treqpending = 1;
 		}
 	}
 
 	while (!viu->stopping) {
 		sigs = Wait(iomask | txmask | tmask | SIGBREAKF_CTRL_C);
 
-		if (treq && (sigs & tmask) && CheckIO((struct IORequest *)treq)) {
+		if (treq && treqpending && (sigs & tmask) &&
+		    CheckIO((struct IORequest *)treq)) {
 			int a;
 
 			WaitIO((struct IORequest *)treq);
-			if ((a = wireless_associated(base)) >= 0)
+			if ((a = wireless_associated(base)) >= 0 &&
+			    a != viu->link) {
 				set_link(viu, a);
-			treq->tr_node.io_Command = TR_ADDREQUEST;
-			treq->tr_time.tv_secs = 5;
-			treq->tr_time.tv_micro = 0;
-			SendIO((struct IORequest *)treq);
+				/* the event request waits for the old edge
+				   (CONNECT while associated): ask again for
+				   the other one (event_done re-queues an
+				   aborted request with the new mask) */
+				if (viu->evreq && viu->evreq->busy)
+					AbortIO((struct IORequest *)
+					    &viu->evreq->ios2);
+			}
+			/*
+			 * Again in 5 s for drivers that do not report
+			 * CONNECT/DISCONNECT; every 30 s for one that accepted
+			 * the event request but has not sent an event yet
+			 * (perhaps it never does); not at all once events
+			 * come.  Each query makes wifipi.device talk to its
+			 * firmware from this process, through a memory pool
+			 * its own tasks use unprotected - asking all the time
+			 * invites a crash there.
+			 */
+			if (viu->events != 2 || !viu->evseen) {
+				treq->tr_node.io_Command = TR_ADDREQUEST;
+				treq->tr_time.tv_secs =
+				    viu->events != 2 ? 5 : 30;
+				treq->tr_time.tv_micro = 0;
+				SendIO((struct IORequest *)treq);
+				treqpending = 1;
+			} else
+				treqpending = 0;
 		}
-
 		/* frames posted by the kernel */
 		while ((r = (struct s2req *)GetMsg(txport)) != NULL) {
 			r->ios2.ios2_Req.io_Message.mn_ReplyPort = ioport;
@@ -628,8 +666,13 @@ sana_iothread(void *arg)
 			} else {
 				if (r->ios2.ios2_Req.io_Error == 0)
 					viu->tx_packets++;
-				else
-					viu->tx_dropped++;
+				else if (viu->tx_dropped++, !txlogged++)
+					/* (only the first: says why) */
+					amiga_rump_printf("sana: %s: sending "
+					    "failed (error %d, %ld)\n",
+					    viu->devname,
+					    r->ios2.ios2_Req.io_Error,
+					    (long)r->ios2.ios2_WireError);
 				Forbid();
 				r->next = viu->txfree;
 				viu->txfree = r;
@@ -638,6 +681,15 @@ sana_iothread(void *arg)
 		}
 		if (sigs & SIGBREAKF_CTRL_C)
 			viu->stopping = 1;
+		/* the events stopped working (event_done above): back
+		   to asking */
+		if (treq && !treqpending && viu->events != 2 && !viu->stopping) {
+			treq->tr_node.io_Command = TR_ADDREQUEST;
+			treq->tr_time.tv_secs = 5;
+			treq->tr_time.tv_micro = 0;
+			SendIO((struct IORequest *)treq);
+			treqpending = 1;
+		}
 	}
 
 	/* shut down: abort and reap what the driver still has.  Only those:
@@ -645,9 +697,11 @@ sana_iothread(void *arg)
 	   Remove() it a second time and corrupt the port's list. */
 	viu->txport = NULL;
 	if (treq) {
-		if (!CheckIO((struct IORequest *)treq))
-			AbortIO((struct IORequest *)treq);
-		WaitIO((struct IORequest *)treq);
+		if (treqpending) {
+			if (!CheckIO((struct IORequest *)treq))
+				AbortIO((struct IORequest *)treq);
+			WaitIO((struct IORequest *)treq);
+		}
 		CloseDevice((struct IORequest *)treq);
 		DeleteIORequest((struct IORequest *)treq);
 	}

@@ -22,7 +22,7 @@ import mkicon  # noqa: E402
 
 BUILD = os.path.join(TOP, "build")
 STAGE = os.path.join(BUILD, "dist")
-VERSION = "0.7"
+VERSION = "0.8"
 
 BASH = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
 
@@ -115,15 +115,12 @@ def stage():
     # licences are in Docs/ThirdParty.txt)
     dl = os.path.join(TOP, "downloads")
     wm = os.path.join(dl, "WirelessManager")
-    wifi = os.path.join(dl, "Emu68-WiFi")
-    if not os.path.exists(wm) or not os.path.isdir(wifi):
-        sys.exit("package: WirelessManager / Emu68-WiFi missing; run "
+    if not os.path.exists(wm):
+        sys.exit("package: WirelessManager missing; run "
                  "python -I tools/bootstrap.py")
     shutil.copy(wm, os.path.join(root, "C", "WirelessManager"))
-    shutil.copytree(os.path.join(wifi, "Networks"),
-                    os.path.join(root, "Devs", "Networks"))
-    shutil.copytree(os.path.join(wifi, "Firmware"),
-                    os.path.join(root, "Devs", "Firmware"))
+    # (no Wi-Fi driver: wifipi.device and its firmware belong to the
+    # Emu68 installation, so the one installed with Emu68 is used)
     shutil.copy(os.path.join(TOP, "dist", "Docs", "ThirdParty.txt"),
                 os.path.join(root, "Docs", "ThirdParty.txt"))
     shutil.copy(os.path.join(BUILD, "AmiBSDNetStatus"),
@@ -149,7 +146,7 @@ def stage():
                                  "DEFUSER=AVERAGE"))
     mkicon.write_icon(os.path.join(root, "Status", "AmiBSDNetStatus.info"),
                       "tool", mkicon.ART_STATUS, stack=8192,
-                      tooltypes=("DONOTWAIT", "STACK=C:AmiBSDNet",
+                      tooltypes=("DONOTWAIT", "STACKCMD=C:AmiBSDNet",
                                  "INTERVAL=2"))
     for doc in ("AmiBSDNet.txt", "LICENSE.txt", "ThirdParty.txt"):
         mkicon.write_icon(os.path.join(root, "Docs", doc + ".info"),

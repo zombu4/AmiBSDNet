@@ -14,7 +14,7 @@
  *   TRIAL_SECONDS without a connection.
  * - If the stack cannot start at all, it goes back at once.
  *
- * Going back restores the previous stack and Wi-Fi driver, takes
+ * Going back restores the previous stack, takes
  * AmiBSDNet out of the boot, keeps the logs and asks for a reboot.
  */
 #include <exec/types.h>

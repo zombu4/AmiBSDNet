@@ -737,7 +737,7 @@ static int
 resolve4(struct SocketBase *sb, const char *name, struct dns_result *res)
 {
 	ULONG a;
-	char fq[256];
+	char fq[256], dom[128];
 	int rv;
 
 	if (parse_inet_aton(name, &a)) {
@@ -759,17 +759,21 @@ resolve4(struct SocketBase *sb, const char *name, struct dns_result *res)
 		return 0;
 	}
 	rv = dns_query(sb, name, T_A, res);
-	/* unqualified name: try the default domain as well */
-	if (rv == HOST_NOT_FOUND && domainname[0]) {
+	/* unqualified name: try the default domain as well (a copy: DHCP
+	   may change it meanwhile) */
+	ns_lock();
+	sb_strlcpy(dom, domainname, sizeof(dom));
+	ReleaseSemaphore(&nslock);
+	if (rv == HOST_NOT_FOUND && dom[0]) {
 		const char *p;
 
 		for (p = name; *p && *p != '.'; p++)
 			;
-		if (!*p && sb_strlen(name) + sb_strlen(domainname) + 2 <
+		if (!*p && sb_strlen(name) + sb_strlen(dom) + 2 <
 		    sizeof(fq)) {
 			sb_strlcpy(fq, name, sizeof(fq));
 			fq[sb_strlen(name)] = '.';
-			sb_strlcpy(fq + sb_strlen(name) + 1, domainname,
+			sb_strlcpy(fq + sb_strlen(name) + 1, dom,
 			    sizeof(fq) - sb_strlen(name) - 1);
 			rv = dns_query(sb, fq, T_A, res);
 		}

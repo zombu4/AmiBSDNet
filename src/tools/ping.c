@@ -22,7 +22,7 @@ struct Library *SocketBase;
 struct Device *TimerBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: Ping 0.7 (10.10.2026)";
+    "\0$VER: Ping 0.8 (10.10.2026)";
 
 #define	SOCK_RAW	3
 #define	IPPROTO_ICMP	1
@@ -234,7 +234,7 @@ __attribute__((section(".text.unlikely.0_start"), used)) int
 _start(void)
 {
 	struct RDArgs *rda;
-	struct timerequest tr;
+	static struct timerequest tr;	/* (zeroed) */
 	LONG arg[2] = { 0, 0 };
 	int rc = RETURN_FAIL;
 

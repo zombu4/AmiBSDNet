@@ -1,4 +1,4 @@
-AmiBSDNet 0.7
+AmiBSDNet 0.8
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -12,9 +12,10 @@ Requirements
 ------------
 - a 68020 or better CPU; a PiStorm (Emu68) is the main target
 - Fast RAM: the stack uses about 3.5 MB, all of it Fast RAM (no Chip RAM)
-- a network card with a SANA-II driver. The PiStorm's Wi-Fi driver
-  (wifipi.device) is included; WinUAE: uaenet.device; Zorro cards such
-  as the A2065, Ariadne or X-Surf: their own driver
+- a network card with a SANA-II driver. On a PiStorm: wifipi.device
+  (Wi-Fi) or genet.device (Ethernet, Pi 4/CM4) from your Emu68 package;
+  WinUAE: uaenet.device; Zorro cards such as the A2065, Ariadne or
+  X-Surf: their own driver
 - no other TCP/IP stack running at the same time (the installer offers
   to take an installed one out of the boot)
 
@@ -37,10 +38,9 @@ disk). If one is found it offers to:
 
 Switching is a trial. After the next boot AmiBSDNet has three minutes
 to get connected. If it does, the switch stays. If it does not, it goes
-back by itself ("NetCtrl FALLBACK"): the other stack and the Wi-Fi
-driver and firmware it replaced are put back, AmiBSDNet is taken out of
-the boot, its logs are saved in SYS:Storage/AmiBSDNet-Logs, and a
-requester asks you to reboot. You are never left without a network:
+back by itself ("NetCtrl FALLBACK"): the other stack is put back,
+AmiBSDNet is taken out of the boot, its logs are saved in
+SYS:Storage/AmiBSDNet-Logs, and a requester asks you to reboot. You are never left without a network:
 a trial boot that ends without a connection (the machine hangs, crashes
 or is reset before AmiBSDNet has connected) also counts as failed, and
 the next boot goes back by itself. So after switching, leave the
@@ -57,24 +57,48 @@ anything of the other stack would still be started at boot. AmiBSDNet
 itself does not start while another stack is running (and never stops
 the rest of S:User-Startup).
 
-It then installs the programs, WirelessManager and, on a PiStorm, the
-Wi-Fi driver wifipi.device with its firmware (DEVS:Networks,
-DEVS:Firmware). What was there before is saved first, once:
-wifipi.device.old and DEVS:Firmware.old.
+It then installs the programs and WirelessManager. The PiStorm's Wi-Fi
+driver (wifipi.device and DEVS:Firmware) is never touched: it belongs
+to your Emu68 installation (it relies on Emu68's devicetree.resource).
+AmiBSDNet uses the one that is installed; if there is none, install it
+from Emu68-tools, preferably of the same release as your Emu68.
 
-The installer finds your network adapters by itself (every SANA-II driver in DEVS:Networks, and drivers built into
-ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
+The installer finds your network adapters by itself (every SANA-II
+driver in DEVS:Networks, and drivers built into ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
 you have both, both are set up. For Wi-Fi it asks for the network name
 and passphrase (or leave them empty and choose the network later from
 the status icon). It then asks whether your network uses DHCP (most do)
 or a fixed address, and whether to show the status icon on the
 Workbench. If no adapter is found you can choose the driver yourself.
-It adds this line to S:User-Startup:
+It adds these lines to S:User-Startup:
 
+    Run >NIL: C:SerialShell AUTO
     C:AmiBSDNet
+
+(The first starts the Shell on the serial port if it is switched on;
+it comes first so that it is there even if the network does not
+start.)
 
 The stack starts in the background; boot is not delayed while it waits
 for a DHCP server.
+
+Everything the installer puts on the Amiga is listed in
+S:AmiBSDNet-Install.log. Files that were there before (your own) are
+never listed.
+
+
+Uninstalling
+------------
+Run the installer again and choose "Uninstall AmiBSDNet" (or type
+"NetCtrl UNINSTALL" in a Shell). It takes AmiBSDNet out of
+S:User-Startup first; if that file cannot be changed, nothing is
+removed. It then deletes everything in the install log, the programs,
+the status icon and the settings (ENVARC:AmiBSDNet), and finally the
+log itself. If you saved your own files in a drawer the installer
+created, the drawer and those files stay. A TCP/IP stack that
+AmiBSDNet was switched from is put back. Your drivers are not touched.
+What was done is in T:AmiBSDNet-Uninstall.txt. Reboot afterwards: the
+stack that is still in memory goes then.
 
 Ethernet and Wi-Fi together
 ---------------------------
@@ -99,9 +123,10 @@ Wi-Fi
 Wireless drivers such as Emu68's wifipi.device associate with the
 network; the WPA handshake is done by WirelessManager (Neil Cafferkey's
 wpa_supplicant port, installed to C:WirelessManager), which reads
-ENV:Sys/Wireless.prefs. Both are included in this package (see
-ThirdParty.txt for their authors and licences). AmiBSDNet starts WirelessManager itself for a
-Wi-Fi interface if it is not already running. The installer asks for
+ENV:Sys/Wireless.prefs. WirelessManager is included in this package
+(see ThirdParty.txt for its authors and licence); the Wi-Fi driver is
+the one installed with Emu68. AmiBSDNet starts WirelessManager itself
+for a Wi-Fi interface if it is not already running. The installer asks for
 the network name and passphrase; to change networks later, double-click
 the status icon and choose Wi-Fi...: the window lists the networks in
 range (strongest first), and Connect stores the network, restarts
@@ -160,8 +185,8 @@ adapter, else for Wi-Fi.
 
 It is also the "AmiBSDNet" commodity
 in Exchange: Show opens the status window, Enable / Disable switch the
-network online / offline. Tool types: STACK=<command to start the
-stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
+network online / offline. Tool types: STACKCMD=<command to start
+the stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
 
 Commands
 --------
@@ -193,8 +218,8 @@ NetCtrl CHECK
 NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS | FALLBACK
     Takes other TCP/IP stacks out of the boot (can be undone), removes
     their startup entries and files, or undoes DISABLEOTHERS. FALLBACK
-    goes back completely: the other stack and the original Wi-Fi driver
-    and firmware come back, AmiBSDNet is taken out of the boot, and its
+    goes back completely: the other stack comes back, AmiBSDNet is
+    taken out of the boot, and its
     logs are saved in SYS:Storage/AmiBSDNet-Logs. Reboot afterwards.
 
 NetCtrl FINDROADSHOW | REMOVEROADSHOW

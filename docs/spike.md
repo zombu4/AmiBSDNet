@@ -2,6 +2,9 @@
 
 Date: 2026-10-09. Native Windows build only (no containers or VMs).
 
+> Historical: the notes of the first day's feasibility spike, kept as
+> they were. The current state is in the README.
+
 ## Result: GO
 
 The NetBSD 11 rump kernel base, the socket layer, interfaces, routing,
@@ -88,5 +91,5 @@ found getting there:
 
 Debugging aids: `src/host/crashtrap.c` (a `tc_TrapCode` handler that
 reports the faulting PC and a stack scan in ELF addresses), the
-`amiga_rump_debug` levels in `rumpuser_amiga.c`, and `tools/winshot.ps1`,
+`amiga_rump_debug` levels in `rumpuser_amiga.c`, and `tools/uaeinput.ps1 shot`,
 which captures only the WinUAE window.

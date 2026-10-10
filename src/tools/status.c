@@ -13,7 +13,8 @@
  * offers to start it.
  *
  * Tool types / arguments:
- *   STACK=<command>    how to start the stack (default "C:AmiBSDNet")
+ *   STACKCMD=<command> how to start the stack (default "C:AmiBSDNet";
+ *                      also read as STACK=, its name before 0.8)
  *   INTERVAL=<seconds> state polling interval (default 2)
  *
  * Put it in WBStartup to have it on every boot.
@@ -38,6 +39,7 @@
 #include <proto/commodities.h>
 
 #include <amibsdnet/control.h>
+#include <amibsdnet/ctlcall.h>
 #include <amibsdnet/devopen.h>
 
 #include "statustool.h"
@@ -50,7 +52,7 @@ struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.7 (10.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.8 (10.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -76,28 +78,24 @@ static char label[32];
  * talking to the stack
  */
 
+/* (a request the stack did not answer in time: ctl is still its) */
+static struct MsgPort *ctl_left;
+
 int
 stack_cmd(ULONG cmd)
 {
-	struct MsgPort *reply, *port;
+	struct MsgPort *left;
+	int r;
 
-	if ((reply = CreateMsgPort()) == NULL)
-		return -1;
-	ctl->msg.mn_Node.ln_Type = NT_MESSAGE;
-	ctl->msg.mn_ReplyPort = reply;
-	ctl->msg.mn_Length = sizeof(*ctl);
-	ctl->cmd = cmd;
-	ctl->text[0] = '\0';
-	Forbid();
-	if ((port = FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME)) != NULL)
-		PutMsg(port, &ctl->msg);
-	Permit();
-	if (port) {
-		WaitPort(reply);
-		GetMsg(reply);
+	if (ctl_left) {
+		if (!amibsdnet_ctl_reclaim(ctl_left))
+			return -2;	/* still not answered */
+		ctl_left = NULL;
 	}
-	DeleteMsgPort(reply);
-	return port ? 0 : -1;
+	r = amibsdnet_ctl_call(ctl, cmd, 10, &left);
+	if (r == -2)
+		ctl_left = left;
+	return r;
 }
 
 struct NetCtrlMsg *
@@ -260,9 +258,9 @@ update_icon(struct MsgPort *appport)
 	const char *text = "Offline";
 	ULONG i;
 
-	if (stack_cmd(NETCTRL_IFLIST) != 0) {
+	if ((i = stack_cmd(NETCTRL_IFLIST)) != 0) {
 		state = 2;
-		text = "No network";
+		text = (LONG)i == -2 ? "Not answering" : "No network";
 	} else if (ctl->online) {
 		state = 1;
 	} else {
@@ -343,13 +341,21 @@ show_status(struct MsgPort *appport)
 {
 	struct EasyStruct es;
 	LONG choice;
+	int r;
 
 	es.es_StructSize = sizeof(es);
 	es.es_Flags = 0;
 	es.es_Title = (UBYTE *)"AmiBSDNet";
 	es.es_TextFormat = (UBYTE *)"%s";
 
-	if (stack_cmd(NETCTRL_STATUS) != 0) {
+	if ((r = stack_cmd(NETCTRL_STATUS)) == -2) {
+		es.es_GadgetFormat = (UBYTE *)"OK";
+		EasyRequest(NULL, &es, NULL, (ULONG)
+		    "AmiBSDNet does not answer (it seems to hang).\n\n"
+		    "Its log is T:AmiBSDNet.log. Reboot to start it again.");
+		return;
+	}
+	if (r != 0) {
 		int other;
 
 		/* a bsdsocket.library without AmiBSDNet: another stack runs */
@@ -386,7 +392,9 @@ show_status(struct MsgPort *appport)
 					haswifi = 1;
 					break;
 				}
-		stack_cmd(NETCTRL_STATUS);
+		/* (no answer: ctl may still be the stack's - not shown) */
+		if (stack_cmd(NETCTRL_STATUS) != 0)
+			return;
 		if (haswifi)
 			es.es_GadgetFormat = online ?
 			    (UBYTE *)"Go Offline|Reconnect|Wi-Fi...|Settings...|OK" :
@@ -431,8 +439,12 @@ read_options(struct WBStartup *wbmsg)
 		CurrentDir(old);
 		if (d == NULL)
 			return;
+		/* (STACK= is how it was called before: only a command, not
+		   a number - STACK is also the usual stack size tool type) */
 		if ((v = FindToolType((STRPTR *)d->do_ToolTypes,
-		    (STRPTR)"STACK")) != NULL)
+		    (STRPTR)"STACKCMD")) != NULL ||
+		    ((v = FindToolType((STRPTR *)d->do_ToolTypes,
+		    (STRPTR)"STACK")) != NULL && (*v < '0' || *v > '9')))
 			copy(stackcmd, (const char *)v, sizeof(stackcmd));
 		if ((v = FindToolType((STRPTR *)d->do_ToolTypes,
 		    (STRPTR)"INTERVAL")) != NULL) {
@@ -448,7 +460,7 @@ read_options(struct WBStartup *wbmsg)
 		struct RDArgs *rda;
 		LONG arg[2] = { 0, 0 };
 
-		if ((rda = ReadArgs((CONST_STRPTR)"STACK/K,INTERVAL/K/N", arg,
+		if ((rda = ReadArgs((CONST_STRPTR)"STACKCMD=STACK/K,INTERVAL/K/N", arg,
 		    NULL)) != NULL) {
 			if (arg[0])
 				copy(stackcmd, (const char *)arg[0],
@@ -485,7 +497,7 @@ run(void)
 	ULONG sigs, appmask, cxmask = 0, tmask;
 	int quit = 0, rc = RETURN_FAIL;
 
-	if ((ctl = AllocVec(sizeof(*ctl), MEMF_ANY | MEMF_CLEAR)) == NULL ||
+	if ((ctl = AllocVec(sizeof(*ctl), MEMF_PUBLIC | MEMF_CLEAR)) == NULL ||
 	    make_image(0) != 0 || make_image(1) != 0 ||
 	    (appport = CreateMsgPort()) == NULL ||
 	    (tport = CreateMsgPort()) == NULL ||
@@ -624,7 +636,8 @@ out:
 		FreeVec(chipimg[0]);
 	if (chipimg[1])
 		FreeVec(chipimg[1]);
-	if (ctl)
+	/* (not while the stack may still answer into it) */
+	if (ctl && (!ctl_left || amibsdnet_ctl_reclaim(ctl_left)))
 		FreeVec(ctl);
 	/* a Wi-Fi scan process still runs this program's code: unloading
 	   now would crash it, so wait until the driver has answered */

@@ -8,9 +8,6 @@ versions, into git-ignored directories:
   emu/winuae/  WinUAE (portable), for running tests
   downloads/WirelessManager
                the 68k WirelessManager binary shipped in the package
-  downloads/Emu68-WiFi/
-               wifipi.device and Wi-Fi firmware (Networks/, Firmware/)
-               shipped in the package
 
 Downloads are verified against SHA-256 hashes.  Re-running is safe.
 
@@ -48,15 +45,6 @@ PRISM2V2 = dict(
     sha256="25b400ef25c44af940e1887576106b8312dcd28fe6c8030fcb78804480c07bc5",
     member="prism2v2/C/WirelessManager",
     dest=os.path.join("downloads", "WirelessManager"))
-
-# Emu68 Wi-Fi: wifipi.device (Michal Schulz, MPL-2.0) and the Raspberry Pi
-# Wi-Fi firmware, shipped in the package (see dist/Docs/ThirdParty.txt)
-EMU68TOOLS = dict(
-    url="https://github.com/michalsc/Emu68-tools/releases/download/v1.1/"
-        "Emu68-tools.zip",
-    sha256="d8386650d9f6094a0b858fc62619c58188acf2037b98a55452a5331d29f6ec1a",
-    prefix="Emu68-WiFi/Devs/",
-    dest=os.path.join("downloads", "Emu68-WiFi"))
 
 NETBSD_REPO = "https://github.com/NetBSD/src"
 NETBSD_BRANCH = "netbsd-11"
@@ -151,7 +139,6 @@ def main():
     extract(TOOLCHAIN)
     netbsd()
     wirelessmanager()
-    extract(EMU68TOOLS)
     if "--no-emu" not in sys.argv:
         extract(WINUAE)
 

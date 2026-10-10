@@ -44,15 +44,18 @@ Early development.
       connect; `NetCtrl REMOVEOTHERS` removes them for good) and
       verifies they no longer start at boot; generated icons,
       LHA/ZIP packaging (`tools/package.py`)
-- [x] Wi-Fi bundled: WirelessManager (WPA/WPA2) and, for the PiStorm,
-      wifipi.device with firmware (third-party, see
-      `dist/Docs/ThirdParty.txt`)
+- [x] WirelessManager (WPA/WPA2) bundled (third-party, see
+      `dist/Docs/ThirdParty.txt`); the PiStorm's wifipi.device and its
+      firmware are never touched (they belong to the Emu68 installation)
 - [x] PaulaNET (floppy-port Wi-Fi) used automatically when plugged in,
       hidden otherwise; its driver is copied from the adapter's disk with
       read-back checking, optional verification against the official
       builds (`src/common/drvcheck.c`); not bundled (no licence)
 - [x] `SerialShell`: a Shell on the serial port (8N1, no handshaking,
       19200 baud by default), switched on and off in Settings
+- [x] Uninstaller (the installer's "Uninstall", `NetCtrl UNINSTALL`):
+      removes what the install log `S:AmiBSDNet-Install.log` lists, then
+      the log; drawers only if nothing else is in them
 - [x] Installed and tested with the official Workbench 3.2 installer
       (Kickstart 3.2.2, 68040) in WinUAE
 - [ ] Tested on PiStorm hardware (wifipi.device, genet.device)

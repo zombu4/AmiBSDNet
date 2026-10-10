@@ -37,6 +37,7 @@
 #include <dos/var.h>
 
 #include <amibsdnet/control.h>
+#include <amibsdnet/ctlcall.h>
 #include <amibsdnet/probe.h>
 #include <amibsdnet/drvcheck.h>
 
@@ -47,7 +48,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.7 (10.10.2026)";
+    "\0$VER: NetCtrl 0.8 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -240,6 +241,7 @@ keepconf(const char *out, int noauto)
 #define	CMD_KEEPCONF	0xffff0008UL
 #define	CMD_FINDRS	0xffff0009UL
 #define	CMD_REMOVERS	0xffff000aUL
+#define	CMD_UNINSTALL	0xffff000bUL
 
 /*
  * FINDROADSHOW lists everything of Roadshow (roadshow.c), REMOVEROADSHOW
@@ -253,39 +255,113 @@ static int report_atboot(void);
 static int roadshow(int remove);
 
 /*
- * The walk through every drawer goes deep: it runs in a process of its
- * own with a big stack (NetCtrl may have been started with 4 KB).
+ * The commands NetCtrl does itself run in a process of their own with a
+ * big stack: NetCtrl may have been started with 4 KB (the installer's
+ * "run"), and PROBE opens drivers - their OpenDevice runs on our stack -
+ * and the Roadshow walk through every drawer goes deep.
  */
-static int rs_remove, rs_rc;
-static struct Task *rs_parent;
-static volatile int rs_done;
+static ULONG bs_cmd;
+static char bs_file[256];
+static int bs_noauto, bs_rc;
+static struct Task *bs_parent;
+static APTR bs_window;
+static volatile int bs_done;
+
+static int local_cmd(ULONG, const char *, int);
+static int check(void);
+static int others(int);
+static int fallback(void);
 
 static void
-rs_entry(void)
+bs_entry(void)
 {
 
-	rs_rc = roadshow(rs_remove);
+	/* (requesters like the Shell's: a new process has its own) */
+	((struct Process *)SysBase->ThisTask)->pr_WindowPtr = bs_window;
+	bs_rc = local_cmd(bs_cmd, bs_file, bs_noauto);
 	Forbid();		/* lasts until this process is gone */
-	rs_done = 1;
-	Signal(rs_parent, SIGBREAKF_CTRL_F);
+	bs_done = 1;
+	Signal(bs_parent, SIGBREAKF_CTRL_F);
 }
 
 static int
-roadshow_bigstack(int remove)
+bigstack(ULONG cmd, const char *file, int noauto)
 {
+	int i;
 
-	rs_remove = remove;
-	rs_done = 0;
-	rs_parent = SysBase->ThisTask;
+	bs_cmd = cmd;
+	for (i = 0; file[i] && i < (int)sizeof(bs_file) - 1; i++)
+		bs_file[i] = file[i];
+	bs_file[i] = '\0';
+	bs_noauto = noauto;
+	bs_done = 0;
+	bs_parent = SysBase->ThisTask;
+	bs_window = ((struct Process *)bs_parent)->pr_WindowPtr;
 	SetSignal(0, SIGBREAKF_CTRL_F);
-	if (CreateNewProcTags(NP_Entry, (ULONG)rs_entry,
-	    NP_Name, (ULONG)"NetCtrl Roadshow", NP_StackSize, 65536,
+	if (CreateNewProcTags(NP_Entry, (ULONG)bs_entry,
+	    NP_Name, (ULONG)"NetCtrl", NP_StackSize, 65536,
 	    NP_Input, Input(), NP_CloseInput, FALSE,
-	    NP_Output, Output(), NP_CloseOutput, FALSE, TAG_DONE) == NULL)
-		return roadshow(remove);	/* (no memory: try here) */
-	while (!rs_done)
+	    NP_Output, Output(), NP_CloseOutput, FALSE, TAG_DONE) == NULL) {
+		/* (not here instead: the stack may be too small) */
+		PutStr((CONST_STRPTR)"NetCtrl: not enough memory\n");
+		return RETURN_FAIL;
+	}
+	while (!bs_done)
 		Wait(SIGBREAKF_CTRL_F);
-	return rs_rc;
+	return bs_rc;
+}
+
+/* a command NetCtrl does itself (in the big-stack process) */
+static int
+local_cmd(ULONG cmd, const char *file, int noauto)
+{
+	int rc = RETURN_FAIL;
+
+	switch (cmd) {
+	case CMD_PROBE:
+		rc = probe();
+		return rc;
+	case CMD_CHECK:
+		rc = check();
+		return rc;
+	case CMD_DISABLE:
+	case CMD_REMOVE:
+	case CMD_RESTORE:
+		rc = others(cmd == CMD_DISABLE ? OTHERS_DISABLE :
+		    cmd == CMD_REMOVE ? OTHERS_REMOVE : OTHERS_RESTORE);
+		return rc;
+	case CMD_FALLBACK:
+		rc = fallback();
+		return rc;
+	case CMD_CHECKDRV:
+		rc = checkdriver(file[0] ? file : NULL);
+		return rc;
+	case CMD_UNINSTALL: {
+		char msg[640];
+
+		rc = otherstacks_uninstall(msg, sizeof(msg)) == 0 ?
+		    RETURN_OK : RETURN_WARN;
+		/* for the installer (outside ENV:AmiBSDNet, which is gone) */
+		SetVar((CONST_STRPTR)"AmiBSDNet-Uninstalled",
+		    (CONST_STRPTR)(rc == RETURN_OK ? "1" : "0"), -1,
+		    GVF_GLOBAL_ONLY);
+		PutStr((CONST_STRPTR)msg);
+		PutStr((CONST_STRPTR)"\n");
+		return rc;
+	}
+	case CMD_FINDRS:
+	case CMD_REMOVERS:
+		rc = roadshow(cmd == CMD_REMOVERS);
+		return rc;
+	case CMD_KEEPCONF:
+		if (!file[0]) {
+			PutStr((CONST_STRPTR)"NetCtrl: KEEPCONF needs FILE=\n");
+			rc = RETURN_ERROR;
+		} else
+			rc = keepconf(file, noauto);
+		return rc;
+	}
+	return rc;
 }
 
 static int
@@ -501,25 +577,16 @@ check(void)
 int
 netctrl_send(ULONG cmd, struct NetCtrlMsg *m)
 {
-	struct MsgPort *reply, *port;
+	struct MsgPort *left;
+	int r;
 
-	if ((reply = CreateMsgPort()) == NULL)
-		return -1;
-	m->msg.mn_Node.ln_Type = NT_MESSAGE;
-	m->msg.mn_ReplyPort = reply;
-	m->msg.mn_Length = sizeof(*m);
-	m->cmd = cmd;
-	m->text[0] = '\0';
-	Forbid();
-	if ((port = FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME)) != NULL)
-		PutMsg(port, &m->msg);
-	Permit();
-	if (port) {
-		WaitPort(reply);
-		GetMsg(reply);
+	if ((r = amibsdnet_ctl_call(m, cmd, AMIBSDNET_CTL_TIMEOUT,
+	    &left)) == -2) {
+		/* the stack hangs: m stays its (and is never freed) */
+		PutStr((CONST_STRPTR)"NetCtrl: AmiBSDNet does not answer\n");
+		return -2;
 	}
-	DeleteMsgPort(reply);
-	return port ? 0 : -1;
+	return r;
 }
 
 __attribute__((section(".text.unlikely.0_start"), used)) int
@@ -532,7 +599,7 @@ _start(void)
 	int noauto;
 	LONG timeout = 30;
 	ULONG cmd = NETCTRL_STATUS;
-	int rc = RETURN_OK;
+	int rc = RETURN_OK, r = 0;
 
 	SysBase = *(struct ExecBase **)4;
 	if ((DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37)) == NULL)
@@ -561,11 +628,14 @@ _start(void)
 		else if (streq(c, "KEEPCONF")) cmd = CMD_KEEPCONF;
 		else if (streq(c, "FINDROADSHOW")) cmd = CMD_FINDRS;
 		else if (streq(c, "REMOVEROADSHOW")) cmd = CMD_REMOVERS;
+		else if (streq(c, "UNINSTALL")) cmd = CMD_UNINSTALL;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
 			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
 			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK|\n"
-			    "    CHECKDRIVER] [TIMEOUT=<seconds>] [FILE=<driver>]\n");
+			    "    CHECKDRIVER|KEEPCONF|FINDROADSHOW|REMOVEROADSHOW|\n"
+			    "    UNINSTALL] [TIMEOUT=<seconds>] [FILE=<file>]\n"
+			    "    [NOAUTODETECT]\n");
 			rc = RETURN_ERROR;
 		}
 	}
@@ -584,60 +654,40 @@ _start(void)
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
-	switch (cmd) {
-	case CMD_PROBE:
-		rc = probe();
-		goto out;
-	case CMD_CHECK:
-		rc = check();
-		goto out;
-	case CMD_DISABLE:
-	case CMD_REMOVE:
-	case CMD_RESTORE:
-		rc = others(cmd == CMD_DISABLE ? OTHERS_DISABLE :
-		    cmd == CMD_REMOVE ? OTHERS_REMOVE : OTHERS_RESTORE);
-		goto out;
-	case CMD_FALLBACK:
-		rc = fallback();
-		goto out;
-	case CMD_CHECKDRV:
-		rc = checkdriver(file[0] ? file : NULL);
-		goto out;
-	case CMD_FINDRS:
-	case CMD_REMOVERS:
-		rc = roadshow_bigstack(cmd == CMD_REMOVERS);
-		goto out;
-	case CMD_KEEPCONF:
-		if (!file[0]) {
-			PutStr((CONST_STRPTR)"NetCtrl: KEEPCONF needs FILE=\n");
-			rc = RETURN_ERROR;
-		} else
-			rc = keepconf(file, noauto);
+	if (cmd >= CMD_PROBE && cmd <= CMD_UNINSTALL) {
+		rc = bigstack(cmd, file, noauto);
 		goto out;
 	}
 
-	if ((m = AllocVec(sizeof(*m), MEMF_ANY | MEMF_CLEAR)) == NULL) {
+	if ((m = AllocVec(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR)) == NULL) {
 		rc = RETURN_FAIL;
 		goto out;
 	}
 	if (cmd == 0) {
 		/* WAIT: poll until online (the stack may still be starting) */
 		LONG ticks;
+		int up = 0;
 
 		for (ticks = 0; ticks <= timeout * 50; ticks += 25) {
-			if (netctrl_send(NETCTRL_STATE, m) == 0 && m->online)
+			if ((r = netctrl_send(NETCTRL_STATE, m)) == -2)
 				break;
+			if (r == 0 && m->online) {
+				up = 1;
+				break;
+			}
 			if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C)
 				break;
 			Delay(25);
 		}
-		if (!m->online) {
+		if (!up) {
 			PutStr((CONST_STRPTR)"NetCtrl: network not up\n");
 			rc = RETURN_WARN;
 		}
-	} else if (netctrl_send(cmd, m) != 0) {
+	} else if ((r = netctrl_send(cmd, m)) == -1) {
 		PutStr((CONST_STRPTR)"NetCtrl: AmiBSDNet is not running\n");
 		rc = RETURN_WARN;
+	} else if (r != 0) {
+		rc = RETURN_WARN;	/* (no answer: said so) */
 	} else if (cmd == NETCTRL_STATUS) {
 		PutStr((CONST_STRPTR)m->text);
 	} else {
@@ -646,7 +696,9 @@ _start(void)
 		if (m->result)
 			rc = RETURN_ERROR;
 	}
-	FreeVec(m);
+	/* (after no answer the message is the stack's: left alone) */
+	if (r != -2)
+		FreeVec(m);
 out:
 	CloseLibrary((struct Library *)DOSBase);
 	return rc;

@@ -53,7 +53,7 @@ struct net {
 	char	ssid[34];
 	char	label[64];
 	LONG	signal;
-	int	protected;
+	int	protected;		/* 1 WPA/WPA2, 2 not known */
 };
 
 static struct net nets[MAXNETS];
@@ -101,7 +101,11 @@ protection(const UBYTE *ies)
 
 	if (ies == NULL)
 		return "?";
+	/* (a length word, then the elements: never more than a frame
+	   holds, whatever the driver says) */
 	len = *(const UWORD *)ies;
+	if (len > 2304)
+		len = 2304;
 	ies += 2;
 	for (off = 0; off + 2 <= len; off += 2 + ies[off + 1]) {
 		UBYTE id = ies[off], l = ies[off + 1];
@@ -149,7 +153,8 @@ make_label(struct net *n)
 		*p++ = *s++;
 	while (p < n->label + 34)
 		*p++ = ' ';
-	for (s = n->protected ? "WPA " : "open "; *s; )
+	for (s = n->protected == 1 ? "WPA " : n->protected ? "? " : "open ";
+	    *s; )
 		*p++ = *s++;
 	do {
 		num[i++] = '0' + u % 10;
@@ -264,7 +269,8 @@ scan_proc(void)
 							    sizeof(job.nets[j].ssid));
 							job.nets[j].signal = sig;
 							job.nets[j].protected =
-							    !seq(prot, "open");
+							    seq(prot, "open") ? 0 :
+							    seq(prot, "?") ? 2 : 1;
 						}
 						rv = job.n;
 					}
@@ -468,12 +474,16 @@ do_connect(const struct NetCtrlIface *ifc, int sel)
 	}
 	while (pass[plen])
 		plen++;
-	if (nets[sel].protected && (plen < 8 || plen > 63)) {
+	if (!nets[sel].protected)
+		plen = 0;		/* open: no passphrase */
+	/* (not known: empty for an open network, or a passphrase) */
+	if ((nets[sel].protected == 1 || plen > 0) &&
+	    (plen < 8 || plen > 63)) {
 		set_status("Enter the passphrase (8 to 63 characters)");
 		ActivateGadget(g_pass, win, NULL);
 		return;
 	}
-	if (wm_set_network(nets[sel].ssid, nets[sel].protected ? pass : NULL)) {
+	if (wm_set_network(nets[sel].ssid, plen > 0 ? pass : NULL)) {
 		set_status("Cannot write Wireless.prefs");
 		return;
 	}
@@ -640,8 +650,10 @@ wifi_window(const struct NetCtrlIface *ifc)
 				case GID_LIST:
 					sel = code;
 					if (sel >= 0 && sel < nnets)
-						set_status(nets[sel].protected ?
+						set_status(nets[sel].protected == 1 ?
 						    "Enter the passphrase, then Connect" :
+						    nets[sel].protected ? "Passphrase "
+						    "(empty if it is open), then Connect" :
 						    "Open network: press Connect");
 					if (sel >= 0 && sel < nnets &&
 					    nets[sel].protected)

@@ -942,7 +942,12 @@ apply(int save)
 		status("Saved, but WirelessManager does not stop; try again");
 		return -1;
 	}
-	if (stack_cmd(NETCTRL_RECONFIG) != 0)
+	if ((i = stack_cmd(NETCTRL_RECONFIG)) == -2) {
+		status("Saved, but AmiBSDNet does not answer (see "
+		    "T:AmiBSDNet.log); reboot");
+		return -1;
+	}
+	if (i != 0)
 		return 1;		/* not running: the caller starts it */
 	if (status_msg()->result != 0) {
 		status("Saved, but the stack could not apply it (see "

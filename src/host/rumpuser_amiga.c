@@ -1625,6 +1625,17 @@ amiga_host_sleep_ms(unsigned long ms)
 	host_sleep((int64_t)(ms / 1000), (long)(ms % 1000) * 1000000L);
 }
 
+/* a millisecond clock (monotonic; wraps after 49 days) */
+unsigned long
+amiga_host_ms(void)
+{
+	int64_t sec;
+	long nsec;
+
+	clock_mono(&sec, &nsec);
+	return (unsigned long)sec * 1000UL + (unsigned long)(nsec / 1000000L);
+}
+
 /* ------------------------------------------------------------------------
  * dynamic loading, daemonising, syscall proxy: not applicable.
  * With RUMP_USE_CTOR, components register themselves from constructors.

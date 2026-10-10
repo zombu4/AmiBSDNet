@@ -43,7 +43,7 @@ def main():
 
     if elf[:4] != b"\x7fELF" or elf[4] != 1 or elf[5] != 2:
         die("not a 32-bit big-endian ELF")
-    (e_type, e_machine, _, _, _, e_shoff, _, _, _, _,
+    (e_type, e_machine, _, e_entry, _, e_shoff, _, _, _, _,
      e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from(
         ">HHIIIIIHHHHHH", elf, 16)
     if e_machine != 4:
@@ -67,6 +67,9 @@ def main():
         die("no allocated sections")
     if min(s["addr"] for s in alloc) != 0:
         die("image must be linked at address 0 (-Ttext=0)")
+    if e_entry != 0:
+        # AmigaOS starts a hunk executable at its first byte
+        die(f"entry point {e_entry:#x} is not at the start of the image")
     end = max(s["addr"] + s["size"] for s in alloc)
     end = (end + 3) & ~3
     image = bytearray(end)

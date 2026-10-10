@@ -21,6 +21,7 @@
 #include "../host/sana2.h"
 #include <amibsdnet/probe.h>
 #include <amibsdnet/control.h>
+#include <amibsdnet/ctlcall.h>
 #include <amibsdnet/devopen.h>
 #include <amibsdnet/drvcheck.h>
 
@@ -144,29 +145,20 @@ static struct NetCtrlMsg *stackinfo;
 static void
 ask_stack(void)
 {
-	struct MsgPort *reply, *port;
+	struct MsgPort *left;
+	int r;
 
-	if ((stackinfo = AllocVec(sizeof(*stackinfo), MEMF_ANY | MEMF_CLEAR))
+	if ((stackinfo = AllocVec(sizeof(*stackinfo), MEMF_PUBLIC | MEMF_CLEAR))
 	    == NULL)
 		return;
-	if ((reply = CreateMsgPort()) == NULL)
-		goto fail;
-	stackinfo->msg.mn_Node.ln_Type = NT_MESSAGE;
-	stackinfo->msg.mn_ReplyPort = reply;
-	stackinfo->msg.mn_Length = sizeof(*stackinfo);
-	stackinfo->cmd = NETCTRL_IFLIST;
-	Forbid();
-	if ((port = FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME)) != NULL)
-		PutMsg(port, &stackinfo->msg);
-	Permit();
-	if (port) {
-		WaitPort(reply);
-		GetMsg(reply);
-	}
-	DeleteMsgPort(reply);
-	if (port && stackinfo->result == 0)
+	r = amibsdnet_ctl_call(stackinfo, NETCTRL_IFLIST, 10, &left);
+	if (r == -2) {
+		/* the stack hangs: the message stays its */
+		stackinfo = NULL;
 		return;
-fail:
+	}
+	if (r == 0 && stackinfo->result == 0)
+		return;
 	FreeVec(stackinfo);
 	stackinfo = NULL;
 }
@@ -201,7 +193,18 @@ add(struct probe_adapter *a, int n, int max, const char *name)
 			return n;
 	if (n >= max)
 		return n;
-	if ((kind = stack_kind(name)) < 0 && (kind = probe_one(name, 0)) < 0)
+	/*
+	 * The Emu68 (PiStorm) drivers are known by name and never opened
+	 * here: opening wifipi.device loads the Wi-Fi firmware and starts
+	 * the driver's tasks - during the installation, with nothing else
+	 * needing it, a crash there would take the installation along.
+	 */
+	if (eq_nocase(name, "wifipi.device"))
+		kind = 1;
+	else if (eq_nocase(name, "genet.device"))
+		kind = 0;
+	else if ((kind = stack_kind(name)) < 0 &&
+	    (kind = probe_one(name, 0)) < 0)
 		return n;
 	copy(a[n].device, name, sizeof(a[n].device));
 	a[n].unit = 0;

@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.7")
+(set #ver "0.8")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -17,10 +17,10 @@
 (message
 	"\nAmiBSDNet " #ver "\n\n"
 	"The NetBSD 11 TCP/IP network stack for AmigaOS.\n\n"
-	"Installs the stack, its commands, Wi-Fi support\n"
-	"(WirelessManager, and on a PiStorm the Wi-Fi driver)\n"
-	"and the status icon, and starts the network at every\n"
-	"boot.")
+	"Installs the stack, its commands, WirelessManager (Wi-Fi "
+	"encryption) and the status icon, and starts the network at every "
+	"boot. Your Wi-Fi driver is not touched.\n\n"
+	"Run this installer again to uninstall it.")
 
 (complete 0)
 
@@ -29,8 +29,69 @@
 ; NetCtrl CHECK (from this package) sets AmiBSDNet/OtherStacks,
 ; AmiBSDNet/OtherRunning and AmiBSDNet/Emu68
 
+; AmiBSDNet installed already: install again (update) or uninstall
+(if (exists "C:AmiBSDNet")
+	(if (= 1 (askchoice
+			(prompt "AmiBSDNet is installed on this Amiga.")
+			(help "Install again: updates AmiBSDNet, keeping your settings.\n\n"
+				"Uninstall: removes everything the installation put on this "
+				"Amiga (listed in S:AmiBSDNet-Install.log): the programs, the "
+				"status icon, the AmiBSDNet drawer, the settings and its line "
+				"in S:User-Startup. A TCP/IP stack it had switched from is put "
+				"back. Your own files and drivers are not touched.")
+			(choices "Install again (update)" "Uninstall AmiBSDNet")
+			(default 0)))
+		(
+			(if @pretend
+				(exit "(Pretend: nothing was removed.)")
+				(
+					(if (exists "ENV:AmiBSDNet-Uninstalled")
+						(delete "ENV:AmiBSDNet-Uninstalled" (optional "force")))
+					(run "C/NetCtrl UNINSTALL >T:AmiBSDNet-Uninstall.txt"
+						(prompt "Removing AmiBSDNet")
+						(help @run-help))
+					(if (= (getenv "AmiBSDNet-Uninstalled") "1")
+						(exit "AmiBSDNet is uninstalled.\n\nReboot now: the "
+							"stack that is still in memory goes then. (What "
+							"was done is in T:AmiBSDNet-Uninstall.txt.)")
+						(exit "AmiBSDNet could not be removed completely. "
+							"What happened, and what to do, is in "
+							"T:AmiBSDNet-Uninstall.txt. (The uninstaller is "
+							"also \"C/NetCtrl UNINSTALL\" in this package.)"))
+				))
+		)))
+
 (working "Checking the system...")
 (makedir "ENV:AmiBSDNet")
+
+; The install log, S:AmiBSDNet-Install.log: everything this installation
+; creates, one "FILE <path>" line each (and notes), so that the
+; uninstaller (NetCtrl UNINSTALL) removes exactly that.  Files that were
+; there before (the user's own) are never listed.
+(set #ilog "")
+(set #ilogfile "S:AmiBSDNet-Install.log")
+(set #had-wm (exists "C:WirelessManager"))
+(set #had-wprefs (exists "ENVARC:Sys/Wireless.prefs"))
+(set #had-hosts (exists "DEVS:Internet/hosts"))
+(set #had-internet (exists "DEVS:Internet"))
+; What an earlier installation listed comes first (a reinstall keeps it;
+; a file listed twice is no problem).  The log is written as soon as the
+; programs are copied, and again at the end, so that an installation
+; stopped half-way can still be uninstalled.
+(if (not @pretend)
+	(if (exists #ilogfile)
+		(copyfiles (source #ilogfile) (dest "T:")
+			(newname "AmiBSDNet-Install.old") (nogauge))
+		(textfile (dest "T:AmiBSDNet-Install.old") (append ""))))
+(procedure P_WRITELOG
+	(if (not @pretend)
+		(textfile
+			(dest #ilogfile)
+			(include "T:AmiBSDNet-Install.old")
+			(append "; AmiBSDNet " #ver " installed: FILE lines are what "
+				"\"NetCtrl UNINSTALL\" removes\n")
+			(append "STARTUP S:User-Startup ;BEGIN AmiBSDNet\n")
+			(append #ilog))))
 (run "C/NetCtrl CHECK >NIL:" (safe))
 (set #others (getenv "AmiBSDNet/OtherStacks"))
 (set #otherrunning (= (getenv "AmiBSDNet/OtherRunning") "1"))
@@ -59,11 +120,11 @@
 					"files are saved as <name>.amibsdnet-bak first.\n\n"
 					"This is a trial: if AmiBSDNet does not get connected "
 					"within three minutes after the next boot, it puts "
-					"everything back by itself (the other stack, and the "
-					"Wi-Fi driver it replaced) and tells you to reboot. Once "
+					"the other stack back by itself and tells you to "
+					"reboot. Once "
 					"it has connected, the switch stays. You can go back at "
 					"any time with \"NetCtrl FALLBACK\".\n\n"
-					"Keep: nothing is changed (also your Wi-Fi driver), and "
+					"Keep: nothing is changed, and "
 					"AmiBSDNet is not started while the other stack is "
 					"running.\n\n"
 					"Remove Roadshow completely: at the end of the "
@@ -109,6 +170,9 @@
 	(dest "C:")
 	(choices "AmiBSDNet" "NetCtrl" "Ping" "SerialShell")
 	(nogauge))
+(set #ilog (cat #ilog "FILE C:AmiBSDNet\nFILE C:NetCtrl\nFILE C:Ping\n"
+	"FILE C:SerialShell\n"))
+(P_WRITELOG)
 
 ; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt); a newer
 ; one already in C: is kept
@@ -118,59 +182,18 @@
 	(source "C/WirelessManager")
 	(dest "C:")
 	(confirm "expert"))
+(if (and (not #had-wm) (exists "C:WirelessManager"))
+	(set #ilog (cat #ilog "FILE C:WirelessManager\n")))
 
-; on a PiStorm: the Raspberry Pi Wi-Fi driver and its firmware.  What is
-; there already is saved first (only once: a second install must not
-; overwrite the user's original): wifipi.device.old and DEVS:Firmware.old.
-; NetCtrl FALLBACK puts them back.  Someone who keeps the other stack
-; keeps the Wi-Fi driver it works with, too.
-; Switching from another stack: the driver is replaced only at the end,
-; together with the switch itself (until then the other stack must keep
-; working with its own driver, also if the installation is aborted).
-(set #keepdriver (and (<> #others "") (= #othersdo 1)
-	(exists "DEVS:Networks/wifipi.device")))
-(set #driverlater (and (<> #others "") (<> #othersdo 1)))
-(procedure P_WIFIDRIVER
-	(
-		(makedir "DEVS:Networks")
-		(makedir "DEVS:Firmware")
-		(if (and (exists "DEVS:Networks/wifipi.device")
-			(not (exists "DEVS:Networks/wifipi.device.old")))
-			(copyfiles
-				(source "DEVS:Networks/wifipi.device")
-				(dest "DEVS:Networks")
-				(newname "wifipi.device.old")
-				(nogauge)))
-		(if (not (exists "DEVS:Firmware.old"))
-			(
-				(makedir "DEVS:Firmware.old")
-				(copyfiles
-					(prompt "Saving the current Wi-Fi firmware")
-					(help @copyfiles-help)
-					(source "DEVS:Firmware")
-					(dest "DEVS:Firmware.old")
-					(all)
-					; (empty if there was none before)
-					(optional "nofail")
-					(nogauge))
-			))
-		(copyfiles
-			(prompt "Installing the PiStorm Wi-Fi driver (wifipi.device)")
-			(help @copyfiles-help)
-			(source "Devs/Networks/")
-			(dest "DEVS:Networks")
-			(all)
-			(nogauge))
-		(copyfiles
-			(prompt "Installing the PiStorm Wi-Fi firmware")
-			(help @copyfiles-help)
-			(source "Devs/Firmware/")
-			(dest "DEVS:Firmware")
-			(all)
-			(nogauge))
-	))
-(if (and #emu68 (not #keepdriver) (not #driverlater))
-	(P_WIFIDRIVER))
+; The Wi-Fi driver of a PiStorm (wifipi.device and DEVS:Firmware) belongs
+; to its Emu68 installation and is never touched here: AmiBSDNet uses the one
+; that is installed.
+(if (and #emu68 (not (exists "DEVS:Networks/wifipi.device")))
+	(message "Note: there is no Wi-Fi driver (DEVS:Networks/wifipi.device). "
+		"For the Raspberry Pi's Wi-Fi, install wifipi.device and the "
+		"Firmware drawer from your Emu68 package (Emu68-tools of the same "
+		"version as your Emu68). Ethernet and other adapters work "
+		"without it."))
 
 (complete 20)
 
@@ -181,6 +204,8 @@
 		(help @askdir-help)
 		(default "SYS:")))
 (set #drawer (tackon #docdest "AmiBSDNet"))
+(if (not (exists #drawer))
+	(set #ilog (cat #ilog "FILE " #drawer "\nFILE " #drawer ".info\n")))
 (makedir #drawer (infos))
 (copyfiles
 	(prompt "Installing the documentation")
@@ -196,6 +221,17 @@
 	(all)
 	(infos)
 	(nogauge))
+; (listed after the drawer: the uninstaller goes from the end, so they go
+; first, and the drawer only if nothing else is in it then)
+(set #ilog (cat #ilog
+	"FILE " (tackon #drawer "AmiBSDNet.txt") "\n"
+	"FILE " (tackon #drawer "AmiBSDNet.txt.info") "\n"
+	"FILE " (tackon #drawer "LICENSE.txt") "\n"
+	"FILE " (tackon #drawer "LICENSE.txt.info") "\n"
+	"FILE " (tackon #drawer "ThirdParty.txt") "\n"
+	"FILE " (tackon #drawer "ThirdParty.txt.info") "\n"
+	"FILE " (tackon #drawer "AmiBSDNetStatus") "\n"
+	"FILE " (tackon #drawer "AmiBSDNetStatus.info") "\n"))
 
 (complete 40)
 
@@ -212,18 +248,6 @@
 (set #ethunit 0)
 (set #wlanunit 0)
 
-; switching from another stack on a PiStorm: the Wi-Fi driver is
-; installed only at the end, so it cannot be found yet
-(if (and #emu68 #driverlater (= #wlan "")
-		(not (exists "DEVS:Networks/wifipi.device")))
-	(if (askbool
-			(prompt "Use the Raspberry Pi's Wi-Fi (wifipi.device)?\n\n"
-				"Its driver is installed at the end, together with the "
-				"switch to AmiBSDNet.")
-			(help "Choose Yes if your PiStorm's Raspberry Pi has Wi-Fi "
-				"(Pi 3, Pi Zero 2 W, Pi 4, CM4 with Wi-Fi).")
-			(default 1))
-		(set #wlan "wifipi.device")))
 
 ; PaulaNET (Wi-Fi through the floppy port): AmiBSDNet uses it by itself
 ; whenever it is plugged in.  Its driver comes on the adapter's own
@@ -286,6 +310,9 @@
 					(if (exists "DEVS:Networks/PaulaNET.device")
 						(delete "DEVS:Networks/PaulaNET.device"
 							(optional "force")))
+					; (not in the install log: the driver comes from
+					; the adapter's own disk and stays when AmiBSDNet
+					; is uninstalled)
 					(rename #newdrv "DEVS:Networks/PaulaNET.device")
 					; a copy straight in DEVS: would be loaded instead
 					(if (exists "DEVS:PaulaNET.device")
@@ -442,6 +469,10 @@
 						(makedir "ENV:Sys")
 						(copyfiles (source "ENVARC:Sys/Wireless.prefs")
 							(dest "ENV:Sys") (nogauge))
+						(if (not #had-wprefs)
+							(set #ilog (cat #ilog
+								"FILE ENVARC:Sys/Wireless.prefs\n"
+								"FILE ENV:Sys/Wireless.prefs\n")))
 					))
 			))
 	))
@@ -541,6 +572,8 @@
 			(dest "DEVS:Internet/hosts")
 			(append "# host name table: address  name  [aliases]\n")
 			(append "127.0.0.1  localhost\n"))
+		(set #ilog (cat #ilog (if #had-internet "" "FILE DEVS:Internet\n")
+			"FILE DEVS:Internet/hosts\n"))
 	))
 
 (complete 70)
@@ -553,7 +586,7 @@
 (startup #app
 	(prompt "AmiBSDNet will be started from S:User-Startup at every boot.")
 	(help @startup-help)
-	(command "C:AmiBSDNet\nRun >NIL: C:SerialShell AUTO\n"))
+	(command "Run >NIL: C:SerialShell AUTO\nC:AmiBSDNet\n"))
 
 (if (not @pretend)
 	(if (askbool
@@ -591,6 +624,11 @@
 		(infos)
 		(nogauge)))
 
+; the install log, complete
+(P_WRITELOG)
+(if (exists "T:AmiBSDNet-Install.old")
+	(delete "T:AmiBSDNet-Install.old" (optional "force")))
+
 (complete 100)
 
 ; -------------------------------------------------------------------
@@ -618,9 +656,6 @@
 						"and SYS:WBStartup yourself before rebooting: "
 						"AmiBSDNet does not start while another TCP/IP "
 						"stack is running."))
-				; now the Wi-Fi driver too (the trial puts the old
-				; one back if AmiBSDNet does not get connected)
-				(if #emu68 (P_WIFIDRIVER))
 				(textfile (dest "ENVARC:AmiBSDNet/Trial") (append "1"))
 				(textfile (dest "ENV:AmiBSDNet/Trial") (append "1"))
 				(set #trial 1)
@@ -641,7 +676,6 @@
 					"volumes (this can take a while)...")
 				(run "C/NetCtrl REMOVEROADSHOW >T:AmiBSDNet-RS.txt"
 					(safe))
-				(if #emu68 (P_WIFIDRIVER))
 				(set #removed 1)
 				(if (<> (getenv "AmiBSDNet/RoadshowCount") "0")
 					(message "Not everything of Roadshow could be removed "
@@ -683,8 +717,8 @@
 	(exit
 		"AmiBSDNet is installed.\n\n"
 		"Reboot now. AmiBSDNet then has three minutes to get connected. "
-		"If it does not, it puts " #others " and your previous Wi-Fi "
-		"driver back by itself and asks you to reboot again; its logs "
+		"If it does not, it puts " #others " back by itself and asks "
+		"you to reboot again; its logs "
 		"are kept in SYS:Storage/AmiBSDNet-Logs.\n\n"
 		"\"NetCtrl\" shows the network status."))
 
@@ -703,14 +737,14 @@
 		#others " out of the boot yourself).\n\"NetCtrl\" shows the "
 		"network status."))
 
-(if (or #otherrunning (and #emu68 (<> #wlan "") (not #keepdriver)))
+(if #otherrunning
 	(exit
 		"AmiBSDNet is installed.\n\n"
 		"Reboot to start the network"
 		(if #otherrunning
 			(cat " (the other TCP/IP stack is still running "
 				"until then)")
-			" (the new Wi-Fi driver is loaded then)")
+			"")
 		".\n\"NetCtrl\" shows the network status.")
 	(exit
 		"AmiBSDNet is installed.\n\n"

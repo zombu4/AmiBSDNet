@@ -26,6 +26,7 @@ static struct MsgPort *mgrport;
 static struct Task *mgrtask;
 static void *mgrthread;
 static LONG mgrsock = -1;
+static volatile int mgrstate;	/* 0 starting, 1 running, -1 failed */
 
 /* messages to the manager thread */
 #define	MGR_CREATE	1
@@ -212,6 +213,8 @@ server_main(void *arg)
 	}
 	sb->srvtask = SysBase->ThisTask;
 	sb->srvport = port;
+	/* (srvport stored before srvstate says it is there) */
+	__asm__ volatile ("" : : : "memory");
 	sb->srvstate = 1;
 
 	for (;;) {
@@ -393,12 +396,22 @@ manager_main(void *arg)
 	struct MsgPort *port;
 	char one = 1;
 
-	if (rump_pub_lwproc_rfork(RUMP_RFCFDG) != 0 ||
-	    (port = CreateMsgPort()) == NULL)
+	if (rump_pub_lwproc_rfork(RUMP_RFCFDG) != 0) {
+		mgrstate = -1;
 		return NULL;
-	mgrsock = rump___sysimpl_socket30(AF_INET, SOCK_DGRAM, 0);
+	}
+	/* (without its socket no abort could reach a blocked call) */
+	if ((port = CreateMsgPort()) == NULL ||
+	    (mgrsock = rump___sysimpl_socket30(AF_INET, SOCK_DGRAM, 0)) < 0) {
+		if (port)
+			DeleteMsgPort(port);
+		rump_pub_lwproc_releaselwp();
+		mgrstate = -1;
+		return NULL;
+	}
 	mgrtask = SysBase->ThisTask;
 	mgrport = port;
+	mgrstate = 1;
 
 	for (;;) {
 		WaitPort(port);
@@ -473,7 +486,7 @@ sb_lib_open(struct SocketBase *mbase, ULONG version)
 
 	if (!mgrport)
 		return NULL;
-	mem = AllocVec(neg + sizeof(struct SocketBase), MEMF_FAST | MEMF_CLEAR);
+	mem = AllocVec(neg + sizeof(struct SocketBase), MEMF_PUBLIC | MEMF_CLEAR);
 	if (mem == NULL)
 		return NULL;
 	/* the copy gets its own jump table and Library header */
@@ -524,7 +537,9 @@ sb_lib_close(struct SocketBase *sb)
 	/* an abort may still be queued at the manager: wait for it */
 	while (sb->abortpending)
 		Delay(1);
-	if (sb->replyport)
+	/* (its signal bit is the owner's: closed by another task, the
+	   little port is left rather than freeing a bit of that task) */
+	if (sb->replyport && SysBase->ThisTask == sb->owner)
 		DeleteMsgPort(sb->replyport);
 	FreeVec((UBYTE *)sb - mbase->lib.lib_NegSize);
 	mbase->lib.lib_OpenCnt--;
@@ -556,14 +571,18 @@ struct Library *
 bsdsocket_create(void)
 {
 	struct SocketBase *mb;
+	int i;
 
 	if (master)
 		return &master->lib;
 	if (rumpuser_thread_create(manager_main, NULL, "bsdsocket manager",
 	    1, 0, -1, &mgrthread) != 0)
 		return NULL;
-	while (mgrport == NULL)
-		amiga_host_sleep_ms(5);
+	/* (Delay, not the rump timer: that needs nothing that can fail) */
+	for (i = 0; mgrstate == 0 && i < 500; i++)
+		Delay(1);
+	if (mgrstate != 1)
+		return NULL;
 
 	mb = (struct SocketBase *)MakeLibrary((APTR)bsdsocket_vectors, NULL,
 	    NULL, sizeof(struct SocketBase), 0);

@@ -44,7 +44,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.7 (10.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.8 (10.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -81,10 +81,14 @@ stack_main(void)
 		log = Open((CONST_STRPTR)logpath, MODE_READWRITE);
 	}
 	amiga_rump_loginit((long)log);
-	crash_install();
+	/* (with DEBUG only, as for the rump threads: the report ends in
+	   rumpuser_exit, which would leave this process hanging; without it
+	   a crash gets the system's own Software Failure requester) */
+	if (amiga_rump_debug)
+		crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.7 starting\n");
+	P("AmiBSDNet 0.8 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);

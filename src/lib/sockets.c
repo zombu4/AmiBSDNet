@@ -657,6 +657,7 @@ srv_select(struct SocketBase *sb, struct select_args *a)
 {
 	struct nb_pollfd pfd[SB_MAXFD + 1];
 	LONG nfds = a->nfds, n, i, timeout, ready = 0, np = 0;
+	ULONG start;
 
 	if (nfds < 0 || nfds > SB_MAXFD)
 		return sb_fail(sb, EINVAL);
@@ -680,6 +681,7 @@ srv_select(struct SocketBase *sb, struct select_args *a)
 	pfd[np].revents = 0;
 
 	timeout = a->tv ? tv_to_ms(a->tv) : -1;
+	start = amiga_host_ms();
 	for (;;) {
 		/* aborted before the call started (its wake was drained) */
 		if (sb->abortseq == sb->callseq) {
@@ -697,8 +699,18 @@ srv_select(struct SocketBase *sb, struct select_args *a)
 			}
 			/* stale wake from an earlier call: ignore it */
 			pfd[np].revents = 0;
-			if (--n == 0)
+			if (--n == 0) {
+				/* (the rest of the timeout, not all of it) */
+				if (timeout > 0) {
+					ULONG now = amiga_host_ms(),
+					    el = now - start;
+
+					timeout = el >= (ULONG)timeout ? 0 :
+					    timeout - (LONG)el;
+					start = now;
+				}
 				continue;
+			}
 		}
 		break;
 	}

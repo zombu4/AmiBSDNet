@@ -535,12 +535,25 @@ static int
 sw_close(struct safewrite *sw)
 {
 	char old[110];
+	struct FileInfoBlock *fib;
+	LONG prot = -1;
+	BPTR l;
 
 	if (!Close(sw->fh))
 		sw->ok = 0;
 	if (!sw->ok) {
 		DeleteFile((CONST_STRPTR)sw->tmp);
 		return -1;
+	}
+	/* the new file gets the original's protection bits (the s bit of a
+	   script, say) */
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
+		if ((l = Lock((CONST_STRPTR)sw->name, ACCESS_READ)) != 0) {
+			if (Examine(l, fib))
+				prot = fib->fib_Protection;
+			UnLock(l);
+		}
+		FreeDosObject(DOS_FIB, fib);
 	}
 	/*
 	 * Never a moment without the file: the original is renamed out of
@@ -561,6 +574,8 @@ sw_close(struct safewrite *sw)
 		return -1;
 	}
 	DeleteFile((CONST_STRPTR)sw->tmp);
+	if (prot != -1)
+		SetProtection((CONST_STRPTR)sw->name, prot);
 	DeleteFile((CONST_STRPTR)old);	/* fails while a script reads it */
 	return 0;
 }
@@ -823,45 +838,381 @@ own_startup_off(void)
 	return sw_close(&sw);
 }
 
-/* copy every file of dir "from" into dir "to" (created if needed) */
+
+/* ------------------------------------------------------------------------
+ * uninstalling (NetCtrl UNINSTALL, the installer's "Uninstall")
+ */
+
+#define	INSTALL_LOG	"S:AmiBSDNet-Install.log"
+
 static int
-copy_dir(const char *from, const char *to)
+slen_(const char *s)
 {
-	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
-	char (*names)[64], a[160], b[160];
-	int n = 0, i, rv = 0;
+	int n = 0;
+
+	while (s[n])
+		n++;
+	return n;
+}
+
+static int block_line(const char *, const char *, const char *);
+
+/* the ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" block out of S:User-Startup
+   (0: done or not there; -1: not changed - unreadable, unwritable, or a
+   block without its END line, which would take the rest of the file) */
+static int
+own_startup_remove(void)
+{
+	static const char *name = "S:User-Startup";
+	LONG len;
+	char *buf, *p, *e;
+	struct safewrite sw;
+	int inside = 0, found = 0;
 	BPTR l;
 
-	if (fib == NULL)
+	if ((l = Lock((CONST_STRPTR)name, ACCESS_READ)) == 0)
+		return 0;		/* no S:User-Startup */
+	UnLock(l);
+	if ((buf = read_file(name, &len)) == NULL)
 		return -1;
-	if ((names = AllocVec(40 * 64, MEMF_ANY)) == NULL) {
-		FreeDosObject(DOS_FIB, fib);
+	for (p = buf; p < buf + len; p = e + 1) {
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		if (block_line(p, e, ";BEGIN AmiBSDNet")) {
+			if (inside)
+				break;		/* BEGIN BEGIN: damaged */
+			inside = found = 1;
+		} else if (block_line(p, e, ";END AmiBSDNet"))
+			inside = 0;
+	}
+	if (inside) {
+		FreeVec(buf);
 		return -1;
 	}
-	if ((l = Lock((CONST_STRPTR)from, ACCESS_READ)) != 0) {
-		if (Examine(l, fib))
-			while (ExNext(l, fib) && n < 40)
-				if (fib->fib_DirEntryType < 0)
-					cat(names[n++], (const char *)
-					    fib->fib_FileName, "", 64);
+	if (!found) {
+		FreeVec(buf);
+		return 0;
+	}
+	if (sw_open(&sw, name) != 0) {
+		FreeVec(buf);
+		return -1;
+	}
+	for (p = buf; p < buf + len; p = e + 1) {
+		int n;
+
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		n = e - p + (e < buf + len);
+		if (block_line(p, e, ";BEGIN AmiBSDNet"))
+			inside = 1;
+		if (!inside)
+			sw_write(&sw, p, n);
+		if (block_line(p, e, ";END AmiBSDNet"))
+			inside = 0;
+	}
+	FreeVec(buf);
+	return sw_close(&sw);
+}
+
+/* exactly this marker line (not ";BEGIN AmiBSDNet-something") */
+static int
+block_line(const char *p, const char *e, const char *marker)
+{
+	int l = 0;
+
+	while (marker[l])
+		l++;
+	return e - p >= l && starts_nocase(p, marker) &&
+	    (e - p == l || p[l] == '\r' || p[l] == ' ' || p[l] == '\t');
+}
+
+/* a file, or a drawer with everything in it: only for AmiBSDNet's own
+   drawers (the log drawer, the parking drawer, its settings) */
+static int
+delete_all(const char *path)
+{
+	struct FileInfoBlock *fib;
+	char sub[256], (*names)[108] = NULL;
+	LONG *types = NULL;
+	BPTR l;
+	int n, i, rv = 0, isdir = 0;
+
+	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) == 0)
+		return 0;		/* not there */
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) == NULL) {
 		UnLock(l);
+		return -1;
 	}
+	if (Examine(l, fib))
+		isdir = fib->fib_DirEntryType == ST_USERDIR;
+	UnLock(l);
+	if (isdir && (names = AllocVec(64 * 108, MEMF_ANY)) != NULL &&
+	    (types = AllocVec(64 * sizeof(LONG), MEMF_ANY)) != NULL) {
+		do {
+			n = 0;
+			if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
+				if (Examine(l, fib))
+					while (n < 64 && ExNext(l, fib)) {
+						cat(names[n], (const char *)
+						    fib->fib_FileName, "", 108);
+						types[n++] = fib->fib_DirEntryType;
+					}
+				UnLock(l);
+			}
+			for (i = 0; i < n; i++) {
+				if (slen_(path) + 1 + slen_(names[i]) >=
+				    (int)sizeof(sub)) {
+					rv = -1;
+					continue;
+				}
+				cat(sub, path, "/", sizeof(sub));
+				cat(sub, sub, names[i], sizeof(sub));
+				if (types[i] == ST_USERDIR) {
+					if (delete_all(sub) != 0)
+						rv = -1;
+				} else {
+					/* (files, and links as links) */
+					SetProtection((CONST_STRPTR)sub, 0);
+					if (!DeleteFile((CONST_STRPTR)sub))
+						rv = -1;
+				}
+			}
+		} while (n == 64 && rv == 0);
+	}
+	if (types)
+		FreeVec(types);
+	if (names)
+		FreeVec(names);
 	FreeDosObject(DOS_FIB, fib);
-	if ((l = CreateDir((CONST_STRPTR)to)) != 0)
-		UnLock(l);
-	for (i = 0; i < n; i++) {
-		cat(a, from, "/", sizeof(a));
-		cat(a, a, names[i], sizeof(a));
-		cat(b, to, "/", sizeof(b));
-		cat(b, b, names[i], sizeof(b));
-		if (!copy_file(a, b))
-			rv = -1;
-	}
-	FreeVec(names);
+	SetProtection((CONST_STRPTR)path, 0);
+	if (!DeleteFile((CONST_STRPTR)path))
+		rv = -1;
 	return rv;
 }
 
-/* does S:User-Startup start AmiBSDNet (an active C:AmiBSDNet line)? */
+/*
+ * One entry the installer listed, deleted on its own: a file, a link as
+ * the link, a drawer only if it is empty (what someone else put there
+ * stays, and so does the drawer).  0: gone (or was not there), 1: a
+ * drawer that is not empty (kept), -1: could not be deleted.
+ */
+static int
+delete_one(const char *path)
+{
+	LONG err;
+
+	SetProtection((CONST_STRPTR)path, 0);
+	if (DeleteFile((CONST_STRPTR)path))
+		return 0;
+	err = IoErr();
+	if (err == ERROR_OBJECT_NOT_FOUND || err == ERROR_DIR_NOT_FOUND)
+		return 0;
+	if (err == ERROR_DIRECTORY_NOT_EMPTY)
+		return 1;
+	return -1;
+}
+
+/*
+ * A path from the log that may be deleted: absolute ("NAME:something"),
+ * not a volume or assign itself, no parent ("/"), and nothing in S:
+ * (the startup files; the log itself is deleted separately).
+ */
+static int
+log_path_ok(const char *p)
+{
+	int i, colon = -1;
+
+	for (i = 0; p[i]; i++)
+		if (p[i] == ':') {
+			if (colon >= 0)
+				return 0;
+			colon = i;
+		}
+	if (colon <= 0 || p[colon + 1] == '\0' || p[colon + 1] == '/' ||
+	    p[i - 1] == '/')
+		return 0;
+	for (i = colon; p[i]; i++)
+		if (p[i] == '/' && p[i + 1] == '/')
+			return 0;
+	if (colon == 1 && (p[0] == 'S' || p[0] == 's'))
+		return 0;
+	return 1;
+}
+
+/* what is always AmiBSDNet's */
+static const char *const own_files[] = {
+	"C:AmiBSDNet", "C:NetCtrl", "C:Ping", "C:SerialShell",
+	"SYS:WBStartup/AmiBSDNetStatus", "SYS:WBStartup/AmiBSDNetStatus.info",
+	"T:AmiBSDNet.log", "T:AmiBSDNet-RS.txt", "T:WirelessManager.log", NULL
+};
+
+/* AmiBSDNet's own drawers: deleted with everything in them */
+static const char *const own_dirs[] = {
+	"SYS:Storage/AmiBSDNet-Logs", "ENV:AmiBSDNet", "ENVARC:AmiBSDNet", NULL
+};
+
+/* what the installer puts in the AmiBSDNet drawer.  Without a log (an
+   older version, or an installation that stopped before writing it) the
+   drawer is SYS:AmiBSDNet: only these go, and the drawer if it is empty
+   then (the unpacked archive itself has them in Docs/ and Status/) */
+static const char *const drawer_files[] = {
+	"AmiBSDNet.txt", "AmiBSDNet.txt.info", "LICENSE.txt", "LICENSE.txt.info",
+	"ThirdParty.txt", "ThirdParty.txt.info", "AmiBSDNetStatus",
+	"AmiBSDNetStatus.info", NULL
+};
+
+int
+otherstacks_uninstall(char *msg, int size)
+{
+	char *list = NULL, *p, *e, *s, path[200], names[128];
+	LONG len = 0;
+	APTR old;
+	int rv = 0, kept = 0, i, k, r, pass, icon, restored;
+	struct MsgPort *port;
+	struct FileInfoBlock *fib;
+	BPTR l;
+
+	/* out of the boot first: if S:User-Startup cannot be changed, nothing
+	   is deleted (its C:AmiBSDNet line would stop the rest of the
+	   startup at every boot once C:AmiBSDNet is gone) */
+	old = quiet();
+	r = own_startup_remove();
+	loud(old);
+	if (r != 0) {
+		cat(msg, "Nothing was removed: S:User-Startup could not be "
+		    "changed (write-protected, disk full, or its \";BEGIN "
+		    "AmiBSDNet\" block has no \";END AmiBSDNet\" line: remove "
+		    "that block by hand, then uninstall again).", "", size);
+		return -1;
+	}
+	/* another stack an earlier switch took out of the boot: back */
+	restored = otherstacks_apply(OTHERS_RESTORE) == 0;
+	otherstacks_check(names, sizeof(names));
+	old = quiet();
+	/* the serial Shell stops (it is gone after the reboot anyway) */
+	Forbid();
+	if ((port = FindPort((CONST_STRPTR)"AmiBSDNet.SerialShell")) != NULL)
+		Signal(port->mp_SigTask, SIGBREAKF_CTRL_C);
+	Permit();
+	/* what the installer installed: its log, S:AmiBSDNet-Install.log
+	   ("FILE <path>" lines; the other lines are notes).  From the end:
+	   what was put in a drawer is listed after the drawer, and goes
+	   first */
+	if ((l = Lock((CONST_STRPTR)INSTALL_LOG, ACCESS_READ)) != 0) {
+		UnLock(l);
+		if ((list = read_file(INSTALL_LOG, &len)) == NULL)
+			rv = -1;
+	}
+	if (list) {
+		/* (two rounds: icons last, and only those whose file or drawer
+		   is gone - a drawer that stays keeps its icon) */
+		for (pass = 0; pass < 2; pass++)
+		for (e = list + len; e > list; e = s) {
+			/* the line p..e; s: the '\n' before it */
+			for (p = e; p > list && p[-1] != '\n'; p--)
+				;
+			s = p > list ? p - 1 : list;
+			if (e - p < 6 || !starts_nocase(p, "FILE "))
+				continue;
+			for (k = 0; p + 5 + k < e && p[5 + k] != '\n' &&
+			    p[5 + k] != '\r'; k++)
+				;
+			if (k >= (int)sizeof(path)) {
+				if (pass == 0)
+					rv = -1;	/* too long: not cut short */
+				continue;
+			}
+			for (i = 0; i < k; i++)
+				path[i] = p[5 + i];
+			path[k] = '\0';
+			icon = k > 5 && starts_nocase(path + k - 5, ".info");
+			if (!log_path_ok(path) || icon != pass)
+				continue;
+			if (icon) {
+				/* its file or drawer (the name without
+				   ".info") is still there: the icon stays */
+				path[k - 5] = '\0';
+				if ((l = Lock((CONST_STRPTR)path,
+				    ACCESS_READ)) != 0) {
+					UnLock(l);
+					continue;
+				}
+				path[k - 5] = '.';
+			}
+			if ((r = delete_one(path)) < 0)
+				rv = -1;
+			else if (r > 0)
+				kept = 1;
+		}
+		FreeVec(list);
+	} else if (rv == 0) {
+		for (i = 0; drawer_files[i]; i++) {
+			cat(path, "SYS:AmiBSDNet/", drawer_files[i], sizeof(path));
+			if (delete_one(path) < 0)
+				rv = -1;
+		}
+		if (delete_one("SYS:AmiBSDNet") == 0)
+			delete_one("SYS:AmiBSDNet.info");
+	}
+	/* (T: and ENV: are in RAM and go with the reboot anyway; the running
+	   stack still has its log open: not a failure) */
+	for (i = 0; own_files[i]; i++)
+		if (delete_one(own_files[i]) < 0 &&
+		    !starts_nocase(own_files[i], "T:"))
+			rv = -1;
+	for (i = 0; own_dirs[i]; i++)
+		if (delete_all(own_dirs[i]) != 0 &&
+		    !starts_nocase(own_dirs[i], "ENV:"))
+			rv = -1;
+	/* parked files of another stack: only once they are back */
+	if (restored)
+		delete_all(PARKING);
+	/* the backups of the startup files it changed (S:*.amibsdnet-*):
+	   only when all went well - after a failed restore they are the
+	   only copies of the original startup files */
+	if (restored && rv == 0 &&
+	    (fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
+		char (*bak)[108] = AllocVec(32 * 108, MEMF_ANY);
+		int nb = 0;
+
+		if (bak && (l = Lock((CONST_STRPTR)"S:", ACCESS_READ)) != 0) {
+			if (Examine(l, fib))
+				while (nb < 32 && ExNext(l, fib))
+					if (fib->fib_DirEntryType < 0 &&
+					    has((const char *)fib->fib_FileName,
+					    slen_((const char *)fib->fib_FileName),
+					    ".amibsdnet-"))
+						cat(bak[nb++], (const char *)
+						    fib->fib_FileName, "", 108);
+			UnLock(l);
+		}
+		for (i = 0; i < nb; i++) {
+			cat(path, "S:", bak[i], sizeof(path));
+			delete_one(path);
+		}
+		if (bak)
+			FreeVec(bak);
+		FreeDosObject(DOS_FIB, fib);
+	}
+	/* the log last: if something failed, a second run still knows */
+	if (rv == 0)
+		delete_one(INSTALL_LOG);
+	loud(old);
+	cat(msg, rv == 0 ? "AmiBSDNet is removed. Reboot: the stack still in "
+	    "memory goes then." : "AmiBSDNet is removed, but some files could "
+	    "not be deleted (in use or protected?).\nReboot and run "
+	    "\"NetCtrl UNINSTALL\" again, or delete them by hand.", "", size);
+	if (kept)
+		cat(msg, msg, "\nA drawer it had created has other files in it "
+		    "now: that drawer and those files were left alone.", size);
+	if (!restored)
+		cat(msg, msg, "\nThe stack it had switched from could not be put "
+		    "back completely: its parked files are still in "
+		    "SYS:Storage/AmiBSDNet-Disabled, and S:*.amibsdnet-bak are "
+		    "the original startup files.", size);
+	return rv;
+}
+
 int
 otherstacks_self_atboot(void)
 {
@@ -974,24 +1325,12 @@ otherstacks_fallback(char *msg, int size)
 	    0);
 	park("SYS:WBStartup/AmiBSDNetStatus.info", "AmiBSDNet",
 	    "AmiBSDNetStatus.info", 0);
-	/* the Wi-Fi driver and firmware the installer replaced */
-	if (exists("DEVS:Networks/wifipi.device.old")) {
-		DeleteFile((CONST_STRPTR)"DEVS:Networks/wifipi.device.amibsdnet");
-		Rename((CONST_STRPTR)"DEVS:Networks/wifipi.device",
-		    (CONST_STRPTR)"DEVS:Networks/wifipi.device.amibsdnet");
-		if (!Rename((CONST_STRPTR)"DEVS:Networks/wifipi.device.old",
-		    (CONST_STRPTR)"DEVS:Networks/wifipi.device"))
-			rv = -1;
-	}
-	if (exists("DEVS:Firmware.old") &&
-	    copy_dir("DEVS:Firmware.old", "DEVS:Firmware") != 0)
-		rv = -1;
+	/* (the Wi-Fi driver and firmware are the system's: never touched) */
 	DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
 	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 	loud(old);
-	cat(msg, rv == 0 ? "The previous TCP/IP stack and Wi-Fi driver are "
-	    "back, and AmiBSDNet\nis no longer started at boot. Reboot to use "
-	    "them." :
+	cat(msg, rv == 0 ? "The previous TCP/IP stack is back, and AmiBSDNet "
+	    "is no longer\nstarted at boot. Reboot to use it." :
 	    "The previous TCP/IP stack is back in the startup files and\n"
 	    "AmiBSDNet is no longer started at boot, but not everything\n"
 	    "could be put back (see \"NetCtrl CHECK\"). Reboot to use it.",
