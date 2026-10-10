@@ -12,6 +12,8 @@
 #include "rumpuser_amiga.h"
 #include "sana2_host.h"
 #include "stack.h"
+#include <amibsdnet/drvcheck.h>
+#include <amibsdnet/devopen.h>
 
 #define	P	amiga_rump_printf
 
@@ -223,6 +225,97 @@ stack_link_changed(void)
 	stack_update_route();
 }
 
+/*
+ * Plug-in adapters found at every start: PaulaNET (Wi-Fi through the
+ * floppy port, https://github.com/RobSmithDev/PaulaNET).  If its driver is
+ * there (DEVS:, DEVS:Networks or the adapter's own PaulaNET: disk) and no
+ * configured interface uses it, it is added as an optional DHCP
+ * interface, last, so a faster interface keeps the default route.  Its
+ * driver opens only with the adapter plugged in; without it the
+ * interface stays hidden.  "autodetect off" in the configuration turns
+ * this off.  With "paulanet verify on" the driver file must be a known
+ * official build or have a CRC the user accepted (src/common/drvcheck.c).
+ */
+static int autodetect = 1;
+static struct drvprefs drvprefs;
+
+/* where PaulaNET.device is, looked for once per configuration */
+static char paula_path[64];
+static int paula_looked;
+
+static const char *
+paulanet_file(void)
+{
+
+	if (!paula_looked) {
+		paula_looked = 1;
+		if (!drv_paulanet_path(paula_path, sizeof(paula_path)))
+			paula_path[0] = '\0';
+	}
+	return paula_path[0] ? paula_path : NULL;
+}
+
+#define	is_paulanet(dev)	amibsdnet_is_paulanet(dev)
+
+static int
+has_colon(const char *s)
+{
+
+	for (; *s; s++)
+		if (*s == ':')
+			return 1;
+	return 0;
+}
+
+/* 0 if the interface must not be used: its driver failed the check */
+static int
+paulanet_ok(struct iface *ifc)
+{
+	char path[80], hex[9];		/* "DEVS:" + device[64] */
+	const char *ver;
+	ULONG crc;
+	int r, loaded;
+
+	ifc->unverified = 0;
+	if (!drvprefs.verify || !is_paulanet(ifc->device))
+		return 1;
+	Forbid();
+	loaded = FindName(&SysBase->DeviceList, (CONST_STRPTR)PAULANET_NAME)
+	    != NULL;
+	Permit();
+	if (loaded) {
+		/* in memory already (loaded before verifying was turned on):
+		   no file is loaded now */
+		P("%s: PaulaNET.device is in memory already; its file is "
+		    "checked at the next start\n", ifc->name);
+		return 1;
+	}
+	if (amibsdnet_plain_name(ifc->device)) {
+		if (!paulanet_file())
+			return 1;	/* nothing to check: the open fails */
+		sb_copy(path, paulanet_file(), sizeof(path));
+	} else if (!has_colon(ifc->device)) {
+		/* relative names are relative to DEVS: for OpenDevice() */
+		sb_copy(path, "DEVS:", sizeof(path));
+		sb_copy(path + 5, ifc->device, sizeof(path) - 5);
+	} else
+		sb_copy(path, ifc->device, sizeof(path));
+	r = drv_check_paulanet(path, &drvprefs, &ver, &crc);
+	if (r == DRV_MISSING)
+		return 1;
+	if (DRV_USABLE(&drvprefs, r)) {
+		P("%s: %s verified (%s)\n", ifc->name, path,
+		    ver ? ver : "accepted CRC");
+		return 1;
+	}
+	drv_fmt_crc(hex, crc);
+	P("%s: %s is %s (CRC %s): not used; copy it again from the "
+	    "PaulaNET disk, or accept it in Settings\n", ifc->name, path,
+	    r == DRV_DAMAGED ? "damaged" : "not a known build", hex);
+	ifc->unverified = 1;
+	return 0;
+}
+
 static void
 iface_bringup(struct iface *ifc)
 {
@@ -248,6 +341,8 @@ iface_bringup(struct iface *ifc)
 	}
 	link[l] = '\0';
 
+	if (!paulanet_ok(ifc))
+		return;
 	if (rump_amibsdnet_ifcreate(ifc->name, link) != 0) {
 		int err = amiga_rump_errno();
 
@@ -260,8 +355,14 @@ iface_bringup(struct iface *ifc)
 			    amiga_rump_errno();
 		}
 		if (err != 0 && err != 17) {
-			P("%s: cannot attach %s (errno %d)\n", ifc->name, link,
-			    err);
+			if (ifc->optional) {
+				/* a plug-in adapter that is not plugged in */
+				ifc->hidden = 1;
+				P("%s: %s not present (hidden; errno %d)\n",
+				    ifc->name, ifc->device, err);
+			} else
+				P("%s: cannot attach %s (errno %d)\n", ifc->name,
+				    link, err);
 			return;
 		}
 	}
@@ -275,7 +376,9 @@ iface_bringup(struct iface *ifc)
 			sana_set_linkhook(v, link_hook, ifc);
 		}
 	}
-	if (ifc->wireless)
+	/* (PaulaNET joins its network by itself: set up with PaulaNET
+	   Config, not WirelessManager) */
+	if (ifc->wireless && !is_paulanet(ifc->device))
 		wireless_start(ifc);
 	if (ifc->dhcp) {
 		if (dhcp_configure(ifc) != 0)
@@ -297,6 +400,49 @@ iface_bringup(struct iface *ifc)
 		rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
 }
 
+static void
+add_detected(void)
+{
+	struct iface *ifc;
+	char name[16];
+	int i, k;
+
+	if (!autodetect)
+		return;
+	for (i = 0; i < nifaces; i++)
+		if (is_paulanet(ifaces[i].device))
+			return;
+	if (!paulanet_file())
+		return;
+	if (nifaces >= MAX_IFACES) {
+		P("PaulaNET driver found, but %d interfaces are configured "
+		    "already\n", MAX_IFACES);
+		return;
+	}
+	/* a free interface name */
+	for (k = 0; k < 10; k++) {
+		name[0] = 's'; name[1] = 'a'; name[2] = 'n'; name[3] = 'a';
+		name[4] = '0' + k; name[5] = '\0';
+		for (i = 0; i < nifaces && !streq(ifaces[i].name, name); i++)
+			;
+		if (i == nifaces)
+			break;
+	}
+	ifc = &ifaces[nifaces];
+	memset(ifc, 0, sizeof(*ifc));
+	ifc->admin = 1;
+	ifc->link = 1;
+	ifc->link_logged = 1;
+	ifc->dhcp = 1;
+	ifc->optional = 1;
+	ifc->mask = 0xffffff00UL;
+	sb_copy(ifc->name, name, sizeof(ifc->name));
+	sb_copy(ifc->device, PAULANET_NAME, sizeof(ifc->device));
+	nifaces++;
+	P("%s: PaulaNET driver found; used if the adapter is plugged in\n",
+	    ifc->name);
+}
+
 int
 stack_configure(const char *path)
 {
@@ -316,6 +462,10 @@ stack_configure(const char *path)
 	nifaces = 0;
 	cfg_nns = 0;
 	cfg_gateway = 0;
+	autodetect = 1;
+	drvprefs.verify = 0;
+	drvprefs.ncrc = 0;
+	paula_looked = 0;
 	while (FGets(fh, (STRPTR)line, sizeof(line))) {
 		lineno++;
 		if ((n = tokenize(line, tok, 12)) == 0)
@@ -351,12 +501,19 @@ stack_configure(const char *path)
 					parse_ip(tok[++i], &ifc->addr, &ifc->mask);
 				else if (streq(tok[i], "netmask") && i + 1 < n)
 					parse_ip(tok[++i], &ifc->mask, NULL);
+				else if (streq(tok[i], "optional"))
+					ifc->optional = 1;
 			}
 			nifaces++;
+		} else if (drv_parse_line(&drvprefs, tok, n)) {
+			;
+		} else if (streq(tok[0], "autodetect") && n >= 2) {
+			autodetect = !streq(tok[1], "off");
 		} else
 			P("config line %d: not understood\n", lineno);
 	}
 	Close(fh);
+	add_detected();
 
 	for (i = 0; i < nifaces; i++)
 		iface_bringup(&ifaces[i]);

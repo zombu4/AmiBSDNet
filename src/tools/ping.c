@@ -22,7 +22,7 @@ struct Library *SocketBase;
 struct Device *TimerBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: Ping 0.4 (10.10.2026)";
+    "\0$VER: Ping 0.5 (10.10.2026)";
 
 #define	SOCK_RAW	3
 #define	IPPROTO_ICMP	1

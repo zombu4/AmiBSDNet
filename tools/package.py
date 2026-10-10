@@ -22,7 +22,7 @@ import mkicon  # noqa: E402
 
 BUILD = os.path.join(TOP, "build")
 STAGE = os.path.join(BUILD, "dist")
-VERSION = "0.4"
+VERSION = "0.5"
 
 BASH = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
 
@@ -40,11 +40,13 @@ def build():
     run([BASH, "tools/build_stack.sh", "build/AmiBSDNet"])
     for src, out, extra in (
             ("src/tools/netctrl.c", "build/NetCtrl",
-             ["src/common/probe.c", "src/tools/otherstacks.c"]),
+             ["src/common/probe.c", "src/tools/otherstacks.c",
+              "src/common/drvcheck.c"]),
             ("src/tools/ping.c", "build/Ping", []),
             ("src/tools/status.c", "build/AmiBSDNetStatus",
              ["src/tools/wifiwin.c", "src/tools/settingswin.c",
-              "src/common/wm.c", "src/common/probe.c"])):
+              "src/common/wm.c", "src/common/probe.c",
+              "src/common/drvcheck.c"])):
         run([BASH, "tools/build_amiga.sh", src, out] + extra)
 
 

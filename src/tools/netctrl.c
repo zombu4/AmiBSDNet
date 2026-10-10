@@ -18,6 +18,10 @@
  * DISABLEOTHERS, REMOVEOTHERS and RESTOREOTHERS take other stacks out of
  * the boot (reversibly), remove them from it, or put them back
  * (src/tools/otherstacks.c).
+ *
+ * CHECKDRIVER [FILE=<driver>] checks a PaulaNET.device file
+ * (src/common/drvcheck.c); KEEPCONF FILE=<out> copies the PaulaNET
+ * lines of the saved configuration (for the installer).
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -33,6 +37,7 @@
 
 #include <amibsdnet/control.h>
 #include <amibsdnet/probe.h>
+#include <amibsdnet/drvcheck.h>
 
 #include "otherstacks.h"
 
@@ -40,7 +45,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.4 (10.10.2026)";
+    "\0$VER: NetCtrl 0.5 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -90,11 +95,136 @@ probe(void)
 		if (!a[i].wireless && !eth)
 			eth = a[i].device;
 	}
-	if (n == 0)
+	if (probe_paulanet[0]) {
+		PutStr((CONST_STRPTR)"PaulaNET  ");
+		PutStr((CONST_STRPTR)probe_paulanet);
+		PutStr((CONST_STRPTR)" (Wi-Fi through the floppy port; used "
+		    "when plugged in)\n");
+	}
+	if (n == 0 && !probe_paulanet[0])
 		PutStr((CONST_STRPTR)"no network adapters found\n");
 	setvar("AmiBSDNet/Ethernet", eth);
 	setvar("AmiBSDNet/WiFi", wifi);
-	return n ? RETURN_OK : RETURN_WARN;
+	setvar("AmiBSDNet/PaulaNET", probe_paulanet[0] ? probe_paulanet : NULL);
+	return n || probe_paulanet[0] ? RETURN_OK : RETURN_WARN;
+}
+
+/*
+ * CHECKDRIVER [FILE=<path>]: checks a PaulaNET.device (default: the one
+ * that would be loaded) against the official builds and the accepted
+ * CRCs.  Sets AmiBSDNet/DriverCheck (OK, ACCEPTED, UNKNOWN, DAMAGED or
+ * MISSING), AmiBSDNet/DriverCRC and AmiBSDNet/DriverVersion.  Returns
+ * WARN if the stack would not use the file.
+ */
+static int
+checkdriver(const char *file)
+{
+	static const char *const what[] = { "OK", "ACCEPTED", "UNKNOWN",
+	    "DAMAGED", "MISSING" };
+	struct drvprefs prefs;
+	char path[256], hex[9];
+	const char *ver;
+	ULONG crc;
+	int r, i;
+
+	drv_read_prefs(&prefs);
+	if (file) {
+		for (i = 0; file[i] && i < (int)sizeof(path) - 1; i++)
+			path[i] = file[i];
+		path[i] = '\0';
+	} else if (!drv_paulanet_path(path, sizeof(path))) {
+		PutStr((CONST_STRPTR)"no " PAULANET_NAME " found\n");
+		setvar("AmiBSDNet/DriverCheck", "MISSING");
+		setvar("AmiBSDNet/DriverCRC", NULL);
+		setvar("AmiBSDNet/DriverVersion", NULL);
+		return RETURN_WARN;
+	}
+	r = drv_check_paulanet(path, &prefs, &ver, &crc);
+	drv_fmt_crc(hex, crc);
+	PutStr((CONST_STRPTR)path);
+	PutStr((CONST_STRPTR)": ");
+	switch (r) {
+	case DRV_OK:
+		PutStr((CONST_STRPTR)"official PaulaNET ");
+		PutStr((CONST_STRPTR)ver);
+		break;
+	case DRV_ACCEPTED:
+		PutStr((CONST_STRPTR)"accepted (CRC ");
+		PutStr((CONST_STRPTR)hex);
+		PutStr((CONST_STRPTR)")");
+		break;
+	case DRV_UNKNOWN:
+		PutStr((CONST_STRPTR)"not a version AmiBSDNet knows (CRC ");
+		PutStr((CONST_STRPTR)hex);
+		PutStr((CONST_STRPTR)(prefs.verify ? "); not used while "
+		    "verifying is on" : "); used, verifying is off"));
+		break;
+	case DRV_DAMAGED:
+		PutStr((CONST_STRPTR)"DAMAGED (cannot be read or loaded)");
+		break;
+	default:
+		PutStr((CONST_STRPTR)"not found");
+		break;
+	}
+	PutStr((CONST_STRPTR)"\n");
+	setvar("AmiBSDNet/DriverCheck", what[r]);
+	setvar("AmiBSDNet/DriverCRC", r <= DRV_UNKNOWN ? hex : NULL);
+	setvar("AmiBSDNet/DriverVersion", ver);
+	return DRV_USABLE(&prefs, r) ? RETURN_OK : RETURN_WARN;
+}
+
+/*
+ * KEEPCONF FILE=<out>: the PaulaNET lines ("paulanet ...", "autodetect
+ * ...") of ENVARC:AmiBSDNet/AmiBSDNet.conf, for the installer, which
+ * writes a new configuration but keeps what was set in the Settings
+ * window.  <out> is always written (empty if there is nothing to keep).
+ * NOAUTODETECT leaves out "autodetect" (for a configuration that relies
+ * on PaulaNET alone: "autodetect off" would leave it without a network).
+ */
+static int
+keepconf(const char *out, int noauto)
+{
+	char line[200];
+	BPTR in, fh;
+	int i, j;
+
+	if ((fh = Open((CONST_STRPTR)out, MODE_NEWFILE)) == 0) {
+		PrintFault(IoErr(), (CONST_STRPTR)"NetCtrl");
+		return RETURN_ERROR;
+	}
+	if ((in = Open((CONST_STRPTR)"ENVARC:AmiBSDNet/AmiBSDNet.conf",
+	    MODE_OLDFILE)) != 0) {
+		while (FGets(in, (STRPTR)line, sizeof(line) - 1)) {
+			for (i = 0; line[i] == ' ' || line[i] == '\t'; i++)
+				;
+			for (j = 0; line[i + j] && line[i + j] != ' ' &&
+			    line[i + j] != '\t' && line[i + j] != '\n'; j++)
+				;
+			if (j == 0)
+				continue;
+			{
+				char c = line[i + j];
+				int keep;
+
+				line[i + j] = '\0';
+				keep = streq(line + i, "paulanet") ||
+				    (!noauto && streq(line + i, "autodetect"));
+				line[i + j] = c;
+				if (!keep)
+					continue;
+			}
+			for (j = 0; line[j]; j++)
+				;
+			if (j == 0 || line[j - 1] != '\n') {
+				line[j++] = '\n';
+				line[j] = '\0';
+			}
+			FPuts(fh, (CONST_STRPTR)(line + i));
+		}
+		Close(in);
+	}
+	Close(fh);
+	return RETURN_OK;
 }
 
 /* local commands (not sent to the stack) */
@@ -104,6 +234,8 @@ probe(void)
 #define	CMD_REMOVE	0xffff0004UL
 #define	CMD_RESTORE	0xffff0005UL
 #define	CMD_FALLBACK	0xffff0006UL
+#define	CMD_CHECKDRV	0xffff0007UL
+#define	CMD_KEEPCONF	0xffff0008UL
 
 /*
  * FALLBACK: back to the previous TCP/IP stack (run by AmiBSDNet when a
@@ -261,7 +393,9 @@ _start(void)
 {
 	struct NetCtrlMsg *m;
 	struct RDArgs *rda;
-	LONG arg[2] = { 0, 0 };
+	LONG arg[4] = { 0, 0, 0, 0 };
+	char file[256];
+	int noauto;
 	LONG timeout = 30;
 	ULONG cmd = NETCTRL_STATUS;
 	int rc = RETURN_OK;
@@ -269,7 +403,7 @@ _start(void)
 	SysBase = *(struct ExecBase **)4;
 	if ((DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37)) == NULL)
 		return RETURN_FAIL;
-	if ((rda = ReadArgs((CONST_STRPTR)"COMMAND,TIMEOUT/K/N", arg, NULL)) ==
+	if ((rda = ReadArgs((CONST_STRPTR)"COMMAND,TIMEOUT/K/N,FILE/K,NOAUTODETECT/S", arg, NULL)) ==
 	    NULL) {
 		PrintFault(IoErr(), (CONST_STRPTR)"NetCtrl");
 		rc = RETURN_ERROR;
@@ -289,16 +423,28 @@ _start(void)
 		else if (streq(c, "REMOVEOTHERS")) cmd = CMD_REMOVE;
 		else if (streq(c, "RESTOREOTHERS")) cmd = CMD_RESTORE;
 		else if (streq(c, "FALLBACK")) cmd = CMD_FALLBACK;
+		else if (streq(c, "CHECKDRIVER")) cmd = CMD_CHECKDRV;
+		else if (streq(c, "KEEPCONF")) cmd = CMD_KEEPCONF;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
 			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
-			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK] "
-			    "[TIMEOUT=<seconds>]\n");
+			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK|\n"
+			    "    CHECKDRIVER] [TIMEOUT=<seconds>] [FILE=<driver>]\n");
 			rc = RETURN_ERROR;
 		}
 	}
 	if (arg[1])
 		timeout = *(LONG *)arg[1];
+	noauto = arg[3] != 0;
+	file[0] = '\0';
+	if (arg[2]) {
+		const char *f = (const char *)arg[2];
+		int i;
+
+		for (i = 0; f[i] && i < (int)sizeof(file) - 1; i++)
+			file[i] = f[i];
+		file[i] = '\0';
+	}
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
@@ -317,6 +463,16 @@ _start(void)
 		goto out;
 	case CMD_FALLBACK:
 		rc = fallback();
+		goto out;
+	case CMD_CHECKDRV:
+		rc = checkdriver(file[0] ? file : NULL);
+		goto out;
+	case CMD_KEEPCONF:
+		if (!file[0]) {
+			PutStr((CONST_STRPTR)"NetCtrl: KEEPCONF needs FILE=\n");
+			rc = RETURN_ERROR;
+		} else
+			rc = keepconf(file, noauto);
 		goto out;
 	}
 

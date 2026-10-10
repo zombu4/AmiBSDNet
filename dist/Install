@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.4")
+(set #ver "0.5")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -172,10 +172,118 @@
 (run "C/NetCtrl PROBE >NIL:" (safe))
 (set #eth (getenv "AmiBSDNet/Ethernet"))
 (set #wlan (getenv "AmiBSDNet/WiFi"))
+(set #paula (getenv "AmiBSDNet/PaulaNET"))
 (set #ethunit 0)
 (set #wlanunit 0)
 
+; PaulaNET (Wi-Fi through the floppy port): AmiBSDNet uses it by itself
+; whenever it is plugged in.  Its driver comes on the adapter's own
+; PaulaNET: disk; a copy in DEVS:Networks is checked against the source
+; (and the known official versions) and copied again if it differs.
+; checks the driver file #chkfile: sets #drvstate (OK, ACCEPTED, UNKNOWN,
+; DAMAGED or MISSING), #drvcrc and #drvver
+(procedure P_CHECKDRV
+	(
+		; no stale result if NetCtrl does not run
+		(if (exists "ENV:AmiBSDNet/DriverCheck")
+			(delete "ENV:AmiBSDNet/DriverCheck" (optional "force") (safe)))
+		(if (exists "ENV:AmiBSDNet/DriverCRC")
+			(delete "ENV:AmiBSDNet/DriverCRC" (optional "force") (safe)))
+		(run (cat "C/NetCtrl CHECKDRIVER FILE=\"" #chkfile "\" >NIL:") (safe))
+		(set #drvstate (getenv "AmiBSDNet/DriverCheck"))
+		(set #drvcrc (getenv "AmiBSDNet/DriverCRC"))
+		(set #drvver (getenv "AmiBSDNet/DriverVersion"))
+	))
+(set #newdrv "DEVS:Networks/PaulaNET.device.new")
+(if (and (not @pretend) (<> #paula "")
+		(exists "PaulaNET:PaulaNET.device" (noreq)))
+	(if (askbool
+			(prompt "A PaulaNET adapter (Wi-Fi through the floppy port) "
+				"is plugged in.\n\nCopy its driver from the PaulaNET disk "
+				"to DEVS:Networks, so it does not have to be read from "
+				"the adapter at every start?")
+			(help "AmiBSDNet reads the driver twice and compares it with "
+				"the copy, and copies it again if they differ. A driver "
+				"already in DEVS:Networks is replaced only by a good copy. "
+				"Its Wi-Fi network is set up with the PaulaNET Config "
+				"program on the PaulaNET disk.")
+			(default 1))
+		(
+			(set #tries 0)
+			(set #copied 0)
+			(makedir "DEVS:Networks")
+			; to a temporary name: a bad copy never replaces a good driver
+			(while (and (< #tries 3) (not #copied))
+				(
+					(set #tries (+ #tries 1))
+					(if (exists #newdrv) (delete #newdrv (optional "force")))
+					; a read error must not end the installation: the
+					; comparison below finds a missing or bad copy
+					(copyfiles (source "PaulaNET:PaulaNET.device")
+						(dest "DEVS:Networks") (newname "PaulaNET.device.new")
+						(optional "nofail") (nogauge))
+					(set #chkfile "PaulaNET:PaulaNET.device")
+					(P_CHECKDRV)
+					(set #srcstate #drvstate)
+					(set #srccrc #drvcrc)
+					(set #chkfile #newdrv)
+					(P_CHECKDRV)
+					(if (and (= #drvcrc #srccrc) (<> #drvcrc "")
+							(<> #drvstate "DAMAGED") (<> #srcstate "DAMAGED"))
+						(set #copied 1))
+				))
+			(if #copied
+				(
+					(if (exists "DEVS:Networks/PaulaNET.device")
+						(delete "DEVS:Networks/PaulaNET.device"
+							(optional "force")))
+					(rename #newdrv "DEVS:Networks/PaulaNET.device")
+					; a copy straight in DEVS: would be loaded instead
+					(if (exists "DEVS:PaulaNET.device")
+						(message "Note: there is also a DEVS:PaulaNET.device, "
+							"which is loaded instead of the new copy in "
+							"DEVS:Networks. Delete it if it is an old one."))
+					(set #paula "DEVS:Networks/PaulaNET.device")
+					(message "PaulaNET.device copied to DEVS:Networks: "
+						(if (= #drvstate "OK")
+							(cat "the official version " #drvver ".")
+							(if (= #drvstate "ACCEPTED")
+								(cat "a version you accepted (CRC " #drvcrc ").")
+								(cat "not an official version AmiBSDNet knows "
+									"(CRC " #drvcrc "). It is either newer, or the "
+									"PaulaNET disk itself is damaged: if PaulaNET "
+									"does not work, re-flash the adapter with the "
+									"official firmware."))))
+				)
+				(
+					(if (exists #newdrv) (delete #newdrv (optional "force")))
+					(message "The PaulaNET driver could not be read without "
+						"errors (" #drvstate "). The PaulaNET disk may be "
+						"damaged: re-flash the adapter with the PaulaNET "
+						"firmware, then run this installer again."
+						(if (exists "DEVS:Networks/PaulaNET.device")
+							"\n\nThe driver already in DEVS:Networks was kept." ""))
+				))
+		)))
+(if (and (<> #paula "") (not (patmatch "PaulaNET:#?" #paula)))
+	(
+		(set #chkfile #paula)
+		(P_CHECKDRV)
+		(if (= #drvstate "DAMAGED")
+			(message #paula " is damaged (it cannot be loaded). Copy it "
+				"again from the PaulaNET disk, or re-flash the adapter."))
+	))
+
 (set #manual 1)
+(if (and (= #eth "") (= #wlan "") (<> #paula ""))
+	(set #manual
+		(not (askbool
+			(prompt "Only the PaulaNET adapter was found. AmiBSDNet uses "
+				"it whenever it is plugged in.\n\nUse only PaulaNET?")
+			(help "Choose \"Add a driver\" if this Amiga has another network "
+				"card whose driver was not found.")
+			(choices "Only PaulaNET" "Add a driver")
+			(default 1)))))
 (if (or (<> #eth "") (<> #wlan ""))
 	(set #manual
 		(not (askbool
@@ -274,15 +382,18 @@
 			))
 	))
 
-(set #mode
-	(askchoice
-		(prompt "How does this Amiga get its network address?")
-		(help "Most home networks hand out addresses automatically (DHCP). "
-			"Choose a fixed address only if your network needs one; it is "
-			"used for Ethernet if there is an Ethernet adapter, else for "
-			"Wi-Fi.")
-		(choices "Automatically (DHCP)" "Fixed address")
-		(default 0)))
+; PaulaNET alone always uses DHCP
+(set #mode 0)
+(if (or (<> #eth "") (<> #wlan ""))
+	(set #mode
+		(askchoice
+			(prompt "How does this Amiga get its network address?")
+			(help "Most home networks hand out addresses automatically "
+				"(DHCP). Choose a fixed address only if your network needs "
+				"one; it is used for Ethernet if there is an Ethernet "
+				"adapter, else for Wi-Fi.")
+			(choices "Automatically (DHCP)" "Fixed address")
+			(default 0))))
 
 (set #hostname
 	(askstring
@@ -333,7 +444,16 @@
 (set #confdir "ENVARC:AmiBSDNet")
 (makedir #confdir)
 (set #conf (tackon #confdir "AmiBSDNet.conf"))
+; keep the PaulaNET settings of an earlier installation (Settings window)
+(set #keep "T:AmiBSDNet.keep")
+(if (exists #keep) (delete #keep (optional "force") (safe)))
+; (PaulaNET alone: an old "autodetect off" would leave no network)
+(run (cat "C/NetCtrl KEEPCONF FILE=" #keep
+	(if (and (= #eth "") (= #wlan "")) " NOAUTODETECT" "") " >NIL:") (safe))
+(if (not (exists #keep))
+	(textfile (dest #keep) (append "") (safe)))
 (textfile
+	(include #keep)
 	(prompt "Writing the network configuration")
 	(help @textfile-help)
 	(dest #conf)

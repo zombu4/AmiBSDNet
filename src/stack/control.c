@@ -95,10 +95,15 @@ iface_list(struct NetCtrlMsg *m)
 		m->ndns = netdb_get_nameservers(m->dns, 4);
 
 	m->nifaces = 0;
-	for (i = 0; i < nifaces && i < NETCTRL_MAXIFACES; i++) {
+	for (i = 0; i < nifaces && m->nifaces < NETCTRL_MAXIFACES; i++) {
 		struct iface *ifc = &ifaces[i];
-		struct NetCtrlIface *o = &m->ifaces[m->nifaces++];
-		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
+		struct NetCtrlIface *o;
+		struct virtif_user *v;
+
+		if (ifc->hidden)	/* a plug-in adapter not plugged in */
+			continue;
+		o = &m->ifaces[m->nifaces++];
+		v = sana_find(ifc->device, ifc->unit);
 
 		memset(o, 0, sizeof(*o));
 		sb_copy(o->name, ifc->name, sizeof(o->name));
@@ -118,7 +123,8 @@ iface_list(struct NetCtrlMsg *m)
 		    (ifc->link ? NETIF_LINK : 0) |
 		    (ifc->dhcp ? NETIF_DHCP : 0) |
 		    (ifc->wireless ? NETIF_WIRELESS : 0) |
-		    (ifc->attached ? 0 : NETIF_NODRIVER);
+		    (ifc->attached ? 0 : NETIF_NODRIVER) |
+		    (ifc->unverified ? NETIF_UNVERIFIED : 0);
 	}
 }
 
@@ -145,17 +151,22 @@ status_report(struct NetCtrlMsg *m)
 	ULONG ns[4], rx, tx, rxd, txd;
 	int i, j, n;
 
-	tb_s(&b, "AmiBSDNet 0.4 - NetBSD 11 TCP/IP\n\n");
-	for (i = 0; i < nifaces; i++) {
+	tb_s(&b, "AmiBSDNet 0.5 - NetBSD 11 TCP/IP\n\n");
+	for (i = 0, n = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
-		struct virtif_user *v = sana_find(ifc->device, ifc->unit);
+		struct virtif_user *v;
 
+		if (ifc->hidden)
+			continue;
+		n++;
+		v = sana_find(ifc->device, ifc->unit);
 		tb_s(&b, ifc->name);
 		tb_s(&b, ": ");
 		tb_s(&b, ifc->device);
 		tb_s(&b, " unit ");
 		tb_u(&b, ifc->unit);
-		tb_s(&b, !ifc->attached ? "  DRIVER NOT FOUND" :
+		tb_s(&b, ifc->unverified ? "  DRIVER FAILED THE CHECK" :
+		    !ifc->attached ? "  DRIVER NOT FOUND" :
 		    ifc->up ? "  UP" : !ifc->admin ? "  OFFLINE" :
 		    !ifc->link ? "  NO LINK" : ifc->dhcp ? "  WAITING FOR DHCP" :
 		    "  DOWN");
@@ -194,7 +205,7 @@ status_report(struct NetCtrlMsg *m)
 			tb_s(&b, "\n");
 		}
 	}
-	if (nifaces == 0)
+	if (n == 0)
 		tb_s(&b, "no network interfaces configured\n");
 	n = netdb_get_nameservers(ns, 4);
 	tb_s(&b, "\nname servers:");
@@ -271,7 +282,7 @@ control_handle(void)
 
 			m->link = 0;
 			for (i = 0; i < nifaces; i++)
-				if (ifaces[i].link)
+				if (ifaces[i].link && ifaces[i].attached)
 					m->link = 1;
 		}
 		ReplyMsg(&m->msg);

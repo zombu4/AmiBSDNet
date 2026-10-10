@@ -1,4 +1,4 @@
-AmiBSDNet 0.4
+AmiBSDNet 0.5
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -107,6 +107,32 @@ are in T:WirelessManager.log (more of them after "SetEnv AmiBSDNet/Debug
 1" and a reboot). If the status window says "DRIVER NOT FOUND", the
 driver named in the settings is not in DEVS:Networks.
 
+PaulaNET
+--------
+PaulaNET (https://github.com/RobSmithDev/PaulaNET) is Wi-Fi through the
+floppy port, using a Raspberry Pi Pico W. AmiBSDNet uses it by itself
+whenever it is plugged in: at every start it looks for PaulaNET.device
+in DEVS:, DEVS:Networks or on the adapter's own PaulaNET: disk, and adds
+it as one more DHCP interface, used for the Internet only when no other
+interface is connected. Without the adapter it stays hidden. The Wi-Fi
+network is set up with the PaulaNET Config program on the PaulaNET
+disk, not in AmiBSDNet.
+
+PaulaNET.device is not included in this package (its author has not
+published it under a licence that allows that). The installer copies it
+from the PaulaNET disk to DEVS:Networks, reads it twice and compares,
+and copies it again if the copy differs. It recognises the official
+versions 1.0 and 1.1.
+
+The PaulaNET row of the Settings window: "Verify" (off by default)
+makes the stack use only an official version of the driver, or one
+whose CRC is in the "CRC" field (up to four, separated by spaces).
+Check shows which version is installed; for one AmiBSDNet does not know
+(a newer release, or a damaged copy) it shows the CRC and, with Verify
+on, adds it to the field: Save accepts it. A driver that fails the check
+shows as "DRIVER FAILED THE CHECK" / "Net: Bad driver". "PaulaNET" off
+stops AmiBSDNet from adding the adapter. PaulaNET always uses DHCP.
+
 The status icon
 ---------------
 AmiBSDNetStatus puts an icon on the Workbench showing whether you are
@@ -144,7 +170,13 @@ NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|...] [TIMEOUT=<s>]
 
 NetCtrl PROBE
     Lists the network adapters and whether each is Ethernet or Wi-Fi;
-    sets the variables AmiBSDNet/Ethernet and AmiBSDNet/WiFi.
+    sets the variables AmiBSDNet/Ethernet and AmiBSDNet/WiFi (and
+    AmiBSDNet/PaulaNET to the PaulaNET driver's file, if there is one).
+
+NetCtrl CHECKDRIVER [FILE=<driver>]
+    Checks a PaulaNET.device (default: the one that would be loaded):
+    official version, accepted CRC, unknown, or damaged. Sets
+    AmiBSDNet/DriverCheck, AmiBSDNet/DriverCRC, AmiBSDNet/DriverVersion.
 
 NetCtrl CHECK
     Lists other installed TCP/IP stacks and what of them is still
@@ -173,6 +205,10 @@ line, '#' starts a comment:
     # gateway    192.168.1.1
     # nameserver 192.168.1.1
     domain     home.lan
+    # PaulaNET (see above); all optional:
+    # autodetect off             do not add the PaulaNET adapter
+    # paulanet   verify on       use only a known PaulaNET.device
+    # paulanet   crc 1a2b3c4d    also accept this one (up to four)
 
 Up to four interfaces (sana0 ... sana3) can be configured; the first
 one that is connected carries the Internet traffic. "wifi" marks a

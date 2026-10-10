@@ -23,6 +23,8 @@
 #include <amibsdnet/control.h>
 #include <amibsdnet/probe.h>
 #include <amibsdnet/wm.h>
+#include <amibsdnet/drvcheck.h>
+#include <amibsdnet/devopen.h>
 
 #include "statustool.h"
 
@@ -41,6 +43,11 @@ struct settings {
 	char	hostname[64];
 	char	ssid[34];
 	char	psk[64];
+	int	paulanet;		/* use the PaulaNET adapter (autodetect) */
+	int	verify;			/* check its driver (default off) */
+	char	crcs[40];		/* accepted driver CRCs, hex, spaces */
+	char	paulaline[200];		/* a hand-written PaulaNET interface */
+	int	paulafixed;		/* ... with a fixed address */
 };
 
 static struct settings cur, orig;
@@ -215,13 +222,48 @@ load(struct settings *s)
 
 	memset(s, 0, sizeof(*s));
 	scpy(s->hostname, "amiga", sizeof(s->hostname));
+	s->paulanet = 1;
 	if ((fh = Open((CONST_STRPTR)CONF_ENV, MODE_OLDFILE)) == 0)
 		fh = Open((CONST_STRPTR)CONF_ENVARC, MODE_OLDFILE);
 	if (fh) {
 		while (FGets(fh, (STRPTR)line, sizeof(line))) {
 			if ((n = tokens(line, tok, 12)) < 2)
 				continue;
-			if (seq_nocase(tok[0], "hostname"))
+			if (seq_nocase(tok[0], "autodetect"))
+				s->paulanet = !seq_nocase(tok[1], "off");
+			else if (seq_nocase(tok[0], "paulanet") && n >= 3) {
+				ULONG v;
+
+				if (seq_nocase(tok[1], "verify"))
+					s->verify = seq_nocase(tok[2], "on");
+				else if (seq_nocase(tok[1], "crc") &&
+				    drv_parse_crc(tok[2], &v) &&
+				    slen(s->crcs) + 10 < (int)sizeof(s->crcs)) {
+					char *p = s->crcs + slen(s->crcs);
+
+					if (p != s->crcs)
+						*p++ = ' ';
+					drv_fmt_crc(p, v);
+				}
+			} else if (seq_nocase(tok[0], "interface") && n >= 4 &&
+			    amibsdnet_is_paulanet(tok[2])) {
+				/* written by hand: kept as it is, except for the
+				   interface name (write_conf() picks a free one) */
+				char *p = s->paulaline;
+
+				for (i = 2; i < n && p - s->paulaline <
+				    (int)sizeof(s->paulaline) - 4; i++) {
+					if (i > 2)
+						*p++ = ' ';
+					scpy(p, tok[i], sizeof(s->paulaline) - 2 -
+					    (p - s->paulaline));
+					p += slen(p);
+					/* a fixed address: its gateway and name
+					   server lines must be written again */
+					if (seq_nocase(tok[i], "address"))
+						s->paulafixed = 1;
+				}
+			} else if (seq_nocase(tok[0], "hostname"))
 				scpy(s->hostname, tok[1], sizeof(s->hostname));
 			else if (seq_nocase(tok[0], "gateway"))
 				scpy(s->gateway, tok[1], sizeof(s->gateway));
@@ -270,6 +312,9 @@ load(struct settings *s)
 		}
 		Close(fh);
 	}
+	/* a hand-written PaulaNET line is used whatever "autodetect" says */
+	if (s->paulaline[0])
+		s->paulanet = 1;
 	wm_get_network(s->ssid, sizeof(s->ssid), s->psk, sizeof(s->psk));
 }
 
@@ -314,7 +359,7 @@ static int
 write_conf(const char *path, const struct settings *s)
 {
 	BPTR fh = Open((CONST_STRPTR)path, MODE_NEWFILE);
-	int n = 0, fixed_eth = s->fixed && s->eth[0];
+	int n = 0, fixed_eth = s->fixed && s->eth[0], fixed;
 	char name[8];
 
 	if (fh == 0)
@@ -333,19 +378,72 @@ write_conf(const char *path, const struct settings *s)
 	if (s->wifi[0]) {
 		put_iface(fh, name, s->wifi, s->wifiunit,
 		    s->fixed && !fixed_eth, s->addr, 1);
+		name[4]++;
 		n++;
 	}
-	if (s->fixed && s->gateway[0]) {
+	fixed = s->fixed || (s->paulafixed && s->paulaline[0] && s->paulanet);
+	if (fixed && s->gateway[0]) {
 		FPuts(fh, (CONST_STRPTR)"gateway    ");
 		FPuts(fh, (CONST_STRPTR)s->gateway);
 		FPuts(fh, (CONST_STRPTR)"\n");
 	}
-	if (s->fixed && s->dns[0]) {
+	if (fixed && s->dns[0]) {
 		FPuts(fh, (CONST_STRPTR)"nameserver ");
 		FPuts(fh, (CONST_STRPTR)s->dns);
 		FPuts(fh, (CONST_STRPTR)"\n");
 	}
+	/* PaulaNET (floppy-port Wi-Fi): found by the stack by itself */
+	if (s->paulaline[0] && s->paulanet) {
+		FPuts(fh, (CONST_STRPTR)"interface  ");
+		FPuts(fh, (CONST_STRPTR)name);
+		FPuts(fh, (CONST_STRPTR)" ");
+		FPuts(fh, (CONST_STRPTR)s->paulaline);
+		FPuts(fh, (CONST_STRPTR)"\n");
+	}
+	if (!s->paulanet)
+		FPuts(fh, (CONST_STRPTR)"autodetect off\n");
+	if (s->verify)
+		FPuts(fh, (CONST_STRPTR)"paulanet   verify on\n");
+	{
+		const char *p = s->crcs;
+		char one[12];
+		int i;
+
+		while (*p) {
+			while (*p == ' ')
+				p++;
+			for (i = 0; *p && *p != ' ' && i < 11; i++)
+				one[i] = *p++;
+			one[i] = '\0';
+			if (i) {
+				FPuts(fh, (CONST_STRPTR)"paulanet   crc ");
+				FPuts(fh, (CONST_STRPTR)one);
+				FPuts(fh, (CONST_STRPTR)"\n");
+			}
+		}
+	}
 	Close(fh);
+	return 0;
+}
+
+/* the CRC field: hex numbers separated by spaces; 0 if all are good */
+static int
+valid_crcs(const char *p)
+{
+	char one[12];
+	ULONG v;
+	int i, n = 0;
+
+	while (*p) {
+		while (*p == ' ')
+			p++;
+		for (i = 0; *p && *p != ' '; p++)
+			if (i < 11)
+				one[i++] = *p;
+		one[i] = '\0';
+		if (i && (!drv_parse_crc(one, &v) || ++n > DRV_MAXCRC))
+			return -1;
+	}
 	return 0;
 }
 
@@ -367,7 +465,8 @@ mkdirs(int envarc)
 enum {
 	GID_ETH = 1, GID_ETHUNIT, GID_WIFI, GID_WIFIUNIT, GID_DETECT,
 	GID_MODE, GID_ADDR, GID_GW, GID_DNS, GID_HOST, GID_SSID, GID_SCAN,
-	GID_PSK, GID_STATUS, GID_SAVE, GID_USE, GID_CANCEL, NGADS
+	GID_PSK, GID_PAULA, GID_VERIFY, GID_CRC, GID_CHECK, GID_STATUS,
+	GID_SAVE, GID_USE, GID_CANCEL, NGADS
 };
 
 static struct Gadget *gad[NGADS];
@@ -411,6 +510,21 @@ ghost_address(void)
 	set_attr(GID_ADDR, GA_Disabled, !cur.fixed);
 	set_attr(GID_GW, GA_Disabled, !cur.fixed);
 	set_attr(GID_DNS, GA_Disabled, !cur.fixed);
+}
+
+static void
+ghost_paulanet(void)
+{
+
+	set_attr(GID_VERIFY, GA_Disabled, !cur.paulanet);
+	set_attr(GID_CRC, GA_Disabled, !cur.paulanet || !cur.verify);
+}
+
+static int
+checked(int id)
+{
+
+	return (gad[id]->Flags & GFLG_SELECTED) != 0;
 }
 
 /* what DHCP gave the primary interface, shown while in DHCP mode */
@@ -485,7 +599,11 @@ show(void)
 	set_attr(GID_HOST, GTST_String, (ULONG)cur.hostname);
 	set_attr(GID_SSID, GTST_String, (ULONG)cur.ssid);
 	set_attr(GID_PSK, GTST_String, (ULONG)cur.psk);
+	set_attr(GID_PAULA, GTCB_Checked, cur.paulanet);
+	set_attr(GID_VERIFY, GTCB_Checked, cur.verify);
+	set_attr(GID_CRC, GTST_String, (ULONG)cur.crcs);
 	show_address();
+	ghost_paulanet();
 }
 
 /* the gadgets into cur */
@@ -505,6 +623,74 @@ collect(void)
 	scpy(cur.hostname, gstr(GID_HOST), sizeof(cur.hostname));
 	scpy(cur.ssid, gstr(GID_SSID), sizeof(cur.ssid));
 	scpy(cur.psk, gstr(GID_PSK), sizeof(cur.psk));
+	cur.paulanet = checked(GID_PAULA);
+	cur.verify = checked(GID_VERIFY);
+	scpy(cur.crcs, gstr(GID_CRC), sizeof(cur.crcs));
+}
+
+/* the PaulaNET driver the stack would load, checked as Save would set it */
+static void
+check_driver(void)
+{
+	static char msg[96];
+	struct drvprefs p;
+	char path[64], hex[9], one[12];
+	const char *ver, *s;
+	ULONG crc;
+	int r, i;
+
+	collect();
+	if (valid_crcs(cur.crcs) != 0) {
+		status("Accepted CRC: up to 4 numbers of 8 hex digits");
+		return;
+	}
+	p.verify = cur.verify;
+	p.ncrc = 0;
+	for (s = cur.crcs; *s && p.ncrc < DRV_MAXCRC;) {
+		while (*s == ' ')
+			s++;
+		for (i = 0; *s && *s != ' ' && i < 11; i++)
+			one[i] = *s++;
+		one[i] = '\0';
+		if (i && drv_parse_crc(one, &p.crc[p.ncrc]))
+			p.ncrc++;
+	}
+	if (!drv_paulanet_path(path, sizeof(path))) {
+		status("No PaulaNET.device in DEVS:, DEVS:Networks or PaulaNET:");
+		return;
+	}
+	status("Checking the PaulaNET driver...");
+	r = drv_check_paulanet(path, &p, &ver, &crc);
+	drv_fmt_crc(hex, crc);
+	if (r == DRV_OK) {
+		scpy(msg, "PaulaNET.device ", sizeof(msg));
+		scpy(msg + slen(msg), ver, sizeof(msg) - slen(msg));
+		scpy(msg + slen(msg), ": official, OK", sizeof(msg) - slen(msg));
+	} else if (r == DRV_ACCEPTED) {
+		scpy(msg, "PaulaNET.device: accepted CRC, OK", sizeof(msg));
+	} else if (r == DRV_UNKNOWN) {
+		/* a newer release: offer its CRC */
+		scpy(msg, "Unknown version, CRC ", sizeof(msg));
+		scpy(msg + slen(msg), hex, sizeof(msg) - slen(msg));
+		if (cur.verify && p.ncrc < DRV_MAXCRC &&
+		    slen(cur.crcs) + 10 < (int)sizeof(cur.crcs)) {
+			char *e = cur.crcs + slen(cur.crcs);
+
+			if (e != cur.crcs)
+				*e++ = ' ';
+			scpy(e, hex, 9);
+			set_attr(GID_CRC, GTST_String, (ULONG)cur.crcs);
+			scpy(msg + slen(msg), " (added: Save to accept)",
+			    sizeof(msg) - slen(msg));
+		} else if (!cur.verify)
+			scpy(msg + slen(msg), " (used: verify is off)",
+			    sizeof(msg) - slen(msg));
+	} else if (r == DRV_MISSING)
+		scpy(msg, "PaulaNET.device cannot be found any more", sizeof(msg));
+	else
+		scpy(msg, "PaulaNET.device is DAMAGED: copy it again from the "
+		    "PaulaNET disk", sizeof(msg));
+	status(msg);
 }
 
 static void
@@ -527,7 +713,9 @@ detect(void)
 			cur.ethunit = a[i].unit;
 		}
 	show();
-	if (n == 0)
+	if (n == 0 && probe_paulanet[0])
+		status("Found: PaulaNET only (used when plugged in)");
+	else if (n == 0)
 		status("No network adapters found in DEVS:Networks");
 	else {
 		char *p = msg;
@@ -550,8 +738,18 @@ static int
 check(void)
 {
 
-	if (!cur.eth[0] && !cur.wifi[0]) {
+	/* PaulaNET alone is fine: the stack adds it by itself */
+	if (!cur.eth[0] && !cur.wifi[0] &&
+	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline[0]))) {
 		status("Enter a network driver, or press Detect");
+		return -1;
+	}
+	if (amibsdnet_is_paulanet(cur.eth) || amibsdnet_is_paulanet(cur.wifi)) {
+		status("PaulaNET is added by itself: use the PaulaNET box");
+		return -1;
+	}
+	if (cur.fixed && !cur.eth[0] && !cur.wifi[0]) {
+		status("PaulaNET uses DHCP: a fixed address needs a driver above");
 		return -1;
 	}
 	if (cur.fixed && !valid_ip(cur.addr, 1)) {
@@ -573,6 +771,11 @@ check(void)
 	    slen(cur.psk) > 63)) {
 		status("Passphrase: 8 to 63 characters (empty if open)");
 		ActivateGadget(gad[GID_PSK], win, NULL);
+		return -1;
+	}
+	if (valid_crcs(cur.crcs) != 0) {
+		status("Accepted CRC: up to 4 numbers of 8 hex digits");
+		ActivateGadget(gad[GID_CRC], win, NULL);
 		return -1;
 	}
 	return 0;
@@ -664,7 +867,7 @@ settings_window(void)
 	struct NewGadget ng;
 	struct IntuiMessage *im;
 	int quit = 0, rv = 0, r;
-	UWORD fh, top, row, w = 470, lx = 150, h;
+	UWORD fh, top, row, gap, cw, w = 470, lx = 150, h;
 
 	if ((GadToolsBase = OpenLibrary("gadtools.library", 37)) == NULL)
 		return 0;
@@ -675,10 +878,21 @@ settings_window(void)
 	load(&cur);
 	CopyMem(&cur, &orig, sizeof(orig));
 	get_live();
+	if (!drv_paulanet_path(probe_paulanet, sizeof(probe_paulanet)))
+		probe_paulanet[0] = '\0';
 
 	fh = scr->Font->ta_YSize;
+	cw = scr->RastPort.Font ? scr->RastPort.Font->tf_XSize : 8;
 	row = fh + 8;
+	gap = 6;
 	top = scr->WBorTop + fh + 1 + 6;
+	/* 12 rows, 4 gaps: on a short screen (PAL 640x256) closer together */
+	if (top + 12 * row + 4 * gap + 2 + fh + 6 + scr->WBorBottom + 6 >
+	    scr->Height) {
+		row = fh + 6;
+		gap = 2;
+		top = scr->WBorTop + fh + 1 + 3;
+	}
 	g = create_context(&glist);
 	memset(&ng, 0, sizeof(ng));
 	ng.ng_TextAttr = scr->Font;
@@ -712,7 +926,7 @@ settings_window(void)
 	    PLACETEXT_IN, TAG_IGNORE, 0, TAG_IGNORE, 0);
 
 	/* address */
-	ng.ng_TopEdge += row + 6;
+	ng.ng_TopEdge += row + gap;
 	g = mk(CYCLE_KIND, g, &ng, GID_MODE, "_Address", PLACETEXT_LEFT,
 	    GTCY_Labels, (ULONG)modes, GTCY_Active, cur.fixed);
 	ng.ng_TopEdge += row;
@@ -725,7 +939,7 @@ settings_window(void)
 	STR(GID_HOST, "_Host name", 63);
 
 	/* Wi-Fi network */
-	ng.ng_TopEdge += row + 6;
+	ng.ng_TopEdge += row + gap;
 	ng.ng_Width = w - lx - 10 - 90;
 	STR(GID_SSID, "Wi-Fi net_work", 32);
 	ng.ng_LeftEdge = w - 10 - 84;
@@ -737,8 +951,28 @@ settings_window(void)
 	ng.ng_Width = w - lx - 10;
 	STR(GID_PSK, "_Passphrase", 63);
 
+	/* PaulaNET (Wi-Fi through the floppy port), all on one row */
+	ng.ng_TopEdge += row + gap;
+	ng.ng_LeftEdge = 10;
+	ng.ng_Width = 26;
+	g = mk(CHECKBOX_KIND, g, &ng, GID_PAULA, "PaulaNET",
+	    PLACETEXT_RIGHT, GTCB_Checked, cur.paulanet, GTCB_Scaled, TRUE);
+	ng.ng_LeftEdge = 10 + 26 + 4 + 8 * cw + 10;
+	g = mk(CHECKBOX_KIND, g, &ng, GID_VERIFY, "Verify",
+	    PLACETEXT_RIGHT, GTCB_Checked, cur.verify, GTCB_Scaled, TRUE);
+	ng.ng_LeftEdge += 26 + 4 + 6 * cw + 10 + 4 * cw;
+	/* (a wide screen font: keep the field usable) */
+	if (ng.ng_LeftEdge > w - 10 - 70 - 6 - 60)
+		ng.ng_LeftEdge = w - 10 - 70 - 6 - 60;
+	ng.ng_Width = w - 10 - 70 - 6 - ng.ng_LeftEdge;
+	STR(GID_CRC, "CRC", 39);
+	ng.ng_LeftEdge = w - 10 - 70;
+	ng.ng_Width = 70;
+	g = mk(BUTTON_KIND, g, &ng, GID_CHECK, "Check", PLACETEXT_IN,
+	    TAG_IGNORE, 0, TAG_IGNORE, 0);
+
 	/* status line and buttons */
-	ng.ng_TopEdge += row + 6;
+	ng.ng_TopEdge += row + gap;
 	ng.ng_LeftEdge = 10;
 	ng.ng_Width = w - 20;
 	g = mk(TEXT_KIND, g, &ng, GID_STATUS, NULL, 0, GTTX_Border, TRUE,
@@ -766,6 +1000,7 @@ settings_window(void)
 			{ WA_PubScreen, (ULONG)scr },
 			{ WA_DragBar, TRUE }, { WA_DepthGadget, TRUE },
 			{ WA_CloseGadget, TRUE }, { WA_Activate, TRUE },
+			{ WA_AutoAdjust, TRUE },
 			{ WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			    IDCMP_GADGETUP | IDCMP_GADGETDOWN | IDCMP_MOUSEMOVE |
 			    IDCMP_VANILLAKEY | IDCMP_INTUITICKS },
@@ -777,7 +1012,8 @@ settings_window(void)
 	}
 	GT_RefreshWindow(win, NULL);
 	show();
-	if (!cur.eth[0] && !cur.wifi[0])
+	if (!cur.eth[0] && !cur.wifi[0] &&
+	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline[0])))
 		detect();
 	else
 		status("Ethernet and Wi-Fi can be used at the same time");
@@ -829,6 +1065,14 @@ settings_window(void)
 				break;
 			case GID_SCAN:
 				scan();
+				break;
+			case GID_PAULA:
+			case GID_VERIFY:
+				collect();
+				ghost_paulanet();
+				break;
+			case GID_CHECK:
+				check_driver();
 				break;
 			case GID_SAVE:
 			case GID_USE:
