@@ -50,7 +50,7 @@ struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.5 (10.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.6 (10.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22

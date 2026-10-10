@@ -2,7 +2,7 @@ Short:        NetBSD 11 TCP/IP stack for AmigaOS (bsdsocket)
 Author:       zombu4 (https://github.com/zombu4)
 Uploader:     zombu4 (https://github.com/zombu4)
 Type:         comm/tcp
-Version:      0.5
+Version:      0.6
 Architecture: m68k-amigaos >= 3.1.0
 Requires:     68020+, Fast RAM, a SANA-II network driver
 Distribution: NoCD
@@ -32,6 +32,9 @@ API), so existing network software works unchanged.
   glance, double-click for details; Settings window for drivers,
   DHCP or fixed address, DNS and the Wi-Fi network, applied at once
 - NetCtrl (status, online/offline, wait for network) and Ping
+- SerialShell: a Shell on the serial port for a terminal on another
+  computer (8N1, no handshaking, 19200 baud by default), switched on
+  and off in the Settings window
 - Installer for Workbench 3.2: finds the network adapters itself and
   offers to switch from another TCP/IP stack (Roadshow, Miami, AmiTCP,
   Genesis) as a trial: it comes back by itself if AmiBSDNet does not
