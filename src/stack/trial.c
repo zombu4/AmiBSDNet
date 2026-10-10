@@ -119,9 +119,9 @@ trial_watch(void)
 
 /*
  * Called by the launcher before the stack is started.  Returns 0 to start
- * the stack (normally, or as a trial), -1 if this is the boot after a
- * trial that never connected: the fallback is running and the stack must
- * not start.
+ * the stack (normally, or as a trial), 1 to start it after a fallback that
+ * did not finish, -1 if this is the boot after a trial that never
+ * connected: the fallback is running and the stack must not start.
  */
 int
 trial_begin(void)
@@ -152,9 +152,7 @@ trial_begin(void)
 		/* "3": the fallback was started at the last boot and did not
 		   finish (NetCtrl failed): rather AmiBSDNet than no network */
 		DeleteVar((CONST_STRPTR)TRIAL_VAR, GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
-		P("AmiBSDNet: going back to the previous TCP/IP stack did not "
-		    "finish; starting AmiBSDNet\n");
-		return 0;
+		return 1;	/* (the caller says so: no log yet here) */
 	}
 	SetVar((CONST_STRPTR)TRIAL_VAR, (CONST_STRPTR)"2", -1,
 	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
