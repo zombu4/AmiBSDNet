@@ -188,6 +188,18 @@ server_main(void *arg)
 		sb->srvstate = -1;
 		return NULL;
 	}
+	/* the process's descriptor limit starts at 128 (OPEN_MAX): raise it
+	   above SB_MAXFD, for SBTC_DTABLESIZE up to SB_MAXFD and for moving
+	   the wake socket out of the way (Dup2Socket) */
+	{
+		struct { unsigned long long cur, max; } rl;
+
+		if (rump___sysimpl_getrlimit(8 /* RLIMIT_NOFILE */, &rl) == 0 &&
+		    rl.cur < SB_MAXFD + 8) {
+			rl.cur = rl.max < SB_MAXFD + 8 ? rl.max : SB_MAXFD + 8;
+			rump___sysimpl_setrlimit(8, &rl);
+		}
+	}
 	if ((sb->wakefd = make_wake_socket(sb)) < 0) {
 		DeleteMsgPort(port);
 		rump_pub_lwproc_releaselwp();

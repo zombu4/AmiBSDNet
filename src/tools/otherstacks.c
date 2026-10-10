@@ -743,21 +743,32 @@ otherstacks_fallback(char *msg, int size)
 	 * At boot the startup scripts may still be running (and so cannot be
 	 * replaced): try again for up to two minutes.
 	 */
+	restored = 0;
 	for (tries = 0; tries < 24; tries++) {
+		char names[128];
+
 		rv = otherstacks_apply(OTHERS_RESTORE);
-		/* AmiBSDNet leaves the boot only once the other stack is
-		   back in it: never neither of them */
-		if (rv == 0) {
+		/*
+		 * AmiBSDNet leaves the boot only once the other stack is back
+		 * in it (never neither of them).  "Back" is what counts, also
+		 * if some other part could not be put back (a WBStartup item
+		 * or LIBS:bsdsocket.library: reported, not retried).
+		 */
+		otherstacks_check(names, sizeof(names));
+		if (!restored && (rv == 0 || otherstacks_atboot(names,
+		    sizeof(names)) > 0)) {
+			restored = 1;
 			old = quiet();
-			if (own_startup_off() != 0)
+			if (own_startup_off() != 0) {
+				restored = 0;	/* still in the boot: retry */
 				rv = -1;
+			}
 			loud(old);
 		}
-		if (rv == 0)
+		if (restored)
 			break;
 		Delay(250);
 	}
-	restored = rv == 0;
 	old = quiet();
 	/* the status icon is not wanted without the stack */
 	park("SYS:WBStartup/AmiBSDNetStatus", "AmiBSDNet", "AmiBSDNetStatus",

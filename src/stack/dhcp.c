@@ -552,7 +552,9 @@ dhcp_thread(void *arg)
 			continue;
 		}
 		if (now < d->renew) {
-			waited = d->renew - now;
+			/* wake for whichever comes first */
+			waited = (d->expire < d->renew ? d->expire : d->renew) -
+			    now;
 			dhcp_pause(d, (waited > 60 ? 60 : waited) * 1000);
 			continue;	/* re-evaluate (also after an event) */
 		}
