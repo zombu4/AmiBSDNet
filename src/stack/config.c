@@ -56,8 +56,10 @@ stack_update_route(void)
 			/* the interface only if the router is on its network
 			   (one "gateway" line is shared by every static
 			   interface; the kernel then finds the right one) */
-			if (((gw ^ ifaces[i].addr) & ifaces[i].mask) == 0)
-				ifa = ifaces[i].addr;
+			if (ifaces[i].dhcp ||
+			    ((gw ^ ifaces[i].addr) & ifaces[i].mask) == 0)
+				ifa = ifaces[i].addr;	/* (DHCP: its own router,
+							   also off the subnet) */
 			break;
 		}
 	/* also when only the interface changes: Ethernet and Wi-Fi on the

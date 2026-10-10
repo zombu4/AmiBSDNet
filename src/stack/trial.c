@@ -63,14 +63,19 @@ run_fallback(void)
 			Close(in);
 		if (out)
 			Close(out);
+		/* no way back: rather AmiBSDNet than no network at every
+		   boot (the next one starts it normally) */
+		DeleteVar((CONST_STRPTR)TRIAL_VAR, GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 		/* without NetCtrl at least say what to do */
 		if ((IntuitionBase = OpenLibrary((CONST_STRPTR)
 		    "intuition.library", 37)) != NULL) {
 			struct EasyStruct es = { sizeof(es), 0,
 			    (UBYTE *)"AmiBSDNet", (UBYTE *)"AmiBSDNet could not "
 			    "connect, and C:NetCtrl is missing to go back\nto the "
-			    "previous TCP/IP stack. Copy S:User-Startup."
-			    "amibsdnet-bak\nto S:User-Startup and reboot.",
+			    "previous TCP/IP stack. Copy C:NetCtrl from the\n"
+			    "AmiBSDNet package and run \"NetCtrl FALLBACK\" (the\n"
+			    "original startup files are S:*.amibsdnet-bak).\n"
+			    "Until then AmiBSDNet starts normally at boot.",
 			    (UBYTE *)"OK" };
 
 			EasyRequestArgs(NULL, &es, NULL, NULL);

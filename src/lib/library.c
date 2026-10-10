@@ -183,8 +183,12 @@ server_main(void *arg)
 	struct sbcall *call;
 	int fd;
 
-	if (rump_pub_lwproc_rfork(RUMP_RFCFDG) != 0 ||
-	    (port = CreateMsgPort()) == NULL) {
+	if (rump_pub_lwproc_rfork(RUMP_RFCFDG) != 0) {
+		sb->srvstate = -1;
+		return NULL;
+	}
+	if ((port = CreateMsgPort()) == NULL) {
+		rump_pub_lwproc_releaselwp();
 		sb->srvstate = -1;
 		return NULL;
 	}
