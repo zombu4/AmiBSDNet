@@ -316,12 +316,17 @@ update_icon(struct MsgPort *appport)
 static void
 start_stack(void)
 {
+	BPTR in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+	BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 
-	SystemTags((CONST_STRPTR)stackcmd,
-	    SYS_Asynch, TRUE,
-	    SYS_Input, Open((CONST_STRPTR)"NIL:", MODE_OLDFILE),
-	    SYS_Output, Open((CONST_STRPTR)"NIL:", MODE_NEWFILE),
-	    TAG_DONE);
+	/* (asynchronous: the handles are the caller's only on failure) */
+	if (SystemTags((CONST_STRPTR)stackcmd, SYS_Asynch, TRUE,
+	    SYS_Input, in, SYS_Output, out, TAG_DONE) != 0) {
+		if (in)
+			Close(in);
+		if (out)
+			Close(out);
+	}
 }
 
 static void
