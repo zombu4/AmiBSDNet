@@ -300,7 +300,8 @@ load(struct settings *s)
 					    s->fixed && !has_word(s->addr, "/")) {
 						int plen = mask_prefix(tok[i + 1]);
 
-						if (plen >= 0) {
+						if (plen >= 0 && slen(s->addr) + 4 <
+						    (int)sizeof(s->addr)) {
 							char *p = s->addr + slen(s->addr);
 
 							*p++ = '/';

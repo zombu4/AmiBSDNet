@@ -184,6 +184,19 @@
 (set #ethunit 0)
 (set #wlanunit 0)
 
+; switching from another stack on a PiStorm: the Wi-Fi driver is
+; installed only at the end, so it cannot be found yet
+(if (and #emu68 #driverlater (= #wlan "")
+		(not (exists "DEVS:Networks/wifipi.device")))
+	(if (askbool
+			(prompt "Use the Raspberry Pi's Wi-Fi (wifipi.device)?\n\n"
+				"Its driver is installed at the end, together with the "
+				"switch to AmiBSDNet.")
+			(help "Choose Yes if your PiStorm's Raspberry Pi has Wi-Fi "
+				"(Pi 3, Pi Zero 2 W, Pi 4, CM4 with Wi-Fi).")
+			(default 1))
+		(set #wlan "wifipi.device")))
+
 ; PaulaNET (Wi-Fi through the floppy port): AmiBSDNet uses it by itself
 ; whenever it is plugged in.  Its driver comes on the adapter's own
 ; PaulaNET: disk; a copy in DEVS:Networks is checked against the source

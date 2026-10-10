@@ -67,7 +67,10 @@ rump_amibsdnet_fd_import(void *cookie, int *fdp)
 	while ((error = fd_alloc(curproc, 0, &fd)) == ENOSPC)
 		fd_tryexpand(curproc);
 	if (error == 0) {
+		/* fd_affix() takes a reference of its own: the hold from
+		   the export is dropped (2 -> 1, nothing is closed) */
 		fd_affix(curproc, fp, fd);
+		closef(fp);
 		*fdp = fd;
 	}
 	rump_unschedule();

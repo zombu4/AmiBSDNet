@@ -357,6 +357,8 @@ LONG rump___sysimpl_fcntl(LONG, LONG, LONG);
 LONG rump___sysimpl_close(LONG);
 LONG rump___sysimpl_dup2(LONG, LONG);
 LONG rump___sysimpl_poll(struct nb_pollfd *, ULONG, LONG);
+LONG rump___sysimpl_getrlimit(LONG, void *);
+LONG rump___sysimpl_setrlimit(LONG, const void *);
 int rump_pub_lwproc_rfork(int);
 void rump_pub_lwproc_releaselwp(void);
 #define	RUMP_RFCFDG	0x02

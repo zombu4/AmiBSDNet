@@ -76,7 +76,9 @@ is_wm(struct Task *t)
 		struct Process *p = (struct Process *)t;
 		struct CommandLineInterface *cli = BADDR(p->pr_CLI);
 
-		if (cli && cli->cli_CommandName) {
+		/* (a Shell keeps the name of its last command: only while
+		   that command runs, cli_Module is set) */
+		if (cli && cli->cli_Module && cli->cli_CommandName) {
 			const UBYTE *b = BADDR(cli->cli_CommandName);
 
 			if (b && b[0] && contains_nocase((const char *)b + 1, b[0],

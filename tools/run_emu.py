@@ -80,6 +80,8 @@ def echo_server(port, stop):
             try:
                 while data := conn.recv(4096):
                     conn.sendall(data)
+                # the Amiga side closed the connection (FIN)
+                print(f"[echo] closed by {peer[0]}:{peer[1]}", flush=True)
             except OSError:
                 pass
     srv.close()

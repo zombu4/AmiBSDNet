@@ -53,7 +53,11 @@ stack_update_route(void)
 	for (i = 0; i < nifaces; i++)
 		if (ifaces[i].up && ifaces[i].gateway) {
 			gw = ifaces[i].gateway;
-			ifa = ifaces[i].addr;
+			/* the interface only if the router is on its network
+			   (one "gateway" line is shared by every static
+			   interface; the kernel then finds the right one) */
+			if (((gw ^ ifaces[i].addr) & ifaces[i].mask) == 0)
+				ifa = ifaces[i].addr;
 			break;
 		}
 	/* also when only the interface changes: Ethernet and Wi-Fi on the

@@ -289,8 +289,15 @@ srv_obtain(struct SocketBase *sb, struct obtain_args *a)
 		return sb_fail(sb, err);
 	}
 	if (fd >= sb->dtablesize || fd >= SB_MAXFD) {
-		rump___sysimpl_close(fd);
-		FreeVec(h);
+		/* no room in this base: hand the socket back (closing the fd
+		   would destroy it), still waiting to be obtained */
+		if (rump_amibsdnet_fd_export(fd, 1, &h->file) == 0) {
+			held_lock();
+			h->next = held;
+			held = h;
+			ReleaseSemaphore(&heldlock);
+		} else
+			FreeVec(h);
 		return sb_fail(sb, EMFILE);
 	}
 	rump___sysimpl_ioctl(fd, FIONBIO, &on);

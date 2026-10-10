@@ -25,6 +25,7 @@
 #include <dos/dosextens.h>
 #include <dos/dostags.h>
 #include <dos/rdargs.h>
+#include <dos/var.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 
@@ -177,6 +178,17 @@ _start(void)
 		    (CONST_STRPTR)"bsdsocket.library") != NULL;
 		Permit();
 		if (ours || other) {
+			/* the other stack runs again: a trial (see trial.c) is
+			   over, its fallback done, also if FALLBACK could not
+			   take AmiBSDNet out of the boot */
+			if (other) {
+				APTR oldwin = me->pr_WindowPtr;
+
+				me->pr_WindowPtr = (APTR)-1;
+				DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+				    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+				me->pr_WindowPtr = oldwin;
+			}
 			if (out)
 				PutStr((CONST_STRPTR)(ours ?
 				    "AmiBSDNet is already running\n" :

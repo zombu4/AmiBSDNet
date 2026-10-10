@@ -159,6 +159,32 @@ test_tcp(void)
 		}
 	}
 
+	/* Dup2Socket() onto descriptor 0 (where the library keeps an internal
+	   socket of its own), then talk through 0 */
+	{
+		LONG d = Dup2Socket(s, 0);
+
+		check("Dup2Socket(s, 0)", d == 0);
+		if (d == 0) {
+			n = send(0, (APTR)msg, sizeof(msg), 0);
+			for (got = 0; n > 0 && got < (LONG)sizeof(msg); got += n)
+				if ((n = recv(0, buf + got, sizeof(buf) - got,
+				    0)) <= 0)
+					break;
+			check("echo through descriptor 0",
+			    got == sizeof(msg) &&
+			    memcmp(buf, msg, sizeof(msg)) == 0);
+			/* and Ctrl-C still interrupts (the internal socket
+			   was moved, not lost) */
+			SetSignal(SIGBREAKF_CTRL_C, SIGBREAKF_CTRL_C);
+			n = recv(0, buf, sizeof(buf), 0);
+			check("Ctrl-C still interrupts after Dup2Socket",
+			    n == -1 && errno_ == EINTR);
+			SetSignal(0, SIGBREAKF_CTRL_C);
+			CloseSocket(0);
+		}
+	}
+
 	check("CloseSocket()", CloseSocket(s) == 0);
 }
 
