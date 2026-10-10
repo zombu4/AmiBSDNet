@@ -653,6 +653,12 @@ sana_iothread(void *arg)
 	}
 	if (tport)
 		DeleteMsgPort(tport);
+	goto reapall;
+
+fail:
+	/* (also part-way through the setup: reads may be queued already) */
+	viu->state = -1;
+reapall:
 	for (i = 0; i < (unsigned)nrx; i++)
 		if (reap(viu->rxreqs[i], 1))
 			stuck++;
@@ -661,17 +667,19 @@ sana_iothread(void *arg)
 			stuck++;
 	if (viu->evreq && reap(viu->evreq, 1))
 		stuck++;
-	if (stuck)
+	if (stuck) {
 		amiga_rump_printf("sana: %s keeps %d request(s); leaving it "
 		    "open\n", viu->devname, stuck);
+		/* this process ends: a late reply must not signal it */
+		Forbid();
+		ioport->mp_Flags = PA_IGNORE;
+		Permit();
+	}
 	/* frames the kernel posted after the last pass */
-	while (GetMsg(txport) != NULL)
-		;
-	goto cleanup;
+	if (txport)
+		while (GetMsg(txport) != NULL)
+			;
 
-fail:
-	viu->state = -1;
-cleanup:
 	for (i = 0; i < (unsigned)nrx; i++)
 		if (!viu->rxreqs[i]->busy)
 			FreeVec(viu->rxreqs[i]);
@@ -719,9 +727,10 @@ rumpcomp_sana_create(const char *linkstr, struct virtif_sc *sc,
 	rv = rumpuser_thread_create(sana_iothread, viu, "AmiBSDNet sana I/O",
 	    1, 0, -1, &viu->iothread);
 	if (rv == 0) {
-		while (viu->state == 0)
+		/* (a thread whose setup failed ends without running) */
+		while (viu->state == 0 && !amiga_host_thread_done(viu->iothread))
 			amiga_host_sleep_ms(20);
-		if (viu->state < 0) {
+		if (viu->state <= 0) {
 			amiga_host_thread_join(viu->iothread);
 			rv = RUMPUSER_ENOENT;
 		}

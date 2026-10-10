@@ -33,8 +33,9 @@ API), so existing network software works unchanged.
   DHCP or fixed address, DNS and the Wi-Fi network, applied at once
 - NetCtrl (status, online/offline, wait for network) and Ping
 - Installer for Workbench 3.2: finds the network adapters itself and
-  offers to disable or remove another TCP/IP stack (Roadshow, Miami,
-  AmiTCP, Genesis)
+  offers to switch from another TCP/IP stack (Roadshow, Miami, AmiTCP,
+  Genesis) as a trial: it comes back by itself if AmiBSDNet does not
+  connect
 
 Install: double-click "Install" in the AmiBSDNet drawer.
 

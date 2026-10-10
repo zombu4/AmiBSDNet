@@ -28,7 +28,7 @@ trimming unused pieces such as the compat code (`RUMP_NBCOMPAT`).
 - `tools/build.py`: reads SRCS/.PATH straight from NetBSD's makefiles (no
   bmake or build.sh), compiles, does the `rumpns_` symbol rename, and
   builds `build/lib{rumpkern,rumpnet,rumpnet_net}.a`.
-- `tools/gen_stubs.py`: generates the no-op hypercall stubs for the link test.
+- `tools/link_test.sh`: the link test (no-op hypercall stubs).
 
 ```sh
 python -I tools/build.py                                    # -O2 -DDIAGNOSTIC

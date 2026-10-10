@@ -39,8 +39,10 @@ Early development.
       WirelessManager started automatically for Wi-Fi interfaces
 - [x] Installer script for Workbench 3.2+ that detects the network
       adapters (`NetCtrl PROBE`) and other TCP/IP stacks (Roadshow,
-      Miami, AmiTCP, Genesis), offers to disable (reversibly) or remove
-      them and verifies they no longer start at boot; generated icons,
+      Miami, AmiTCP, Genesis), offers to switch from them as a trial
+      (disabled reversibly, put back by itself if AmiBSDNet does not
+      connect; `NetCtrl REMOVEOTHERS` removes them for good) and
+      verifies they no longer start at boot; generated icons,
       LHA/ZIP packaging (`tools/package.py`)
 - [x] Wi-Fi bundled: WirelessManager (WPA/WPA2) and, for the PiStorm,
       wifipi.device with firmware (third-party, see
@@ -103,5 +105,7 @@ share it for any noncommercial purpose, but you may not sell it or bundle
 it into a commercial product. For commercial licensing, contact the author
 via GitHub.
 
-NetBSD code is not part of this repository (`tools/bootstrap.py` fetches
-it) and stays under NetBSD's own BSD-style licence.
+The NetBSD sources are not part of this repository (`tools/bootstrap.py`
+fetches them) and stay under NetBSD's own BSD-style licence. So do the
+files here that are derived from NetBSD code, such as
+`src/kern/if_virt.c`, which keep their NetBSD copyright notices.

@@ -54,7 +54,7 @@
 				"S:Startup-Sequence and S:User-Startup are commented "
 				"out, and its WBStartup items and LIBS:bsdsocket.library "
 				"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
-				"files are saved as <name>.amibsdnet-backup first.\n\n"
+				"files are saved as <name>.amibsdnet-bak first.\n\n"
 				"This is a trial: if AmiBSDNet does not get connected "
 				"within three minutes after the next boot, it puts "
 				"everything back by itself (the other stack, and the "
@@ -96,9 +96,13 @@
 ; overwrite the user's original): wifipi.device.old and DEVS:Firmware.old.
 ; NetCtrl FALLBACK puts them back.  Someone who keeps the other stack
 ; keeps the Wi-Fi driver it works with, too.
+; Switching from another stack: the driver is replaced only at the end,
+; together with the switch itself (until then the other stack must keep
+; working with its own driver, also if the installation is aborted).
 (set #keepdriver (and (<> #others "") (= #othersdo 1)
 	(exists "DEVS:Networks/wifipi.device")))
-(if (and #emu68 (not #keepdriver))
+(set #driverlater (and (<> #others "") (= #othersdo 0)))
+(procedure P_WIFIDRIVER
 	(
 		(makedir "DEVS:Networks")
 		(makedir "DEVS:Firmware")
@@ -118,6 +122,8 @@
 					(source "DEVS:Firmware")
 					(dest "DEVS:Firmware.old")
 					(all)
+					; (empty if there was none before)
+					(optional "nofail")
 					(nogauge))
 			))
 		(copyfiles
@@ -135,6 +141,8 @@
 			(all)
 			(nogauge))
 	))
+(if (and #emu68 (not #keepdriver) (not #driverlater))
+	(P_WIFIDRIVER))
 
 (complete 20)
 
@@ -358,12 +366,27 @@
 						(default "")))
 				(if (<> #ssid "")
 					(
+						; WPA wants 8 to 63 characters; a '"' would end
+						; the quoted value in Wireless.prefs
 						(set #psk
 							(askstring
 								(prompt "Wi-Fi passphrase (leave empty for "
 									"an open network)")
 								(help "8 to 63 characters for WPA/WPA2.")
 								(default "")))
+						(while (and (<> #psk "")
+								(or (< (strlen #psk) 8) (> (strlen #psk) 63)
+									(patmatch "#?\"#?" #psk)))
+							(set #psk
+								(askstring
+									(prompt "The passphrase must have 8 to "
+										"63 characters, and no \". Wi-Fi "
+										"passphrase (leave empty for an open "
+										"network):")
+									(help "8 to 63 characters for WPA/WPA2. "
+										"It can also be set later in the "
+										"status icon's Wi-Fi window.")
+									(default ""))))
 						(makedir "ENVARC:Sys")
 						(if (= #psk "")
 							(textfile
@@ -528,6 +551,9 @@
 						"and SYS:WBStartup yourself before rebooting: "
 						"AmiBSDNet does not start while another TCP/IP "
 						"stack is running."))
+				; now the Wi-Fi driver too (the trial puts the old
+				; one back if AmiBSDNet does not get connected)
+				(if #emu68 (P_WIFIDRIVER))
 				(textfile (dest "ENVARC:AmiBSDNet/Trial") (append "1"))
 				(textfile (dest "ENV:AmiBSDNet/Trial") (append "1"))
 				(set #trial 1)
@@ -553,7 +579,15 @@
 		"are kept in SYS:Storage/AmiBSDNet-Logs.\n\n"
 		"\"NetCtrl\" shows the network status."))
 
-(if (or #otherrunning (and #emu68 (<> #wlan "")))
+(if (and (= #othersdo 1) (<> #others ""))
+	(exit
+		"AmiBSDNet is installed.\n\n"
+		#others " was kept: AmiBSDNet does not start while it is "
+		"running. To switch later, run this installer again (or take "
+		#others " out of the boot yourself).\n\"NetCtrl\" shows the "
+		"network status."))
+
+(if (or #otherrunning (and #emu68 (<> #wlan "") (not #keepdriver)))
 	(exit
 		"AmiBSDNet is installed.\n\n"
 		"Reboot to start the network"

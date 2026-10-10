@@ -64,6 +64,7 @@ int	rumpuser_component_errtrans(int);
 /* sleep the calling host thread (must not be scheduled in the kernel) */
 void	amiga_host_sleep_ms(unsigned long);
 void	amiga_host_thread_join(void *);	/* when not on a rump CPU */
+int	amiga_host_thread_done(void *);
 
 /* debug: report CPU exceptions of the calling task on the rump console */
 void	crash_install(void);

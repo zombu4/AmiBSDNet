@@ -44,7 +44,7 @@ machine running until the status icon shows an address.
 happy with AmiBSDNet, "NetCtrl REMOVEOTHERS" deletes the other stack's
 startup entries for good.
 
-The startup files are saved as S:<name>.amibsdnet-backup before the
+The startup files are saved as S:<name>.amibsdnet-bak before the
 first change. Afterwards the installer checks again and tells you if
 anything of the other stack would still be started at boot. AmiBSDNet
 itself does not start while another stack is running (and never stops

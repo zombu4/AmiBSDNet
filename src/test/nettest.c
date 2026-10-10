@@ -29,7 +29,7 @@ int rump___sysimpl_close(int);
 
 int rump_amibsdnet_ifcreate(const char *, const char *);
 int rump_amibsdnet_ifaddr4(const char *, uint32_t, uint32_t);
-int rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t);
+int rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t, uint32_t);
 
 struct nb_sockaddr_in {
 	uint8_t sin_len;
@@ -196,7 +196,7 @@ test_proc(void)
 		result = fail("address 10.0.2.15/24");
 		goto out;
 	}
-	if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, IP4(10, 0, 2, 2)) != 0) {
+	if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, IP4(10, 0, 2, 2), 0) != 0) {
 		result = fail("default route via 10.0.2.2");
 		goto out;
 	}

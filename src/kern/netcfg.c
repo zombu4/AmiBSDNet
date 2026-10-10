@@ -37,7 +37,7 @@ int	rump_amibsdnet_ifdestroy(const char *);
 int	rump_amibsdnet_ifaddr4(const char *, uint32_t, uint32_t);
 int	rump_amibsdnet_ifflags(const char *, int, int);
 int	rump_amibsdnet_ifdeladdr4(const char *, uint32_t);
-int	rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t);
+int	rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t, uint32_t);
 
 /* close the helper socket without losing the error of a failed call
    (every system call stub sets errno, also on success) */
@@ -179,26 +179,31 @@ rump_amibsdnet_ifflags(const char *ifname, int set, int clear)
 
 /*
  * Add (RTM_ADD) or delete (RTM_DELETE) an IPv4 route through a gateway.
- * dst 0 / mask 0 is the default route.
+ * dst 0 / mask 0 is the default route.  ifa, if not 0, is the address of
+ * the interface to use (as "route add -ifa"): with Ethernet and Wi-Fi on
+ * the same network the gateway alone would not say which one.
  */
 int
-rump_amibsdnet_route4(int cmd, uint32_t dst, uint32_t mask, uint32_t gw)
+rump_amibsdnet_route4(int cmd, uint32_t dst, uint32_t mask, uint32_t gw,
+    uint32_t ifa)
 {
 	struct {
 		struct rt_msghdr rtm;
-		struct sockaddr_in addr[3];	/* dst, gateway, netmask */
+		struct sockaddr_in addr[4];	/* dst, gateway, netmask, ifa */
 	} m;
-	int s, i;
+	int s, i, naddr = ifa ? 4 : 3;
+	size_t len = sizeof(m.rtm) + naddr * sizeof(m.addr[0]);
 	ssize_t n;
 
 	memset(&m, 0, sizeof(m));
-	m.rtm.rtm_msglen = sizeof(m);
+	m.rtm.rtm_msglen = len;
 	m.rtm.rtm_version = RTM_VERSION;
 	m.rtm.rtm_type = cmd;
 	m.rtm.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
-	m.rtm.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
+	m.rtm.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK |
+	    (ifa ? RTA_IFA : 0);
 	m.rtm.rtm_seq = 1;
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < naddr; i++) {
 		m.addr[i].sin_len = sizeof(m.addr[i]);
 		m.addr[i].sin_family = AF_INET;
 	}
@@ -207,9 +212,10 @@ rump_amibsdnet_route4(int cmd, uint32_t dst, uint32_t mask, uint32_t gw)
 	m.addr[0].sin_addr.s_addr = dst;
 	m.addr[1].sin_addr.s_addr = gw;
 	m.addr[2].sin_addr.s_addr = mask;
+	m.addr[3].sin_addr.s_addr = ifa;
 
 	if ((s = rump___sysimpl_socket30(PF_ROUTE, SOCK_RAW, 0)) < 0)
 		return -1;
-	n = rump___sysimpl_write(s, &m, sizeof(m));
-	return done(s, n == (ssize_t)sizeof(m) ? 0 : -1);
+	n = rump___sysimpl_write(s, &m, len);
+	return done(s, n == (ssize_t)len ? 0 : -1);
 }

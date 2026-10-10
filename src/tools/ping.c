@@ -80,7 +80,13 @@ static ULONG
 ticks_to_tenth_ms(ULONG d, ULONG freq)
 {
 
-	return (d / freq) * 10000 + (d % freq) / (freq / 10000 ? freq / 10000 : 1);
+	ULONG r = d % freq, ms, rem;
+
+	/* exact, without 64-bit arithmetic: r * 1000 fits (freq < 4 MHz),
+	   and so does the remainder * 10 */
+	ms = r * 1000 / freq;
+	rem = r * 1000 % freq;
+	return (d / freq) * 10000 + ms * 10 + rem * 10 / freq;
 }
 
 /* tick difference -> microseconds (for WaitSelect timeouts) */
@@ -161,8 +167,12 @@ run(const char *host, ULONG count)
 			}
 			AMI_FD_ZERO(&rfds);
 			AMI_FD_SET(s, &rfds);
-			tv.tv_secs = 0;
-			tv.tv_micro = ticks_to_us(deadline - t, freq);
+			{
+				ULONG us = ticks_to_us(deadline - t, freq);
+
+				tv.tv_secs = us / 1000000;
+				tv.tv_micro = us % 1000000;
+			}
 			n = WaitSelect(s + 1, &rfds, NULL, NULL, &tv, NULL);
 			if (n < 0)
 				goto done;	/* Ctrl-C */

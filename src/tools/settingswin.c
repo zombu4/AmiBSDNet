@@ -520,6 +520,15 @@ ghost_paulanet(void)
 	set_attr(GID_CRC, GA_Disabled, !cur.paulanet || !cur.verify);
 }
 
+/* a keyboard shortcut for a text field: into it (if it is not greyed) */
+static void
+key_field(int id)
+{
+
+	if (!(gad[id]->Flags & GFLG_DISABLED))
+		ActivateGadget(gad[id], win, NULL);
+}
+
 static int
 checked(int id)
 {
@@ -807,8 +816,10 @@ apply(int save)
 	}
 	status("Applying...");
 	/* the stack starts WirelessManager again with the new network */
-	if (wifi_changed && wm_running())
-		wm_stop();
+	if (wifi_changed && wm_running() && wm_stop() != 0) {
+		status("Saved, but WirelessManager does not stop; try again");
+		return -1;
+	}
 	if (stack_cmd(NETCTRL_RECONFIG) != 0)
 		return 1;		/* not running: the caller starts it */
 	if (status_msg()->result != 0) {
@@ -941,7 +952,7 @@ settings_window(void)
 	/* Wi-Fi network */
 	ng.ng_TopEdge += row + gap;
 	ng.ng_Width = w - lx - 10 - 90;
-	STR(GID_SSID, "Wi-Fi net_work", 32);
+	STR(GID_SSID, "Wi-Fi ne_twork", 32);
 	ng.ng_LeftEdge = w - 10 - 84;
 	ng.ng_Width = 84;
 	g = mk(BUTTON_KIND, g, &ng, GID_SCAN, "S_can...", PLACETEXT_IN,
@@ -1036,8 +1047,33 @@ settings_window(void)
 				GT_EndRefresh(win, TRUE);
 				break;
 			case IDCMP_VANILLAKEY:
-				if (code == 27)
+				/* the underlined letters */
+				if (code == 27) {
 					quit = 1;
+					break;
+				}
+				switch (lc(code)) {
+				case 'e': key_field(GID_ETH); break;
+				case 'w': key_field(GID_WIFI); break;
+				case 'i': key_field(GID_ADDR); break;
+				case 'g': key_field(GID_GW); break;
+				case 'n': key_field(GID_DNS); break;
+				case 'h': key_field(GID_HOST); break;
+				case 't': key_field(GID_SSID); break;
+				case 'p': key_field(GID_PSK); break;
+				case 'd': id = GID_DETECT; break;
+				case 'c': id = GID_SCAN; break;
+				case 's': id = GID_SAVE; break;
+				case 'u': id = GID_USE; break;
+				case 'l': id = GID_CANCEL; break;
+				case 'a':
+					/* the cycle gadget: to the other mode */
+					collect();
+					code = !cur.fixed;
+					set_attr(GID_MODE, GTCY_Active, code);
+					id = GID_MODE;
+					break;
+				}
 				break;
 			case IDCMP_GADGETUP:
 				id = gd->GadgetID;

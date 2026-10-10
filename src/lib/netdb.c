@@ -310,9 +310,10 @@ sb_inet_ntop(struct SocketBase *sb, LONG af, APTR src, STRPTR dst, LONG size)
 			best = -1;
 		for (i = 0; i < 8; i++) {
 			if (i == best) {
+				/* one ':' here, the next group adds its own
+				   (and one more below if the run is at the end):
+				   "::1", "1::2", "1::", "::" */
 				*p++ = ':';
-				if (i == 0)
-					*p++ = ':';
 				i += bestlen - 1;
 				continue;
 			}
@@ -329,7 +330,7 @@ sb_inet_ntop(struct SocketBase *sb, LONG af, APTR src, STRPTR dst, LONG size)
 				}
 			}
 		}
-		if (best >= 0 && best + bestlen == 8 && p[-1] != ':')
+		if (best >= 0 && best + bestlen == 8)
 			*p++ = ':';
 		*p = '\0';
 	} else {

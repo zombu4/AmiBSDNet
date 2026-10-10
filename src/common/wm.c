@@ -137,7 +137,8 @@ wm_stop(void)
 	if ((t = find_wm()) != NULL)
 		Signal(t, SIGBREAKF_CTRL_C);
 	Permit();
-	for (i = 0; i < 40 && wm_running(); i++)
+	/* (leaving the network can take a while) */
+	for (i = 0; i < 75 && wm_running(); i++)
 		Delay(10);
 	return wm_running() ? -1 : 0;
 }
@@ -157,6 +158,9 @@ wm_start(const char *device, unsigned long unit)
 
 	if (!wm_installed())
 		return -1;
+	/* never two: both would talk to the same driver */
+	if (wm_running())
+		return -2;
 	/* a driver not yet in memory is opened from DEVS:Networks */
 	amibsdnet_device_arg(SysBase, device, devarg, sizeof(devarg));
 	*p++ = '"';

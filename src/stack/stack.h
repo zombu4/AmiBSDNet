@@ -26,6 +26,7 @@ struct iface {
 	volatile int release;		/* went offline: give up the lease */
 	int optional;			/* plug-in adapter: hide if absent */
 	int hidden;			/* optional and its driver did not open */
+	int addr_set;			/* the fixed address is in the kernel */
 	int unverified;			/* driver file failed the check */
 	int link_logged;
 };
@@ -73,7 +74,7 @@ int	rump_amibsdnet_ifdestroy(const char *);
 int	rump_amibsdnet_ifaddr4(const char *, ULONG, ULONG);
 int	rump_amibsdnet_ifflags(const char *, int, int);
 int	rump_amibsdnet_ifdeladdr4(const char *, ULONG);
-int	rump_amibsdnet_route4(int, ULONG, ULONG, ULONG);
+int	rump_amibsdnet_route4(int, ULONG, ULONG, ULONG, ULONG);
 #define	NB_RTM_ADD	1
 #define	NB_RTM_DELETE	2
 #define	NB_IFF_UP	0x0001

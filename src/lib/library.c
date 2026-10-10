@@ -258,6 +258,10 @@ sb_wait_fd(struct SocketBase *sb, LONG fd, int what, LONG timeout_ms)
 	LONG n;
 
 	for (;;) {
+		/* an abort that came before the call started: its wake
+		   datagram was drained at the start of the call */
+		if (sb->abortseq == sb->callseq)
+			return EINTR;
 		pfd[0].fd = fd;
 		pfd[0].events = (what & WAIT_READ ? NB_POLLIN : 0) |
 		    (what & WAIT_WRITE ? NB_POLLOUT : 0);
@@ -341,12 +345,21 @@ sb_rpc(struct SocketBase *sb, sbfn_t fn, void *args, int flags,
 	}
 	if (tmp)
 		DeleteMsgPort(tmp);
-	if (extrasigs)
+	if (extrasigs) {
 		*extrasigs = got & *extrasigs;
+		got &= ~*extrasigs;	/* reported to the caller */
+	}
 	if (call.err) {
 		sb_set_errno(sb, call.err);
 		/* a break signal that interrupted us stays consumed (AmiTCP) */
+		if (call.err == EINTR)
+			got &= ~sb->breakmask;
 	}
+	/* Wait() took the others although the call did not report them
+	   (it completed anyway): give them back, so that for example a
+	   later CheckSignal(SIGBREAKF_CTRL_C) still sees Ctrl-C */
+	if (got)
+		SetSignal(got, got);
 	return call.result;
 }
 
@@ -449,6 +462,9 @@ sb_lib_open(struct SocketBase *mbase, ULONG version)
 		return NULL;
 	/* the copy gets its own jump table and Library header */
 	CopyMem((UBYTE *)mbase - neg, mem, neg + sizeof(struct Library));
+	/* the table is code (JMP instructions): with copyback caches, or
+	   Emu68's JIT, it must not run from stale cache contents */
+	CacheClearE(mem, neg, CACRF_ClearI | CACRF_ClearD);
 	sb = (struct SocketBase *)(mem + neg);
 	sb->lib.lib_OpenCnt = 1;
 	sb->master = mbase;

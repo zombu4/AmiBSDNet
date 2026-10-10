@@ -11,7 +11,7 @@
  * moves the WBStartup items and LIBS:bsdsocket.library to
  * SYS:Storage/AmiBSDNet-Disabled; restoring undoes both.  Removing
  * deletes the lines and those files instead.  The startup files are
- * copied to <name>.amibsdnet-backup before the first change.  Program
+ * copied to <name>.amibsdnet-bak before the first change.  Program
  * drawers of the other stacks are left alone.
  */
 #include <exec/types.h>
@@ -177,23 +177,51 @@ read_file(const char *name, LONG *lenp)
 }
 
 /* a command line (not a comment, not ours) starting a detected stack? */
+/* like has(), but w must start a word: "startnet" is not in "RestartNet" */
+static int
+has_word(const char *s, int n, const char *w)
+{
+	int i, j, c;
+
+	for (i = 0; i < n; i++) {
+		if (i > 0) {
+			c = lc((UBYTE)s[i - 1]);
+			if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+				continue;
+		}
+		for (j = 0; w[j] && i + j < n &&
+		    lc((UBYTE)s[i + j]) == lc((UBYTE)w[j]); j++)
+			;
+		if (!w[j])
+			return 1;
+	}
+	return 0;
+}
+
 static struct stack *
 line_stack(const char *l, int n, int only_found)
 {
 	unsigned i, j;
-	int k = 0;
+	int k = 0, e, quote = 0;
 
 	while (k < n && (l[k] == ' ' || l[k] == '\t'))
 		k++;
 	if (k == n || l[k] == ';')
 		return NULL;
-	if (has(l, n, "AmiBSDNet"))
+	/* only the command, not a comment after it ("EndIf ; Roadshow") */
+	for (e = k; e < n; e++) {
+		if (l[e] == '"')
+			quote = !quote;
+		else if (l[e] == ';' && !quote)
+			break;
+	}
+	if (has(l + k, e - k, "AmiBSDNet"))
 		return NULL;
 	for (i = 0; i < NSTACKS; i++) {
 		if (only_found && !stacks[i].found)
 			continue;
 		for (j = 0; stacks[i].words[j]; j++)
-			if (has(l + k, n - k, stacks[i].words[j]))
+			if (has_word(l + k, e - k, stacks[i].words[j]))
 				return &stacks[i];
 	}
 	return NULL;
@@ -405,6 +433,7 @@ sw_write(struct safewrite *sw, const void *p, LONG n)
 static int
 sw_close(struct safewrite *sw)
 {
+	char old[110];
 
 	if (!Close(sw->fh))
 		sw->ok = 0;
@@ -412,15 +441,26 @@ sw_close(struct safewrite *sw)
 		DeleteFile((CONST_STRPTR)sw->tmp);
 		return -1;
 	}
-	/* the original may be in use (a script that is running) */
-	if (!DeleteFile((CONST_STRPTR)sw->name)) {
+	/*
+	 * Never a moment without the file: the original is renamed out of
+	 * the way first, and put back if the new one cannot take its place.
+	 * (A script that is running keeps reading the old text.)
+	 */
+	cat(old, sw->name, ".amibsdnet-old", sizeof(old));
+	DeleteFile((CONST_STRPTR)old);
+	if (!Rename((CONST_STRPTR)sw->name, (CONST_STRPTR)old)) {
 		DeleteFile((CONST_STRPTR)sw->tmp);
 		return -1;
 	}
 	if (!Rename((CONST_STRPTR)sw->tmp, (CONST_STRPTR)sw->name) &&
-	    !copy_file(sw->tmp, sw->name))
-		return -1;		/* the text is still in sw->tmp */
+	    !copy_file(sw->tmp, sw->name)) {
+		DeleteFile((CONST_STRPTR)sw->name);
+		Rename((CONST_STRPTR)old, (CONST_STRPTR)sw->name);
+		DeleteFile((CONST_STRPTR)sw->tmp);
+		return -1;
+	}
 	DeleteFile((CONST_STRPTR)sw->tmp);
+	DeleteFile((CONST_STRPTR)old);	/* fails while a script reads it */
 	return 0;
 }
 
@@ -504,7 +544,7 @@ edit_startup(const char *name, int mode)
 	}
 	/* the first backup is the original: never overwritten, and no change
 	   without it */
-	cat(backup, name, ".amibsdnet-backup", sizeof(backup));
+	cat(backup, name, ".amibsdnet-bak", sizeof(backup));
 	if ((!exists(backup) && !copy_file(name, backup)) ||
 	    sw_open(&sw, name) != 0) {
 		FreeVec(mark);
@@ -696,7 +736,7 @@ int
 otherstacks_fallback(char *msg, int size)
 {
 	APTR old;
-	int rv, tries;
+	int rv, tries, restored;
 	BPTR l;
 
 	/*
@@ -705,14 +745,19 @@ otherstacks_fallback(char *msg, int size)
 	 */
 	for (tries = 0; tries < 24; tries++) {
 		rv = otherstacks_apply(OTHERS_RESTORE);
-		old = quiet();
-		if (own_startup_off() != 0)
-			rv = -1;
-		loud(old);
+		/* AmiBSDNet leaves the boot only once the other stack is
+		   back in it: never neither of them */
+		if (rv == 0) {
+			old = quiet();
+			if (own_startup_off() != 0)
+				rv = -1;
+			loud(old);
+		}
 		if (rv == 0)
 			break;
 		Delay(250);
 	}
+	restored = rv == 0;
 	old = quiet();
 	/* the status icon is not wanted without the stack */
 	park("SYS:WBStartup/AmiBSDNetStatus", "AmiBSDNet", "AmiBSDNetStatus",
@@ -737,14 +782,21 @@ otherstacks_fallback(char *msg, int size)
 	copy_file("T:AmiBSDNet.log", "SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log");
 	copy_file("T:WirelessManager.log",
 	    "SYS:Storage/AmiBSDNet-Logs/WirelessManager.log");
-	DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
-	    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+	/* not restored: the trial mark stays, so the next boot tries again
+	   (with AmiBSDNet still in the boot) */
+	if (restored)
+		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 	loud(old);
 	cat(msg, rv == 0 ? "The previous TCP/IP stack and Wi-Fi driver are "
 	    "back, and AmiBSDNet\nis no longer started at boot. Reboot to use "
 	    "them.\n\nAmiBSDNet's logs were saved in "
-	    "SYS:Storage/AmiBSDNet-Logs." :
+	    "SYS:Storage/AmiBSDNet-Logs." : restored ?
 	    "Not everything could be put back; see \"NetCtrl CHECK\".\n"
+	    "AmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs." :
+	    "The previous TCP/IP stack could not be put back into the\n"
+	    "startup files (are they protected?). AmiBSDNet stays in the\n"
+	    "boot and tries again at the next boot; see \"NetCtrl CHECK\".\n"
 	    "AmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs.", "",
 	    size);
 	return rv;

@@ -41,27 +41,31 @@ volatile ULONG config_generation;
  */
 static struct SignalSemaphore routesem;
 static int routesem_ready;
-static ULONG route_gw;
+static ULONG route_gw, route_ifa;
 
 void
 stack_update_route(void)
 {
-	ULONG gw = 0;
+	ULONG gw = 0, ifa = 0;
 	int i;
 
 	ObtainSemaphore(&routesem);
 	for (i = 0; i < nifaces; i++)
 		if (ifaces[i].up && ifaces[i].gateway) {
 			gw = ifaces[i].gateway;
+			ifa = ifaces[i].addr;
 			break;
 		}
-	if (gw != route_gw) {
+	/* also when only the interface changes: Ethernet and Wi-Fi on the
+	   same network have the same router */
+	if (gw != route_gw || ifa != route_ifa) {
 		if (route_gw)
-			rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, route_gw);
-		route_gw = 0;
+			rump_amibsdnet_route4(NB_RTM_DELETE, 0, 0, route_gw, 0);
+		route_gw = route_ifa = 0;
 		if (gw) {
-			if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, gw) == 0) {
+			if (rump_amibsdnet_route4(NB_RTM_ADD, 0, 0, gw, ifa) == 0) {
 				route_gw = gw;
+				route_ifa = ifa;
 				P("default route via %lu.%lu.%lu.%lu\n", gw >> 24,
 				    (gw >> 16) & 255, (gw >> 8) & 255, gw & 255);
 			} else
@@ -206,7 +210,7 @@ link_hook(void *ctx, int up)
 	ifc->link = up;
 	ifc->dhcp_event = 1;
 	if (!ifc->dhcp)
-		ifc->up = up && ifc->admin && ifc->addr;
+		ifc->up = up && ifc->admin && ifc->addr_set;
 	if (stacktask)
 		Signal(stacktask, SIGBREAKF_CTRL_E);
 }
@@ -391,6 +395,7 @@ iface_bringup(struct iface *ifc)
 			    amiga_rump_errno());
 		else {
 			ifc->gateway = cfg_gateway;
+			ifc->addr_set = 1;
 			ifc->up = ifc->link;
 			P("%s: %lu.%lu.%lu.%lu\n", ifc->name, ifc->addr >> 24,
 			    (ifc->addr >> 16) & 255, (ifc->addr >> 8) & 255,
@@ -548,7 +553,7 @@ stack_online(void)
 		ifc->admin = 1;
 		ifc->dhcp_event = 1;	/* the DHCP client takes it from here */
 		rump_amibsdnet_ifflags(ifc->name, NB_IFF_UP, 0);
-		if (!ifc->dhcp && ifc->addr)
+		if (!ifc->dhcp && ifc->addr_set)
 			ifc->up = ifc->link;
 	}
 	stack_update_route();
