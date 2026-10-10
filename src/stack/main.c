@@ -44,7 +44,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.6 (10.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.7 (10.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -84,7 +84,7 @@ stack_main(void)
 	crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.6 starting\n");
+	P("AmiBSDNet 0.7 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
@@ -177,6 +177,36 @@ _start(void)
 				DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
 				    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 			me->pr_WindowPtr = oldwin;
+		}
+		/* at boot nobody sees the Shell output: say it in the log,
+		   with the name of the library that is there */
+		{
+			struct Library *lib;
+			char id[80];
+			BPTR lf;
+			int k = 0;
+
+			/* (copied under Forbid: the library may go meanwhile) */
+			Forbid();
+			if ((lib = (struct Library *)FindName(&SysBase->LibList,
+			    "bsdsocket.library")) != NULL && lib->lib_IdString)
+				for (; k < 79 && ((char *)lib->lib_IdString)[k] &&
+				    ((char *)lib->lib_IdString)[k] != '\r' &&
+				    ((char *)lib->lib_IdString)[k] != '\n'; k++)
+					id[k] = ((char *)lib->lib_IdString)[k];
+			Permit();
+			id[k] = '\0';
+			if (FindPort((CONST_STRPTR)"AmiBSDNet") == NULL &&
+			    (lf = Open((CONST_STRPTR)"T:AmiBSDNet.log",
+			    MODE_NEWFILE)) != 0) {
+				FPuts(lf, (CONST_STRPTR)"AmiBSDNet: not started: "
+				    "another TCP/IP stack's bsdsocket.library is "
+				    "already in memory (");
+				FPuts(lf, (CONST_STRPTR)(id[0] ? id : "no name"));
+				FPuts(lf, (CONST_STRPTR)").\nRemove that stack "
+				    "(see \"NetCtrl CHECK\") and reboot.\n");
+				Close(lf);
+			}
 		}
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: a TCP/IP stack is "

@@ -28,6 +28,7 @@
 #include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/rdargs.h>
+#include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <intuition/intuition.h>
@@ -40,12 +41,13 @@
 #include <amibsdnet/drvcheck.h>
 
 #include "otherstacks.h"
+#include "roadshow.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.6 (10.10.2026)";
+    "\0$VER: NetCtrl 0.7 (10.10.2026)";
 
 static int
 streq(const char *a, const char *b)
@@ -236,6 +238,122 @@ keepconf(const char *out, int noauto)
 #define	CMD_FALLBACK	0xffff0006UL
 #define	CMD_CHECKDRV	0xffff0007UL
 #define	CMD_KEEPCONF	0xffff0008UL
+#define	CMD_FINDRS	0xffff0009UL
+#define	CMD_REMOVERS	0xffff000aUL
+
+/*
+ * FINDROADSHOW lists everything of Roadshow (roadshow.c), REMOVEROADSHOW
+ * deletes it - its startup lines, files, drawers, libraries and the lines
+ * mentioning it in configuration files; a volume or drawer called Work
+ * (the Roadshow installer) is left alone.  Afterwards it looks again and
+ * says what is left.  Sets AmiBSDNet/RoadshowCount (what is left, or was
+ * found) and AmiBSDNet/RoadshowList (the first of them).
+ */
+static int report_atboot(void);
+static int roadshow(int remove);
+
+/*
+ * The walk through every drawer goes deep: it runs in a process of its
+ * own with a big stack (NetCtrl may have been started with 4 KB).
+ */
+static int rs_remove, rs_rc;
+static struct Task *rs_parent;
+static volatile int rs_done;
+
+static void
+rs_entry(void)
+{
+
+	rs_rc = roadshow(rs_remove);
+	Forbid();		/* lasts until this process is gone */
+	rs_done = 1;
+	Signal(rs_parent, SIGBREAKF_CTRL_F);
+}
+
+static int
+roadshow_bigstack(int remove)
+{
+
+	rs_remove = remove;
+	rs_done = 0;
+	rs_parent = SysBase->ThisTask;
+	SetSignal(0, SIGBREAKF_CTRL_F);
+	if (CreateNewProcTags(NP_Entry, (ULONG)rs_entry,
+	    NP_Name, (ULONG)"NetCtrl Roadshow", NP_StackSize, 65536,
+	    NP_Input, Input(), NP_CloseInput, FALSE,
+	    NP_Output, Output(), NP_CloseOutput, FALSE, TAG_DONE) == NULL)
+		return roadshow(remove);	/* (no memory: try here) */
+	while (!rs_done)
+		Wait(SIGBREAKF_CTRL_F);
+	return rs_rc;
+}
+
+static int
+roadshow(int remove)
+{
+	char *list, names[128], num[12], *p;
+	int n, failed = 0, left, i;
+
+	if ((list = AllocVec(4096, MEMF_ANY | MEMF_CLEAR)) == NULL)
+		return RETURN_FAIL;
+	if (remove) {
+		/* never neither: only while AmiBSDNet is started at boot */
+		if (!otherstacks_self_atboot()) {
+			PutStr((CONST_STRPTR)"NetCtrl: AmiBSDNet is not started at "
+			    "boot (S:User-Startup); Roadshow not removed\n");
+			FreeVec(list);
+			return RETURN_WARN;
+		}
+		/* the startup lines (also in scripts run with Execute), its
+		   WBStartup items, LIBS:bsdsocket.library */
+		otherstacks_only = "Roadshow";	/* (not Miami etc.) */
+		otherstacks_apply(OTHERS_REMOVE);
+		otherstacks_only = NULL;
+		n = roadshow_find(1, list, 4096, &failed);
+		PutStr((CONST_STRPTR)"removed:\n");
+		PutStr((CONST_STRPTR)list);
+		/* a switch to AmiBSDNet without a way back: no trial */
+		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
+		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
+	}
+	/* (also the check after removing) */
+	n = roadshow_find(0, list, 4096, &failed);
+	/* (only Roadshow counts here: another stack is not left over; a
+	   bsdsocket.library on disk is found by roadshow_find) */
+	otherstacks_check(names, sizeof(names));
+	otherstacks_only = "Roadshow";
+	left = n + report_atboot();
+	otherstacks_only = NULL;
+	if (n > 0) {
+		PutStr((CONST_STRPTR)(remove ? "still there:\n" :
+		    "Roadshow:\n"));
+		PutStr((CONST_STRPTR)list);
+	}
+	p = num;
+	{
+		char t[12];
+		int k = 0;
+		ULONG v = left;
+
+		do {
+			t[k++] = '0' + v % 10;
+			v /= 10;
+		} while (v);
+		while (k)
+			*p++ = t[--k];
+		*p = '\0';
+	}
+	setvar("AmiBSDNet/RoadshowCount", num);
+	for (i = 0; list[i] && i < 900; i++)
+		;
+	list[i] = '\0';
+	setvar("AmiBSDNet/RoadshowList", list[0] ? list : NULL);
+	if (left == 0)
+		PutStr((CONST_STRPTR)(remove ? "Roadshow is completely gone\n" :
+		    "nothing of Roadshow found\n"));
+	FreeVec(list);
+	return left ? RETURN_WARN : RETURN_OK;
+}
 
 /*
  * FALLBACK: back to the previous TCP/IP stack (run by AmiBSDNet when a
@@ -441,6 +559,8 @@ _start(void)
 		else if (streq(c, "FALLBACK")) cmd = CMD_FALLBACK;
 		else if (streq(c, "CHECKDRIVER")) cmd = CMD_CHECKDRV;
 		else if (streq(c, "KEEPCONF")) cmd = CMD_KEEPCONF;
+		else if (streq(c, "FINDROADSHOW")) cmd = CMD_FINDRS;
+		else if (streq(c, "REMOVEROADSHOW")) cmd = CMD_REMOVERS;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
 			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
@@ -482,6 +602,10 @@ _start(void)
 		goto out;
 	case CMD_CHECKDRV:
 		rc = checkdriver(file[0] ? file : NULL);
+		goto out;
+	case CMD_FINDRS:
+	case CMD_REMOVERS:
+		rc = roadshow_bigstack(cmd == CMD_REMOVERS);
 		goto out;
 	case CMD_KEEPCONF:
 		if (!file[0]) {
