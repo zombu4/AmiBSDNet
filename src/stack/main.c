@@ -132,6 +132,7 @@ _start(void)
 	struct RDArgs *rda;
 	struct Process *me;
 	struct Message *wbmsg = NULL;
+	int t;
 	LONG argv[3] = { 0, 0, 0 };
 	BPTR out;
 
@@ -218,7 +219,14 @@ _start(void)
 	 * starting again.  From here on a process may run our code, so the
 	 * segments must stay loaded on every path below.
 	 */
-	if (trial_begin() < 0) {
+	/* the log's lock, before anything may log (trial.c's watchdog);
+	   the log file itself is opened by stack_main() */
+	amiga_rump_loginit(0);
+	t = trial_begin();
+	if (t > 0 && out)
+		PutStr((CONST_STRPTR)"AmiBSDNet: going back to the previous "
+		    "TCP/IP stack did not finish; starting AmiBSDNet\n");
+	if (t < 0) {
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: the switch to AmiBSDNet "
 			    "did not work; going back to the previous TCP/IP "

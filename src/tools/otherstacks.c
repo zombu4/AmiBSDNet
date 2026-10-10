@@ -777,7 +777,10 @@ otherstacks_fallback(char *msg, int size)
 		if (startup_rv == 0) {
 			back = 1;
 			old = quiet();
-			offok = own_startup_off() == 0;
+			/* (and really gone: a C:AmiBSDNet line outside its
+			   own block is not taken out) */
+			offok = own_startup_off() == 0 &&
+			    !otherstacks_self_atboot();
 			loud(old);
 			if (offok)
 				break;
@@ -809,7 +812,8 @@ otherstacks_fallback(char *msg, int size)
 		loud(old);
 		cat(msg, !back && startup_rv == 0 ?
 		    "There is no other TCP/IP stack to go back to, so nothing\n"
-		    "was changed: AmiBSDNet stays (it starts at every boot)." :
+		    "was changed: AmiBSDNet stays. It starts at every boot\n"
+		    "(reboot now if it is not running)." :
 		    !back ?
 		    "The previous TCP/IP stack could not be put back into the\n"
 		    "startup files (are they write-protected?). AmiBSDNet stays,\n"
