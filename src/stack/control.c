@@ -151,7 +151,7 @@ status_report(struct NetCtrlMsg *m)
 	ULONG ns[4], rx, tx, rxd, txd;
 	int i, j, n;
 
-	tb_s(&b, "AmiBSDNet 0.6 - NetBSD 11 TCP/IP\n\n");
+	tb_s(&b, "AmiBSDNet 0.7 - NetBSD 11 TCP/IP\n\n");
 	for (i = 0, n = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 		struct virtif_user *v;

@@ -34,8 +34,8 @@ extern struct DosLibrary *DOSBase;
 
 struct stack {
 	const char *name;
-	const char *files[6];		/* any of these existing */
-	const char *words[6];		/* startup lines naming these */
+	const char *files[10];		/* any of these existing */
+	const char *words[14];		/* startup lines naming these */
 	const char *wbstartup[3];	/* WBStartup items starting so */
 	int found;			/* installed */
 	int atboot;			/* still started at boot */
@@ -45,9 +45,12 @@ struct stack {
 static struct stack stacks[] = {
 	{ "Roadshow",
 	  { "C:AddNetInterface", "C:RoadshowControl", "S:Network-Startup",
-	    "DEVS:NetInterfaces", NULL },
+	    "DEVS:NetInterfaces", "C:ConfigureNetInterface", "C:NetShutdown",
+	    "C:ShowNetStatus", NULL },
 	  { "Network-Startup", "AddNetInterface", "Roadshow", "NetLogViewer",
-	    NULL },
+	    "ConfigureNetInterface", "AddNetRoute", "DeleteNetRoute",
+	    "NetShutdown", "ShowNetStatus", "GetNetStatus",
+	    "RemoveNetInterface", "SampleNetSpeed", "NetInterfaces", NULL },
 	  { "NetLogViewer", "Roadshow", NULL } },
 	{ "Miami",
 	  { "Miami:", NULL },
@@ -64,11 +67,23 @@ static struct stack stacks[] = {
 };
 #define	NSTACKS	(sizeof(stacks) / sizeof(stacks[0]))
 
-static const char *startup_files[] = {
-	"S:Startup-Sequence", "S:User-Startup", NULL
-};
 
 static int disk_bsdsocket;
+
+/* if set, otherstacks_apply() handles only the stack of this name */
+const char *otherstacks_only;
+
+static int
+selected(const struct stack *s)
+{
+	const char *a = s->name, *b = otherstacks_only;
+
+	if (b == NULL)
+		return 1;
+	while (*a && *a == *b)
+		a++, b++;
+	return *a == *b;
+}
 static int startup_rv;		/* otherstacks_apply(): the script edits */
 
 /* if set, told about every match (NetCtrl CHECK lists them) */
@@ -178,6 +193,89 @@ read_file(const char *name, LONG *lenp)
 	return buf;
 }
 
+/*
+ * The startup scripts: S:Startup-Sequence, S:User-Startup and the
+ * scripts they run with Execute (S:Network-Startup and so on), also from
+ * lines an earlier switch disabled.
+ */
+#define	MAXSCRIPTS	12
+
+static char scripts[MAXSCRIPTS][128];
+static int nscripts;
+
+static void
+add_script(const char *p, int n)
+{
+	char name[128];
+	int i, k;
+
+	if (n <= 0 || n >= (int)sizeof(name) || nscripts >= MAXSCRIPTS)
+		return;
+	for (i = 0; i < n; i++)
+		name[i] = p[i];
+	name[n] = '\0';
+	for (k = 0; k < nscripts; k++) {
+		const char *a = scripts[k], *b = name;
+
+		while (*a && lc((UBYTE)*a) == lc((UBYTE)*b))
+			a++, b++;
+		if (*a == *b)
+			return;		/* listed already */
+	}
+	if (!exists(name))
+		return;
+	cat(scripts[nscripts++], name, "", sizeof(scripts[0]));
+}
+
+static void
+build_scripts(void)
+{
+	char *buf, *p, *e, *q;
+	LONG len;
+	int i, n;
+
+	nscripts = 0;
+	cat(scripts[nscripts++], "S:Startup-Sequence", "", sizeof(scripts[0]));
+	cat(scripts[nscripts++], "S:User-Startup", "", sizeof(scripts[0]));
+	for (i = 0; i < nscripts; i++) {
+		if ((buf = read_file(scripts[i], &len)) == NULL)
+			continue;
+		for (p = buf; p < buf + len; p = e + 1) {
+			for (e = p; e < buf + len && *e != '\n'; e++)
+				;
+			q = p;
+			while (q < e && (*q == ' ' || *q == '\t'))
+				q++;
+			if (e - q >= MARKLEN && starts_nocase(q, MARK))
+				q += MARKLEN;
+			if (e - q < 8 || !starts_nocase(q, "Execute") ||
+			    (q[7] != ' ' && q[7] != '\t'))
+				continue;
+			q += 8;
+			while (q < e && (*q == ' ' || *q == '\t'))
+				q++;
+			/* redirections ("Execute >NIL: S:x") are not the script */
+			while (q < e && (*q == '>' || *q == '<')) {
+				while (q < e && *q != ' ' && *q != '\t')
+					q++;
+				while (q < e && (*q == ' ' || *q == '\t'))
+					q++;
+			}
+			if (q < e && *q == '"') {
+				q++;
+				for (n = 0; q + n < e && q[n] != '"'; n++)
+					;
+			} else
+				for (n = 0; q + n < e && q[n] != ' ' &&
+				    q[n] != '\t' && q[n] != '\r' && q[n] != ';';
+				    n++)
+					;
+			add_script(q, n);
+		}
+		FreeVec(buf);
+	}
+}
+
 /* a command line (not a comment, not ours) starting a detected stack? */
 /* like has(), but w must start a word: "startnet" is not in "RestartNet" */
 static int
@@ -220,7 +318,7 @@ line_stack(const char *l, int n, int only_found)
 	if (has(l + k, e - k, "AmiBSDNet"))
 		return NULL;
 	for (i = 0; i < NSTACKS; i++) {
-		if (only_found && !stacks[i].found)
+		if ((only_found && !stacks[i].found) || !selected(&stacks[i]))
 			continue;
 		for (j = 0; stacks[i].words[j]; j++)
 			if (has_word(l + k, e - k, stacks[i].words[j]))
@@ -279,8 +377,9 @@ otherstacks_check(char *names, int size)
 				say("installed", stacks[i].files[j], -1);
 			}
 	}
-	for (i = 0; startup_files[i]; i++) {
-		if ((buf = read_file(startup_files[i], &len)) == NULL)
+	build_scripts();
+	for (i = 0; i < (unsigned)nscripts; i++) {
+		if ((buf = read_file(scripts[i], &len)) == NULL)
 			continue;
 		for (p = buf; p < buf + len; p = e + 1) {
 			struct stack *s;
@@ -289,7 +388,7 @@ otherstacks_check(char *names, int size)
 				;
 			if ((s = line_stack(p, e - p, 0)) != NULL) {
 				s->found = s->atboot = s->inscript = 1;
-				say(startup_files[i], p, e - p);
+				say(scripts[i], p, e - p);
 			}
 		}
 		FreeVec(buf);
@@ -327,12 +426,12 @@ otherstacks_atboot(char *names, int size)
 
 	names[0] = '\0';
 	for (i = 0; i < NSTACKS; i++)
-		if (stacks[i].atboot) {
+		if (stacks[i].atboot && selected(&stacks[i])) {
 			if (n++)
 				cat(names, names, ", ", size);
 			cat(names, names, stacks[i].name, size);
 		}
-	if (disk_bsdsocket) {
+	if (disk_bsdsocket && otherstacks_only == NULL) {
 		if (n++)
 			cat(names, names, ", ", size);
 		cat(names, names, "LIBS:bsdsocket.library", size);
@@ -486,7 +585,7 @@ keyword(const char *p, int n, const char *kw)
  * stray EndIf is left behind).  mark[] gets one entry per line.
  */
 static int
-mark_lines(const char *buf, LONG len, UBYTE *mark, int max)
+mark_lines(const char *buf, LONG len, UBYTE *mark, int max, int only_found)
 {
 	const char *p, *e;
 	int line = 0, n = 0, depth = 0;
@@ -501,7 +600,7 @@ mark_lines(const char *buf, LONG len, UBYTE *mark, int max)
 				depth++;
 			else if (keyword(p, e - p, "EndIf"))
 				depth--;
-		} else if (line_stack(p, e - p, 1) != NULL) {
+		} else if (line_stack(p, e - p, only_found) != NULL) {
 			mark[line] = 1;
 			if (keyword(p, e - p, "If"))
 				depth = 1;
@@ -538,18 +637,59 @@ edit_startup(const char *name, int mode)
 				changed++;
 		}
 	} else {
-		changed = mark_lines(buf, len, mark, MAXLINES);
-		/* removing: also the lines an earlier switch disabled */
-		if (mode == 1)
+		changed = mark_lines(buf, len, mark, MAXLINES, 1);
+		/*
+		 * Removing: also the lines an earlier switch disabled - with
+		 * a stack chosen (otherstacks_only), only that stack's: the
+		 * disabled lines are looked at without their mark, If blocks
+		 * included, the same way as active ones.
+		 */
+		if (mode == 1) {
+			char *plain = NULL;
+			UBYTE *pm = NULL;
+			LONG pl = 0;
+
+			if (otherstacks_only &&
+			    (plain = AllocVec(len + 1, MEMF_ANY)) != NULL &&
+			    (pm = AllocVec(MAXLINES, MEMF_ANY | MEMF_CLEAR)) != NULL) {
+				for (p = buf; p < buf + len; p = e + 1) {
+					for (e = p; e < buf + len && *e != '\n'; e++)
+						;
+					if (starts_nocase(p, MARK))
+						p += MARKLEN;
+					while (p < e)
+						plain[pl++] = *p++;
+					if (e < buf + len)
+						plain[pl++] = '\n';
+				}
+				/* (also when its files are gone already) */
+				mark_lines(plain, pl, pm, MAXLINES, 0);
+			} else if (otherstacks_only) {
+				/* no memory: nothing deleted, and said so */
+				if (pm)
+					FreeVec(pm);
+				if (plain)
+					FreeVec(plain);
+				FreeVec(mark);
+				FreeVec(buf);
+				return -1;
+			}
 			for (p = buf, line = 0; p < buf + len &&
 			    line < MAXLINES; p = e + 1, line++) {
 				for (e = p; e < buf + len && *e != '\n'; e++)
 					;
-				if (!mark[line] && starts_nocase(p, MARK)) {
+				if (!mark[line] && starts_nocase(p, MARK) &&
+				    (otherstacks_only == NULL ||
+				    (pm && pm[line]))) {
 					mark[line] = 1;
 					changed++;
 				}
 			}
+			if (pm)
+				FreeVec(pm);
+			if (plain)
+				FreeVec(plain);
+		}
 	}
 	if (!changed) {
 		FreeVec(mark);
@@ -612,6 +752,7 @@ move_wbstartup(int mode)
 				for (s = 0; s < NSTACKS; s++)
 					for (j = 0; stacks[s].wbstartup[j]; j++)
 						if ((mode == 2 || stacks[s].found) &&
+						    selected(&stacks[s]) &&
 						    starts_nocase((const char *)
 						    fib->fib_FileName,
 						    stacks[s].wbstartup[j])) {
@@ -870,8 +1011,9 @@ otherstacks_apply(int mode)
 		otherstacks_check(dummy, sizeof(dummy));
 	old = quiet();
 	startup_rv = 0;
-	for (i = 0; startup_files[i]; i++)
-		if (edit_startup(startup_files[i], mode) < 0)
+	build_scripts();
+	for (i = 0; i < nscripts; i++)
+		if (edit_startup(scripts[i], mode) < 0)
 			rv = startup_rv = -1;
 	if (move_wbstartup(mode) < 0)
 		rv = -1;
@@ -884,7 +1026,8 @@ otherstacks_apply(int mode)
 		    "LIBS:bsdsocket.library") &&
 		    DeleteFile((CONST_STRPTR)PARKING "/Libs/bsdsocket.library")))
 			rv = -1;
-	} else if (park("LIBS:bsdsocket.library", "Libs", "bsdsocket.library",
+	} else if (otherstacks_only == NULL &&
+	    park("LIBS:bsdsocket.library", "Libs", "bsdsocket.library",
 	    mode == 1) < 0)
 		rv = -1;
 	loud(old);

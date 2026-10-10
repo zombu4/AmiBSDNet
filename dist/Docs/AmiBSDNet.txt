@@ -1,4 +1,4 @@
-AmiBSDNet 0.6
+AmiBSDNet 0.7
 =============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -29,6 +29,11 @@ disk). If one is found it offers to:
                items and LIBS:bsdsocket.library are moved to
                SYS:Storage/AmiBSDNet-Disabled.
   Keep it      nothing is changed.
+  Remove Roadshow completely
+               (the default when Roadshow is found) everything of
+               Roadshow is deleted, see "NetCtrl REMOVEROADSHOW"; no
+               trial and no way back except reinstalling Roadshow from
+               your Work drawer or volume, which is left alone.
 
 Switching is a trial. After the next boot AmiBSDNet has three minutes
 to get connected. If it does, the switch stays. If it does not, it goes
@@ -191,6 +196,17 @@ NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS | FALLBACK
     goes back completely: the other stack and the original Wi-Fi driver
     and firmware come back, AmiBSDNet is taken out of the boot, and its
     logs are saved in SYS:Storage/AmiBSDNet-Logs. Reboot afterwards.
+
+NetCtrl FINDROADSHOW | REMOVEROADSHOW
+    FINDROADSHOW lists everything of Roadshow (also its trial version)
+    on all volumes: drawers and files named Roadshow, its commands and
+    scripts, NetInterfaces, every bsdsocket.library on disk, its files
+    in DEVS:Internet (not hosts), assigns, and the lines that mention
+    Roadshow in the startup scripts and the configuration files in S:,
+    ENVARC:, ENV: and DEVS:. REMOVEROADSHOW deletes all of it for good
+    (no trial, no way back) and then looks again. A volume or drawer
+    called Work is never touched: keep the Roadshow installer there.
+    The installer's "Remove Roadshow completely" choice does this.
 
 SerialShell [START|STOP|STATUS|AUTO] [BAUD=<n>] [UNIT=<n>] [DEVICE=<name>]
     A Shell on the serial port, for a terminal program on another

@@ -36,7 +36,7 @@ struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: SerialShell 0.6 (10.10.2026)";
+    "\0$VER: SerialShell 0.7 (10.10.2026)";
 
 #define	PORTNAME	"AmiBSDNet.SerialShell"
 #define	DEVNAME		"SERSH"

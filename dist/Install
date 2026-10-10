@@ -6,7 +6,7 @@
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.6")
+(set #ver "0.7")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
 	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
@@ -44,30 +44,58 @@
 ; so aborting the installer anywhere leaves the other stack working.
 (set #trial 0)
 (set #othersdo 1)
+(set #roadshow (patmatch "#?Roadshow#?" #others))
 (if (<> #others "")
-	(set #othersdo
-		(askchoice
-			(prompt "Another TCP/IP stack is installed:\n" #others
-				"\n\nOnly one TCP/IP stack can run at a time.")
-			(help "Switch: at the end of the installation, " #others
-				" is taken out of the boot. Its startup lines in "
-				"S:Startup-Sequence and S:User-Startup are commented "
-				"out, and its WBStartup items and LIBS:bsdsocket.library "
-				"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
-				"files are saved as <name>.amibsdnet-bak first.\n\n"
-				"This is a trial: if AmiBSDNet does not get connected "
-				"within three minutes after the next boot, it puts "
-				"everything back by itself (the other stack, and the "
-				"Wi-Fi driver it replaced) and tells you to reboot. Once "
-				"it has connected, the switch stays. You can go back at "
-				"any time with \"NetCtrl FALLBACK\".\n\n"
-				"Keep: nothing is changed (also your Wi-Fi driver), and "
-				"AmiBSDNet is not started while the other stack is "
-				"running.")
-			(choices (cat "Switch to AmiBSDNet (" #others
-					" comes back if AmiBSDNet fails)")
-				"Keep it (I will take care of it)")
-			(default 0))))
+	(if #roadshow
+		(set #othersdo
+			(askchoice
+				(prompt "Another TCP/IP stack is installed:\n" #others
+					"\n\nOnly one TCP/IP stack can run at a time.")
+				(help "Switch: at the end of the installation, " #others
+					" is taken out of the boot. Its startup lines in "
+					"S:Startup-Sequence and S:User-Startup are commented "
+					"out, and its WBStartup items and LIBS:bsdsocket.library "
+					"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
+					"files are saved as <name>.amibsdnet-bak first.\n\n"
+					"This is a trial: if AmiBSDNet does not get connected "
+					"within three minutes after the next boot, it puts "
+					"everything back by itself (the other stack, and the "
+					"Wi-Fi driver it replaced) and tells you to reboot. Once "
+					"it has connected, the switch stays. You can go back at "
+					"any time with \"NetCtrl FALLBACK\".\n\n"
+					"Keep: nothing is changed (also your Wi-Fi driver), and "
+					"AmiBSDNet is not started while the other stack is "
+					"running.\n\n"
+					"Remove Roadshow completely: at the end of the "
+					"installation everything of Roadshow is deleted from every "
+					"drawer of every volume (also its trial version): its "
+					"programs, libraries, scripts, settings, and every line "
+					"that mentions it in the startup and configuration files. "
+					"A volume or drawer called Work is left alone (keep the "
+					"Roadshow installer there). There is no trial and no way "
+					"back except installing Roadshow again.")
+				(choices (cat "Switch to AmiBSDNet (" #others
+						" comes back if AmiBSDNet fails)")
+					"Keep it (I will take care of it)"
+					"Remove Roadshow completely (deleted, no way back)")
+				(default 2)))
+		; (no Roadshow: no "Remove Roadshow")
+		(set #othersdo
+			(askchoice
+				(prompt "Another TCP/IP stack is installed:\n" #others
+					"\n\nOnly one TCP/IP stack can run at a time.")
+				(help "Switch: at the end of the installation, " #others
+					" is taken out of the boot (its startup lines are "
+					"commented out, its WBStartup items and "
+					"LIBS:bsdsocket.library moved to "
+					"SYS:Storage/AmiBSDNet-Disabled), as a trial: if "
+					"AmiBSDNet does not get connected within three minutes "
+					"after the next boot, everything is put back.\n\n"
+					"Keep: nothing is changed.")
+				(choices (cat "Switch to AmiBSDNet (" #others
+						" comes back if AmiBSDNet fails)")
+					"Keep it (I will take care of it)")
+				(default 0)))))
 
 (complete 10)
 
@@ -101,7 +129,7 @@
 ; working with its own driver, also if the installation is aborted).
 (set #keepdriver (and (<> #others "") (= #othersdo 1)
 	(exists "DEVS:Networks/wifipi.device")))
-(set #driverlater (and (<> #others "") (= #othersdo 0)))
+(set #driverlater (and (<> #others "") (<> #othersdo 1)))
 (procedure P_WIFIDRIVER
 	(
 		(makedir "DEVS:Networks")
@@ -599,6 +627,41 @@
 			))
 	))
 
+; "Remove Roadshow completely": deleted everywhere except Work, no trial
+(set #removed 0)
+(if (and (= #othersdo 2) (not @pretend))
+	(
+		(run "C/NetCtrl CHECK >NIL:" (safe))
+		(if (<> (getenv "AmiBSDNet/SelfAtBoot") "1")
+			(message "AmiBSDNet is not started from S:User-Startup (was "
+				"that step skipped?), so Roadshow was left as it is. Run "
+				"the installer again to remove it.")
+			(
+				(working "Removing Roadshow from all drawers of all "
+					"volumes (this can take a while)...")
+				(run "C/NetCtrl REMOVEROADSHOW >T:AmiBSDNet-RS.txt"
+					(safe))
+				(if #emu68 (P_WIFIDRIVER))
+				(set #removed 1)
+				(if (<> (getenv "AmiBSDNet/RoadshowCount") "0")
+					(message "Not everything of Roadshow could be removed "
+						"(write-protected or in use?). Still there:\n\n"
+						(getenv "AmiBSDNet/RoadshowList")
+						"\nThe full list is in T:AmiBSDNet-RS.txt "
+						"(\"NetCtrl FINDROADSHOW\" shows it again).")
+					(message "Roadshow is completely gone (only the Work "
+						"volume or drawer was left alone)."))
+				; another stack than Roadshow is not removed: say so
+				(run "C/NetCtrl CHECK >NIL:" (safe))
+				(if (<> (getenv "AmiBSDNet/OthersAtBoot") "")
+					(message "Note: " (getenv "AmiBSDNet/OthersAtBoot")
+						" is still started at boot. AmiBSDNet does not "
+						"start while another TCP/IP stack is running: "
+						"take it out of the boot (run this installer again "
+						"and choose Switch)."))
+			))
+	))
+
 (if (and (= #othersdo 1) (<> #others "") (not @pretend))
 	(
 		; "Keep" also after an earlier switch: put the other stack back
@@ -624,6 +687,13 @@
 		"driver back by itself and asks you to reboot again; its logs "
 		"are kept in SYS:Storage/AmiBSDNet-Logs.\n\n"
 		"\"NetCtrl\" shows the network status."))
+
+(if #removed
+	(exit
+		"AmiBSDNet is installed.\n\n"
+		"Reboot now: Roadshow is gone (Roadshow parts still in memory "
+		"leave with the reboot), and AmiBSDNet starts.\n\"NetCtrl\" shows "
+		"the network status."))
 
 (if (and (= #othersdo 1) (<> #others ""))
 	(exit
