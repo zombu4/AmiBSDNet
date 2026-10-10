@@ -253,7 +253,10 @@ _start(void)
 		PutStr((CONST_STRPTR)"Ping: no TCP/IP stack running\n");
 	} else {
 		SetErrnoPtr(&errno_, sizeof(errno_));
-		rc = run((const char *)arg[0], arg[1] ? *(LONG *)arg[1] : 4);
+		LONG count = arg[1] ? *(LONG *)arg[1] : 4;
+
+		/* (at least one; a negative one is not "forever") */
+		rc = run((const char *)arg[0], count > 0 ? count : 1);
 		CloseLibrary(SocketBase);
 	}
 	FreeArgs(rda);

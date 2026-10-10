@@ -220,26 +220,70 @@ wm_start(const char *device, unsigned long unit)
  * Wireless.prefs
  */
 
+/* the whole file (NUL-terminated); NULL if there is none, or with *errp
+   set if it is there but could not be read (it must not be rewritten
+   from a part of it then) */
 static char *
-read_file(const char *name, LONG *lenp)
+read_file_err(const char *name, LONG *lenp, int *errp)
 {
 	BPTR fh = Open((CONST_STRPTR)name, MODE_OLDFILE);
 	char *buf = NULL;
-	LONG len = 0, n;
+	LONG len = 0, size, n;
 
-	if (fh) {
-		if ((buf = AllocVec(16384, MEMF_ANY | MEMF_CLEAR)) != NULL) {
-			while (len < 16383 &&
-			    (n = Read(fh, buf + len, 16383 - len)) > 0)
-				len += n;
-		}
+	*errp = 0;
+	*lenp = 0;
+	if (fh == 0)
+		return NULL;
+	Seek(fh, 0, OFFSET_END);
+	size = Seek(fh, 0, OFFSET_BEGINNING);
+	if (size < 0 || size > 1024 * 1024 ||
+	    (buf = AllocVec(size + 1, MEMF_ANY | MEMF_CLEAR)) == NULL) {
 		Close(fh);
+		*errp = 1;
+		return NULL;
+	}
+	while (len < size && (n = Read(fh, buf + len, size - len)) > 0)
+		len += n;
+	Close(fh);
+	if (len != size) {
+		FreeVec(buf);
+		*errp = 1;
+		return NULL;
 	}
 	*lenp = len;
 	return buf;
 }
 
-/* does a network={...} block (from p to the next '}') name this SSID? */
+static char *
+read_file(const char *name, LONG *lenp)
+{
+	int err;
+
+	return read_file_err(name, lenp, &err);
+}
+
+/* the end of a network={...} block starting at b: after the line that
+   starts with '}' (as wpa_supplicant writes them; a '}' inside a quoted
+   SSID does not end it) */
+static const char *
+block_end(const char *b, const char *end)
+{
+	const char *p = b;
+
+	while (p < end) {
+		while (p < end && *p != '\n')
+			p++;
+		if (p < end)
+			p++;
+		while (p < end && (*p == ' ' || *p == '\t'))
+			p++;
+		if (p < end && *p == '}')
+			return p + 1;
+	}
+	return end;
+}
+
+/* does a network={...} block (from p to its end) name this SSID? */
 static int
 block_has_ssid(const char *p, const char *end, const char *ssid)
 {
@@ -294,10 +338,7 @@ write_prefs(const char *name, const char *old, LONG oldlen, const char *ssid,
 			break;
 		}
 		FWrite(fh, (APTR)p, b - p, 1);
-		for (e = b; e < end && *e != '}'; e++)
-			;
-		if (e < end)
-			e++;
+		e = block_end(b, end);
 		for (i = 0; e < end && (*e == '\n' || *e == '\r') && i < 2; i++)
 			e++;
 		if (!block_has_ssid(b, e, ssid))
@@ -312,12 +353,15 @@ int
 wm_set_network(const char *ssid, const char *psk)
 {
 	LONG len;
-	char *old = read_file(PREFS_ENVARC, &len);
+	int err;
+	char *old = read_file_err(PREFS_ENVARC, &len, &err);
 	BPTR l;
 	int rv;
 
-	if (old == NULL)
-		old = read_file(PREFS_ENV, &len);
+	if (old == NULL && !err)
+		old = read_file_err(PREFS_ENV, &len, &err);
+	if (err)
+		return -1;	/* never rewrite it from a part */
 	/* make sure the Sys drawers exist */
 	if ((l = CreateDir((CONST_STRPTR)"ENVARC:Sys")) != 0)
 		UnLock(l);
@@ -350,8 +394,10 @@ static int
 get_value(const char *b, const char *end, const char *key, char *out, int n)
 {
 	int kl = slen(key), i;
+	const char *q, *eol;
 
-	for (; b + kl + 2 < end && *b != '}'; b++)
+	end = block_end(b, end);
+	for (; b + kl + 2 < end; b++)
 		if ((b[-1] == '\t' || b[-1] == ' ' || b[-1] == '\n' ||
 		    b[-1] == '{') && b[kl] == '=' && b[kl + 1] == '"') {
 			for (i = 0; i < kl && b[i] == key[i]; i++)
@@ -359,7 +405,18 @@ get_value(const char *b, const char *end, const char *key, char *out, int n)
 			if (i < kl)
 				continue;
 			b += kl + 2;
-			for (i = 0; b < end && *b != '"' && i < n - 1; i++)
+			/* up to the last '"' of the line, as wpa_supplicant
+			   reads it (a passphrase may contain '"') */
+			for (eol = b; eol < end && *eol != '\n' && *eol != '\r';
+			    eol++)
+				;
+			for (q = eol; q > b && q[-1] != '"'; q--)
+				;
+			if (q > b)
+				q--;		/* at the closing quote */
+			else
+				q = eol;
+			for (i = 0; b < q && i < n - 1; i++)
 				out[i] = *b++;
 			out[i] = '\0';
 			return 1;
