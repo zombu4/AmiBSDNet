@@ -46,6 +46,7 @@ int	amiga_rump_hostinit(long log);
 
 /* set up console logging only (log != 0); safe to call first thing */
 void	amiga_rump_loginit(long log);
+void	amiga_rump_logtee(void (*)(const char *, long));
 
 /* provided by rumpuser_amiga.c for host code (no C library is linked) */
 void	*memset(void *, int, size_t);

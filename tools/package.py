@@ -22,7 +22,7 @@ import mkicon  # noqa: E402
 
 BUILD = os.path.join(TOP, "build")
 STAGE = os.path.join(BUILD, "dist")
-VERSION = "0.8"
+VERSION = "0.8.1"
 
 BASH = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
 

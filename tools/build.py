@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feasibility-spike build driver: compile NetBSD rump kernel networking
+"""Build driver: compile NetBSD rump kernel networking
 components for m68k AmigaOS using Bartman's native Windows m68k-amiga-elf
 toolchain.  No bmake / build.sh: we read SRCS / .PATH out of NetBSD's
 makefiles with a deliberately small parser and handle the conditional

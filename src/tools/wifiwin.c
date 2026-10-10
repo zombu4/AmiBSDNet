@@ -171,7 +171,7 @@ make_label(struct net *n)
 #define	SCAN_FAILED	(-1)
 #define	SCAN_CANCELLED	(-2)
 #define	SCAN_TIMEOUT	(-3)
-#define	SCAN_SECONDS	30
+#define	SCAN_SECONDS	60
 
 #define	S2_GETSTATIONADDRESS	(CMD_NONSTD + 1)
 #define	S2_CONFIGINTERFACE	(CMD_NONSTD + 2)
@@ -192,6 +192,13 @@ static struct {
 	ULONG unit;
 	int n;
 	struct net nets[MAXNETS];
+	/* what the driver said (shown when there is nothing to choose) */
+	ULONG listed;			/* entries it returned */
+	ULONG noname;			/* of those without a name */
+	LONG err, werr;			/* io_Error, ios2_WireError */
+	int opened;			/* it opened at all */
+	int nomem;			/* no memory for the results */
+	volatile int scanning;		/* configured: the scan itself runs */
 } job;
 
 static void
@@ -204,12 +211,19 @@ scan_proc(void)
 	ULONG i;
 
 	job.n = 0;
-	if ((port = CreateMsgPort()) != NULL) {
+	job.listed = job.noname = 0;
+	job.err = job.werr = 0;
+	if ((port = CreateMsgPort()) == NULL)
+		job.nomem = 1;
+	else {
 		req = (struct IOSana2Req *)CreateIORequest(port, sizeof(*req));
-		if (req != NULL) {
+		if (req == NULL)
+			job.nomem = 1;
+		else {
 			req->ios2_BufferManagement = bufftags;
 			if (amibsdnet_open_sana(job.device, job.unit,
 			    (struct IORequest *)req, 0) == 0) {
+				job.opened = 1;
 				/*
 				 * The firmware scans only once the interface is
 				 * configured (the stack normally did that; a
@@ -226,13 +240,21 @@ scan_proc(void)
 					req->ios2_Req.io_Command = S2_CONFIGINTERFACE;
 					DoIO((struct IORequest *)req);
 				}
+				job.scanning = 1;
 				if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR, 8192,
-				    2048))) {
+				    2048)) == NULL)
+					job.nomem = 1;
+				else {
 					req->ios2_Req.io_Command = S2_GETNETWORKS;
 					req->ios2_Data = pool;
 					req->ios2_StatData = NULL;
 					req->ios2_DataLength = 0;
-					if (DoIO((struct IORequest *)req) == 0) {
+					DoIO((struct IORequest *)req);
+					job.err = req->ios2_Req.io_Error;
+					job.werr = req->ios2_WireError;
+					job.listed = req->ios2_StatData ?
+					    req->ios2_DataLength : 0;
+					if (job.err == 0) {
 						struct TagItem **lists =
 						    req->ios2_StatData;
 
@@ -249,8 +271,10 @@ scan_proc(void)
 							    0));
 							int j;
 
-							if (!ssid[0])
+							if (!ssid[0]) {
+								job.noname++;
 								continue;	/* hidden */
+							}
 							/* one entry per name: the
 							   strongest */
 							for (j = 0; j < job.n; j++)
@@ -324,16 +348,21 @@ scan(const char *device, ULONG unit, int (*cancelled)(void))
 	if (job.state == 0) {
 		scopy(job.device, device, sizeof(job.device));
 		job.unit = unit;
+		job.opened = job.nomem = job.scanning = 0;
 		job.state = 1;
+		/* (the driver's code runs on this stack: plenty) */
 		if (CreateNewProcTags(NP_Entry, (ULONG)scan_proc,
-		    NP_Name, (ULONG)"AmiBSDNet scan", NP_StackSize, 16384,
+		    NP_Name, (ULONG)"AmiBSDNet scan", NP_StackSize, 65536,
 		    TAG_DONE) == NULL) {
 			job.state = 0;
+			job.nomem = 1;
 			return SCAN_FAILED;
 		}
 	}
-	/* else a scan from before is still out: wait for that one */
-	for (ticks = 0; job.state == 1; ticks += 5) {
+	/* else a scan from before is still out: wait for that one.  The
+	   time counts from when the driver is configured (that alone may
+	   take seconds: firmware set-up over SDIO) */
+	for (ticks = 0; job.state == 1; ticks += job.scanning ? 5 : 1) {
 		if (cancelled())
 			return SCAN_CANCELLED;
 		if (ticks >= SCAN_SECONDS * 50)
@@ -427,20 +456,77 @@ scan_cancelled(void)
 	return scan_quit;
 }
 
+/* "text" plus a number */
+static char *
+put_num(char *p, LONG v)
+{
+	char t[12];
+	int i = 0;
+	ULONG u = v < 0 ? -v : v;
+
+	if (v < 0)
+		*p++ = '-';
+	do {
+		t[i++] = '0' + u % 10;
+		u /= 10;
+	} while (u);
+	while (i)
+		*p++ = t[--i];
+	*p = '\0';
+	return p;
+}
+
+static char *
+put_str(char *p, const char *s)
+{
+
+	while (*s)
+		*p++ = *s++;
+	*p = '\0';
+	return p;
+}
+
 static void
 do_scan(const struct NetCtrlIface *ifc)
 {
+	static char msg[120];
+	char *p = msg;
 	int n;
 
 	set_status("Scanning... (Close stops it)");
 	set_list((struct List *)~0);
 	n = scan(ifc->device, ifc->unit, scan_cancelled);
 	set_list(&netlist);
-	set_status(n == SCAN_CANCELLED ? "Stopped waiting for the scan" :
-	    n == SCAN_TIMEOUT ? "The driver did not finish the scan (is the "
-	    "stack running with this driver?)" :
-	    n < 0 ? "The driver cannot scan" :
-	    n == 0 ? "No networks found" : "Choose a network and Connect");
+	if (n > 0) {
+		set_status("Choose a network and Connect");
+		return;
+	}
+	/* nothing to choose: say exactly what the driver did */
+	if (n == SCAN_CANCELLED)
+		p = put_str(p, "Stopped waiting for the scan");
+	else if (n == SCAN_TIMEOUT)
+		p = put_str(p, job.scanning ? "No answer from the driver to "
+		    "the scan in 60 s" : "The driver is still being set up");
+	else if (job.nomem)
+		p = put_str(p, "Not enough memory for a scan");
+	else if (!job.opened)
+		p = put_str(p, "The driver does not open");
+	else if (job.err) {
+		p = put_str(p, "The driver cannot scan (error ");
+		p = put_num(p, job.err);
+		p = put_str(p, "/");
+		p = put_num(p, job.werr);
+		p = put_str(p, ")");
+	} else {
+		p = put_str(p, "No networks: the driver listed ");
+		p = put_num(p, (LONG)job.listed);
+		if (job.noname) {
+			p = put_str(p, ", ");
+			p = put_num(p, (LONG)job.noname);
+			p = put_str(p, " without a name");
+		}
+	}
+	set_status(msg);
 }
 
 static void

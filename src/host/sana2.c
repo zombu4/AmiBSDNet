@@ -469,6 +469,10 @@ sana_iothread(void *arg)
 	if (base == NULL)
 		goto fail;
 	base->ios2_BufferManagement = s2_buffertags;
+	/* (each step is logged first: the start notice shows it on screen,
+	   so a driver that freezes the Amiga is seen doing so) */
+	amiga_rump_printf("sana: opening %s unit %lu\n", viu->devname,
+	    viu->unit);
 	/* drivers live in DEVS:Networks: tries "Networks/<name>" as well */
 	if (amibsdnet_open_sana(viu->devname, viu->unit,
 	    (struct IORequest *)base, 0) != 0) {
@@ -479,6 +483,7 @@ sana_iothread(void *arg)
 	}
 	opened = 1;
 
+	amiga_rump_printf("sana: %s open; configuring it\n", viu->devname);
 	/* station address: current one, else the factory default */
 	base->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
 	if (DoIO((struct IORequest *)base) == 0) {
@@ -499,11 +504,13 @@ sana_iothread(void *arg)
 		if (DoIO((struct IORequest *)base) == 0)
 			CopyMem(base->ios2_SrcAddr, viu->mac, ETHER_ADDR_LEN);
 	}
+	amiga_rump_printf("sana: %s: asking what it can do\n", viu->devname);
 	viu->wireless = probe_wireless(base);
 	/* NSCMD_DEVICEQUERY's io_Data/io_Length overlay ios2_SrcAddr, which
 	   every request below inherits */
 	CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
 	base->ios2_Req.io_Command = S2_ONLINE;
+	amiga_rump_printf("sana: %s: going online\n", viu->devname);
 	if (DoIO((struct IORequest *)base) != 0)
 		amiga_rump_printf("sana: %s: S2_ONLINE failed (error %d, %ld)\n",
 		    viu->devname, base->ios2_Req.io_Error,
@@ -527,6 +534,8 @@ sana_iothread(void *arg)
 		};
 		int g;
 
+		amiga_rump_printf("sana: %s: multicast groups\n",
+		    viu->devname);
 		for (g = 0; g < 4; g++) {
 			CopyMem((APTR)groups[g], base->ios2_SrcAddr,
 			    ETHER_ADDR_LEN);
@@ -542,8 +551,11 @@ sana_iothread(void *arg)
 	 * WirelessManager makes later (drivers that cannot tell count as
 	 * linked).  Checked again every few seconds below.
 	 */
-	if (viu->wireless && wireless_associated(base) == 0)
-		viu->link = 0;
+	if (viu->wireless) {
+		amiga_rump_printf("sana: %s: associated?\n", viu->devname);
+		if (wireless_associated(base) == 0)
+			viu->link = 0;
+	}
 
 	for (t = 0; t < NRXTYPES; t++) {
 		for (i = 0; i < NRX_PER_TYPE; i++) {

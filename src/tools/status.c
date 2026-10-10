@@ -40,6 +40,7 @@
 
 #include <amibsdnet/control.h>
 #include <amibsdnet/ctlcall.h>
+#include <amibsdnet/notice.h>
 #include <amibsdnet/devopen.h>
 
 #include "statustool.h"
@@ -47,12 +48,13 @@
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 struct IntuitionBase *IntuitionBase;
+struct GfxBase *GfxBase;
 struct Library *WorkbenchBase;
 struct Library *IconBase;
 struct Library *CxBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.8 (10.10.2026)";
+    "\0$VER: AmiBSDNetStatus 0.8.1 (10.10.2026)";
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -243,12 +245,49 @@ copy(char *d, const char *s, int n)
 	*d = '\0';
 }
 
+/* s added to d, on a line of its own */
+static void
+append(char *d, const char *s, int n)
+{
+	int l = 0;
+
+	while (d[l])
+		l++;
+	if (l && l < n - 1)
+		d[l++] = '\n';
+	copy(d + l, s, n - l);
+}
+
 static int
 strcmp_(const char *a, const char *b)
 {
 	while (*a && *a == *b)
 		a++, b++;
 	return (UBYTE)*a - (UBYTE)*b;
+}
+
+/* the start notice (amibsdnet/notice.h): each step is shown first */
+static struct notice snotice;
+static int starting;
+
+static void
+step(const char *what)
+{
+
+	if (starting)
+		notice_say(&snotice, what);
+}
+
+/* the start is over (or the program ends): the notice and marker go */
+static void
+start_over(void)
+{
+
+	if (starting) {
+		starting = 0;
+		notice_close(&snotice);
+		guard_end("Status");
+	}
 }
 
 static void
@@ -258,6 +297,7 @@ update_icon(struct MsgPort *appport)
 	const char *text = "Offline";
 	ULONG i;
 
+	step("asking the stack");
 	if ((i = stack_cmd(NETCTRL_IFLIST)) != 0) {
 		state = 2;
 		text = (LONG)i == -2 ? "Not answering" : "No network";
@@ -301,6 +341,7 @@ update_icon(struct MsgPort *appport)
 	copy(label, newlabel, sizeof(label));
 	if (appicon)
 		RemoveAppIcon(appicon);
+	step("adding the icon");
 	appicon = AddAppIconA(0, 0, (UBYTE *)label, appport, 0,
 	    &dobj[state == 1 ? 1 : 0], NULL);
 	/* if Workbench was not ready, try again at the next update */
@@ -495,6 +536,7 @@ run(void)
 	struct NewBroker nb;
 	CxObj *broker = NULL;
 	ULONG sigs, appmask, cxmask = 0, tmask;
+	struct DateStamp t0, now;
 	int quit = 0, rc = RETURN_FAIL;
 
 	if ((ctl = AllocVec(sizeof(*ctl), MEMF_PUBLIC | MEMF_CLEAR)) == NULL ||
@@ -512,6 +554,7 @@ run(void)
 	}
 
 	if (CxBase && (cxport = CreateMsgPort()) != NULL) {
+		step("adding the commodity");
 		nb.nb_Version = NB_VERSION;
 		nb.nb_Name = (STRPTR)"AmiBSDNet";
 		nb.nb_Title = (STRPTR)"AmiBSDNet network status";
@@ -532,8 +575,55 @@ run(void)
 		cxmask = 1UL << cxport->mp_SigBit;
 	}
 
+	/*
+	 * Not the first instance any more (the broker is unique): the start
+	 * guard.  Its own last start froze the Amiga: not this time.  And
+	 * what else did not start this time is said here, on Workbench
+	 * (nothing waits for a click during the boot).
+	 */
+	{
+		char v[4], what[160];
+		int froze = guard_begin("Status");
+
+		what[0] = '\0';
+		if (GetVar((CONST_STRPTR)"AmiBSDNet/Skipped-Stack", (STRPTR)v,
+		    sizeof(v), GVF_GLOBAL_ONLY) >= 0)
+			copy(what, "the network stack (AmiBSDNet)", sizeof(what));
+		if (GetVar((CONST_STRPTR)"AmiBSDNet/Skipped-Serial", (STRPTR)v,
+		    sizeof(v), GVF_GLOBAL_ONLY) >= 0)
+			append(what, "the serial Shell (SerialShell)",
+			    sizeof(what));
+		if (froze)
+			append(what, "the status icon (AmiBSDNetStatus)",
+			    sizeof(what));
+		if (what[0]) {
+			/* (no marker while the requester waits for a click:
+			   switching off then is not a frozen start) */
+			if (!froze)
+				guard_end("Status");
+			guard_tell(what);
+			if (!froze)
+				guard_begin("Status");
+		}
+		DeleteVar((CONST_STRPTR)"AmiBSDNet/Skipped-Stack",
+		    GVF_GLOBAL_ONLY);
+		DeleteVar((CONST_STRPTR)"AmiBSDNet/Skipped-Serial",
+		    GVF_GLOBAL_ONLY);
+		if (froze) {
+			rc = RETURN_OK;
+			goto out;
+		}
+	}
+	starting = 1;
+	DateStamp(&t0);
+	notice_open(&snotice, "AmiBSDNetStatus is starting (this window "
+	    "closes by itself)", 2);
+	step("starting");
+
 	update_icon(appport);
+	step("adding the menu items");
 	add_menu(appport);
+	step("running");
 	appmask = 1UL << appport->mp_SigBit;
 	tmask = 1UL << tport->mp_SigBit;
 	treq->tr_node.io_Command = TR_ADDREQUEST;
@@ -549,6 +639,17 @@ run(void)
 			WaitIO((struct IORequest *)treq);
 			update_icon(appport);
 			add_menu(appport);
+			/* (by the clock: the interval may be long) */
+			/* (a clock set back counts as over too) */
+			DateStamp(&now);
+			if (starting) {
+				LONG el = now.ds_Minute * 60 + now.ds_Tick / 50 -
+				    t0.ds_Minute * 60 - t0.ds_Tick / 50;
+
+				if (now.ds_Days != t0.ds_Days || el < 0 ||
+				    el >= START_SECS)
+					start_over();
+			}
 			treq->tr_time.tv_secs = interval;
 			treq->tr_time.tv_micro = 0;
 			SendIO((struct IORequest *)treq);
@@ -564,6 +665,9 @@ run(void)
 					open = am->am_ID == MENU_SETTINGS ? 2 : 1;
 				ReplyMsg((struct Message *)am);
 			}
+			/* (someone uses it: the start is over) */
+			if (open)
+				start_over();
 			if (open == 1)
 				show_status(appport);
 			else if (open == 2)
@@ -589,6 +693,7 @@ run(void)
 					break;
 				case CXCMD_APPEAR:
 				case CXCMD_UNIQUE:
+					start_over();
 					show_status(appport);
 					break;
 				case CXCMD_KILL:
@@ -604,6 +709,7 @@ run(void)
 	WaitIO((struct IORequest *)treq);
 
 out:
+	start_over();
 	if (appmenu)
 		RemoveAppMenuItem(appmenu);
 	if (appmenu2)
@@ -669,6 +775,7 @@ _start(void)
 		rc = run();
 	}
 	if (CxBase) CloseLibrary(CxBase);
+	if (GfxBase) CloseLibrary((struct Library *)GfxBase);
 	if (IconBase) CloseLibrary(IconBase);
 	if (WorkbenchBase) CloseLibrary(WorkbenchBase);
 	if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);

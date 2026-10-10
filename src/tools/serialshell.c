@@ -32,11 +32,15 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
+#include <amibsdnet/notice.h>
+
 struct ExecBase *SysBase;
+struct IntuitionBase *IntuitionBase;
+struct GfxBase *GfxBase;
 struct DosLibrary *DOSBase;
 
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: SerialShell 0.8 (10.10.2026)";
+    "\0$VER: SerialShell 0.8.1 (10.10.2026)";
 
 #define	PORTNAME	"AmiBSDNet.SerialShell"
 #define	DEVNAME		"SERSH"
@@ -489,13 +493,27 @@ remove_dosentry(void)
 	}
 }
 
+/* the start notice, at boot (AUTO) only: each step is shown first */
+static struct notice snotice;
+static int atboot;
+
+static void
+step(const char *what)
+{
+
+	if (atboot)
+		notice_say(&snotice, what);
+}
+
 static int
 handler(const char *device, ULONG unit, ULONG baud)
 {
 	struct Process *me = (struct Process *)SysBase->ThisTask;
 	APTR oldwin;
 	ULONG dosmask, sermask, timemask, sigs;
-	int rv = RETURN_FAIL, opened = 0, timeropen = 0;
+	int rv = RETURN_FAIL, opened = 0, timeropen = 0, gtropen = 0;
+	int gtrpending = 0;
+	struct timerequest *gtr = NULL;	/* the end of the start */
 
 	oldwin = me->pr_WindowPtr;
 	me->pr_WindowPtr = (APTR)-1;
@@ -514,6 +532,7 @@ handler(const char *device, ULONG unit, ULONG baud)
 		goto out;
 	/* exclusive, no handshaking (flags that count at open time) */
 	rd->io_SerFlags = SERF_XDISABLED;
+	step("opening the serial port");
 	if (OpenDevice((CONST_STRPTR)device, unit, (struct IORequest *)rd,
 	    0) != 0) {
 		PutStr((CONST_STRPTR)"SerialShell: cannot open ");
@@ -530,6 +549,7 @@ handler(const char *device, ULONG unit, ULONG baud)
 	rd->io_SerFlags = SERF_XDISABLED;	/* no parity, no 7-wire */
 	rd->io_ExtFlags = 0;
 	rd->IOSer.io_Command = SDCMD_SETPARAMS;
+	step("setting the speed (8N1, no handshaking)");
 	if (DoIO((struct IORequest *)rd) != 0) {
 		PutStr((CONST_STRPTR)"SerialShell: the serial device refuses "
 		    "these settings\n");
@@ -543,7 +563,24 @@ handler(const char *device, ULONG unit, ULONG baud)
 		goto out;
 	timeropen = 1;
 
+	if (atboot && (gtr = (struct timerequest *)CreateIORequest(timeport,
+	    sizeof(*gtr))) != NULL && OpenDevice((CONST_STRPTR)TIMERNAME,
+	    UNIT_VBLANK, (struct IORequest *)gtr, 0) == 0) {
+		gtropen = 1;
+		gtr->tr_node.io_Command = TR_ADDREQUEST;
+		gtr->tr_time.tv_secs = START_SECS;
+		gtr->tr_time.tv_micro = 0;
+		SendIO((struct IORequest *)gtr);
+		gtrpending = 1;
+	} else if (atboot) {
+		/* (no timer for the end of the start: over now) */
+		notice_close(&snotice);
+		guard_end("Serial");
+		atboot = 0;
+	}
+
 	/* SERSH: */
+	step("adding SERSH:");
 	if ((dosentry = MakeDosEntry((CONST_STRPTR)DEVNAME, DLT_DEVICE)) ==
 	    NULL)
 		goto out;
@@ -563,8 +600,11 @@ handler(const char *device, ULONG unit, ULONG baud)
 	dosmask = 1UL << dosport->mp_SigBit;
 	sermask = 1UL << serport->mp_SigBit;
 	timemask = 1UL << timeport->mp_SigBit;
+	step("reading the serial port");
 	start_read();
+	step("starting the Shell (NewShell SERSH:)");
 	spawn_shell();
+	step("running");
 	rv = RETURN_OK;
 
 	for (;;) {
@@ -599,6 +639,13 @@ handler(const char *device, ULONG unit, ULONG baud)
 			packet((struct DosPacket *)m->mn_Node.ln_Name);
 		if (rdpending && CheckIO((struct IORequest *)rd))
 			serial_done();
+		if (gtrpending && CheckIO((struct IORequest *)gtr)) {
+			/* the start is over */
+			WaitIO((struct IORequest *)gtr);
+			gtrpending = 0;
+			notice_close(&snotice);
+			guard_end("Serial");
+		}
 		if (trpending && CheckIO((struct IORequest *)tr)) {
 			WaitIO((struct IORequest *)tr);
 			trpending = 0;
@@ -637,6 +684,19 @@ out:
 	if (trpending) {
 		AbortIO((struct IORequest *)tr);
 		WaitIO((struct IORequest *)tr);
+	}
+	if (gtrpending) {
+		AbortIO((struct IORequest *)gtr);
+		WaitIO((struct IORequest *)gtr);
+	}
+	if (gtropen)
+		CloseDevice((struct IORequest *)gtr);
+	if (gtr)
+		DeleteIORequest((struct IORequest *)gtr);
+	/* (ended or failed during the start: not a freeze) */
+	if (atboot) {
+		notice_close(&snotice);
+		guard_end("Serial");
 	}
 	if (timeropen)
 		CloseDevice((struct IORequest *)tr);
@@ -751,6 +811,17 @@ _start(void)
 			baud = baud * 10 + (var[i] - '0');
 		if (baud == 0)
 			baud = 19200;
+		/* (one running already: its start, its marker) */
+		if (running())
+			goto done;
+		/* its last start froze the Amiga: not this time */
+		if (guard_begin("Serial")) {
+			guard_skipped("Serial");
+			goto done;
+		}
+		atboot = 1;
+		notice_open(&snotice, "SerialShell is starting (this window "
+		    "closes by itself)", 1);
 	} else if (!streq(cmd, "START")) {
 		PutStr((CONST_STRPTR)"usage: SerialShell [START|STOP|STATUS|"
 		    "AUTO] [BAUD=<n>] [UNIT=<n>] [DEVICE=<name>]\n");
@@ -775,6 +846,15 @@ _start(void)
 	PutStr((CONST_STRPTR)" baud, 8N1, no handshaking\n");
 	rc = handler(dev, unit, baud);
 done:
+	if (atboot) {
+		/* (also when it did not get as far as the handler) */
+		notice_close(&snotice);
+		guard_end("Serial");
+	}
+	if (GfxBase)
+		CloseLibrary((struct Library *)GfxBase);
+	if (IntuitionBase)
+		CloseLibrary((struct Library *)IntuitionBase);
 	CloseLibrary((struct Library *)DOSBase);
 	return rc;
 }

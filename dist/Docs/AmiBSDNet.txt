@@ -1,5 +1,5 @@
-AmiBSDNet 0.8
-=============
+AmiBSDNet 0.8.1
+===============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
 (Workbench 3.2 recommended), built from the networking code of the
@@ -85,6 +85,20 @@ for a DHCP server.
 Everything the installer puts on the Amiga is listed in
 S:AmiBSDNet-Install.log. Files that were there before (your own) are
 never listed.
+
+
+While the Amiga starts
+----------------------
+For the first minute after a boot, AmiBSDNet, SerialShell and the
+status icon each show what they are doing in a small window at the
+bottom of the screen; the windows close by themselves. If the Amiga
+freezes while they start, that window shows the step that froze it
+(take a picture of it).
+
+A start that never finished (the Amiga froze, or was switched off in
+that first minute) is not tried again at the next boot: that one boot
+comes up without it, and a requester on the Workbench says so. The boot
+after that starts it normally again.
 
 
 Uninstalling

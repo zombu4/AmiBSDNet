@@ -53,6 +53,10 @@ Early development.
       builds (`src/common/drvcheck.c`); not bundled (no licence)
 - [x] `SerialShell`: a Shell on the serial port (8N1, no handshaking,
       19200 baud by default), switched on and off in Settings
+- [x] Start notice: for the first minute after a boot each program shows
+      the step it is about to take on screen (a freeze leaves the culprit
+      visible); a start that never finished is skipped once at the next
+      boot (`src/include/amibsdnet/notice.h`)
 - [x] Uninstaller (the installer's "Uninstall", `NetCtrl UNINSTALL`):
       removes what the install log `S:AmiBSDNet-Install.log` lists, then
       the log; drawers only if nothing else is in them
@@ -68,7 +72,7 @@ archive from Aminet).
 
 ```sh
 python -I tools/bootstrap.py           # toolchain, NetBSD sources, WinUAE,
-                                       # bundled Wi-Fi files
+                                       # WirelessManager
 python -I tools/build.py               # rump kernel libraries -> build/
 tools/link_test.sh src/test/rumptest.c build/rumptest
 python -I tools/run_emu.py build/rumptest
@@ -79,6 +83,10 @@ python -I tools/run_emu.py build/nettest --net --echo 7777
 tools/build_stack.sh                   # -> build/AmiBSDNet
 tools/build_amiga.sh src/test/socktest.c build/socktest
 python -I tools/run_emu.py build/socktest --stack tests/slirp.conf --echo 7777
+tools/build_amiga.sh src/test/srvtest.c build/srvtest
+python -I tools/run_emu.py build/srvtest --stack tests/slirp.conf --forward 2323
+
+python -I tools/check_installer.py dist/Install   # Installer script syntax
 
 python -I tools/package.py             # release build -> build/AmiBSDNet.lha
 ```
@@ -96,11 +104,10 @@ AmigaOS itself. ROMs are never part of this repository.
 | `src/lib/` | bsdsocket.library |
 | `src/stack/` | the AmiBSDNet program: startup, configuration, DHCP |
 | `src/include/` | headers for AmiBSDNet's own client programs |
-| `src/tools/` | NetCtrl, Ping, AmiBSDNetStatus |
+| `src/tools/` | NetCtrl, Ping, SerialShell, AmiBSDNetStatus |
 | `dist/` | Installer script, user documentation, Aminet readme |
-| `src/test/` | test programs run in the emulator |
-| `tools/` | build driver, ELF-to-hunk converter, emulator runner |
-| `docs/` | design notes |
+| `src/test/` | test programs run in the emulator (`hangport.c`: a stack that never answers, for the client timeouts) |
+| `tools/` | build driver, ELF-to-hunk converter, emulator runner, `uaeinput.ps1` (clicks and screenshots in WinUAE) |
 
 ## Licence
 

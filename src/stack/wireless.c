@@ -36,7 +36,8 @@ wm_starter(void *arg)
 	else if (!wm_installed())
 		P("%s: Wi-Fi interface, but C:WirelessManager is not installed "
 		    "(needed for WPA networks)\n", w->name);
-	else if (wm_start(w->device, w->unit) == 0)
+	else if (P("%s: starting WirelessManager\n", w->name),
+	    wm_start(w->device, w->unit) == 0)
 		P("%s: started WirelessManager for %s (its messages are in "
 		    "T:WirelessManager.log)\n", w->name, w->device);
 	else

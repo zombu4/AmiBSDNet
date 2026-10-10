@@ -236,6 +236,7 @@ host_strcmp(const char *a, const char *b)
 
 static char logbuf[256];
 static size_t loglen;
+static void (*logtee)(const char *, long);	/* also shown here */
 
 static void
 log_flush_locked(void)
@@ -243,7 +244,20 @@ log_flush_locked(void)
 
 	if (loglen && logfh)
 		Write(logfh, logbuf, loglen);
+	if (loglen && logtee)
+		logtee(logbuf, (long)loglen);
 	loglen = 0;
+}
+
+/* everything logged from now on is also given to fn (NULL: no more);
+   never while fn runs */
+void
+amiga_rump_logtee(void (*fn)(const char *, long))
+{
+
+	ObtainSemaphore(&logsem);
+	logtee = fn;
+	ReleaseSemaphore(&logsem);
 }
 
 static void

@@ -29,11 +29,17 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
+#include <devices/timer.h>
+
+#include <amibsdnet/notice.h>
+
 #include "rumpuser_amiga.h"
 #include "stack.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
+struct IntuitionBase *IntuitionBase;
+struct GfxBase *GfxBase;
 
 extern void (*__init_array_start[])(void);
 extern void (*__init_array_end[])(void);
@@ -44,7 +50,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.8 (10.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.8.1 (10.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -67,11 +73,48 @@ static char logpath[256] = DEFAULT_LOG;
 
 #define	P	amiga_rump_printf
 
+/*
+ * The start notice (amibsdnet/notice.h): for the first minute every line
+ * of the log is also shown on screen, before the step it announces.
+ */
+static struct notice startnotice;
+static char teeline[NOTICE_COLS];
+static int teelen;
+
+static void
+notice_tee(const char *text, long len)
+{
+	long i;
+
+	/* (whole lines: with DEBUG the log comes a character at a time) */
+	for (i = 0; i < len; i++) {
+		if (text[i] == '\n' || teelen == NOTICE_COLS - 1) {
+			notice_show(&startnotice, teeline, teelen);
+			teelen = 0;
+		}
+		if (text[i] != '\n')
+			teeline[teelen++] = text[i];
+	}
+}
+
+/* the start is over: the notice goes, and so does the start marker */
+static void
+start_over(void)
+{
+
+	amiga_rump_logtee(NULL);
+	notice_close(&startnotice);
+	guard_end("Stack");
+}
+
 static void
 stack_main(void)
 {
 	BPTR log;
 	int rv;
+	struct MsgPort *tport;
+	struct timerequest *treq = NULL;
+	ULONG tmask = 0;
 
 	((struct Process *)SysBase->ThisTask)->pr_WindowPtr = (APTR)-1;
 	/* empty the log, then keep it open with a shared lock so it can be
@@ -81,6 +124,9 @@ stack_main(void)
 		log = Open((CONST_STRPTR)logpath, MODE_READWRITE);
 	}
 	amiga_rump_loginit((long)log);
+	notice_open(&startnotice, "AmiBSDNet is starting (this window closes "
+	    "by itself)", 0);
+	amiga_rump_logtee(notice_tee);
 	/* (with DEBUG only, as for the rump threads: the report ends in
 	   rumpuser_exit, which would leave this process hanging; without it
 	   a crash gets the system's own Software Failure requester) */
@@ -88,7 +134,7 @@ stack_main(void)
 		crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.8 starting\n");
+	P("AmiBSDNet 0.8.1 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
@@ -109,12 +155,44 @@ stack_main(void)
 	startup_result = 0;
 	wake_launcher();
 
+	/* the end of the start, in a minute */
+	if ((tport = CreateMsgPort()) != NULL &&
+	    (treq = (struct timerequest *)CreateIORequest(tport,
+	    sizeof(*treq))) != NULL &&
+	    OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_VBLANK,
+	    (struct IORequest *)treq, 0) == 0) {
+		treq->tr_node.io_Command = TR_ADDREQUEST;
+		treq->tr_time.tv_secs = START_SECS;
+		treq->tr_time.tv_micro = 0;
+		SendIO((struct IORequest *)treq);
+		tmask = 1UL << tport->mp_SigBit;
+	} else {
+		if (treq)
+			DeleteIORequest((struct IORequest *)treq);
+		if (tport)
+			DeleteMsgPort(tport);
+		treq = NULL;
+	}
+
 	if (stack_configure_from(cfgpath, FALLBACK_CONFIG) != 0)
 		P("AmiBSDNet: no configuration found, loopback only\n");
+	if (treq == NULL)
+		start_over();	/* (no timer: no notice for long) */
 
 	for (;;) {
 		ULONG s = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D |
-		    SIGBREAKF_CTRL_E | control_sigmask());
+		    SIGBREAKF_CTRL_E | control_sigmask() | tmask);
+
+		if (tmask && (s & tmask) && CheckIO((struct IORequest *)treq)) {
+			WaitIO((struct IORequest *)treq);
+			CloseDevice((struct IORequest *)treq);
+			DeleteIORequest((struct IORequest *)treq);
+			DeleteMsgPort(tport);
+			treq = NULL;
+			tmask = 0;
+			P("AmiBSDNet: started\n");
+			start_over();
+		}
 
 		if (s & SIGBREAKF_CTRL_E)
 			stack_link_changed();
@@ -136,6 +214,11 @@ fail:
 	startup_result = 20;
 	trial_failed();		/* a trial switch goes back at once */
 	wake_launcher();
+	/* (it did not freeze: the next start is a normal one at once; the
+	   notice shows why for a minute) */
+	guard_end("Stack");
+	Delay(START_SECS * 50);
+	start_over();
 	/* kernel threads may exist: never return into unloaded code */
 	for (;;)
 		Wait(0x80000000UL);
@@ -237,7 +320,15 @@ _start(void)
 		int ours, other;
 
 		Forbid();
-		ours = FindPort((CONST_STRPTR)"AmiBSDNet") != NULL;
+		/* (the process too: its port comes only after the kernel
+		   started, a few seconds later) */
+		{
+			struct Task *st = FindTask((CONST_STRPTR)"AmiBSDNet");
+
+			/* (not this one: from Workbench it has the name too) */
+			ours = FindPort((CONST_STRPTR)"AmiBSDNet") != NULL ||
+			    (st != NULL && st != SysBase->ThisTask);
+		}
 		other = !ours && FindName(&SysBase->LibList,
 		    (CONST_STRPTR)"bsdsocket.library") != NULL;
 		Permit();
@@ -254,6 +345,24 @@ _start(void)
 			}
 			return RETURN_WARN;	/* never abort S:User-Startup */
 		}
+	}
+
+	/*
+	 * The last start never finished - the Amiga froze while AmiBSDNet
+	 * was starting (or was switched off): not this time, and say so.
+	 * The next boot starts it normally again.
+	 */
+	if (guard_begin("Stack")) {
+		guard_skipped("Stack");
+		if (out)
+			PutStr((CONST_STRPTR)"AmiBSDNet: not started this time: "
+			    "its last start never finished (the Amiga froze?)\n");
+		CloseLibrary((struct Library *)DOSBase);
+		if (wbmsg) {
+			Forbid();
+			ReplyMsg(wbmsg);
+		}
+		return RETURN_WARN;
 	}
 
 	for (void (**c)(void) = __init_array_start; c < __init_array_end; c++)
@@ -273,6 +382,7 @@ _start(void)
 		PutStr((CONST_STRPTR)"AmiBSDNet: going back to the previous "
 		    "TCP/IP stack did not finish; starting AmiBSDNet\n");
 	if (t < 0) {
+		guard_end("Stack");
 		if (out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: the switch to AmiBSDNet "
 			    "did not work; going back to the previous TCP/IP "
@@ -288,9 +398,10 @@ _start(void)
 	launcher = SysBase->ThisTask;
 	if (CreateNewProcTags(NP_Entry, (ULONG)stack_main,
 	    NP_Name, (ULONG)"AmiBSDNet", NP_StackSize, 256 * 1024,
-	    NP_Priority, 1, TAG_DONE) == NULL)
+	    NP_Priority, 1, TAG_DONE) == NULL) {
+		guard_end("Stack");
 		trial_failed();
-	else {
+	} else {
 		/* the kernel starts in seconds; never hold up the boot for long */
 		int ticks;
 
