@@ -45,9 +45,11 @@ rump_amibsdnet_fd_export(int fd, int move, void **fpp)
 	mutex_enter(&fp->f_lock);
 	fp->f_count++;
 	mutex_exit(&fp->f_lock);
-	fd_putfile(fd);
+	/* fd_close() drops the fd_getfile() reference itself */
 	if (move)
 		fd_close(fd);
+	else
+		fd_putfile(fd);
 	*fpp = fp;
 	rump_unschedule();
 	return 0;
@@ -61,7 +63,10 @@ rump_amibsdnet_fd_import(void *cookie, int *fdp)
 	int fd, error;
 
 	rump_schedule();
-	if ((error = fd_alloc(curproc, 0, &fd)) == 0) {
+	/* as fd_allocfile(): grow the table when it is full */
+	while ((error = fd_alloc(curproc, 0, &fd)) == ENOSPC)
+		fd_tryexpand(curproc);
+	if (error == 0) {
 		fd_affix(curproc, fp, fd);
 		*fdp = fd;
 	}

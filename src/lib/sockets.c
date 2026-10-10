@@ -241,15 +241,21 @@ static LONG
 srv_recvfrom(struct SocketBase *sb, struct recvfrom_args *a)
 {
 	LONG n, e, done = 0;
+	int waitall;
 
 	CHECKFD(a->fd);
+	/* MSG_WAITALL: emulated here (the kernel would sleep in the
+	   kernel), for byte streams only; a datagram is one record, and
+	   peeking again would return the same bytes */
+	waitall = (a->flags & NB_MSG_WAITALL) && !(a->flags & MSG_PEEK) &&
+	    sb->fds[a->fd].type == SOCK_STREAM;
 	for (;;) {
 		n = rump___sysimpl_recvfrom(a->fd, (UBYTE *)a->buf + done,
 		    a->len - done, a->flags & ~(MSG_DONTWAIT | NB_MSG_WAITALL),
 		    a->from, a->fromlen);
 		if (n > 0) {
 			done += n;
-			if (!(a->flags & NB_MSG_WAITALL) || done >= a->len)
+			if (!waitall || done >= a->len)
 				return done;
 			continue;
 		}
@@ -283,23 +289,61 @@ sb_recv(struct SocketBase *sb, LONG sock, APTR buf, LONG len, LONG flags)
 
 struct msg_args { LONG fd; struct msghdr *msg; LONG flags; };
 
+#define	SENDMSG_IOV	16
+
+/*
+ * The kernel socket is non-blocking, so on a byte stream it may take only
+ * part of the data; a blocking sendmsg() sends it all (as srv_sendto()),
+ * going on with a copy of the rest of the iovecs.
+ */
 static LONG
 srv_sendmsg(struct SocketBase *sb, struct msg_args *a)
 {
-	LONG n, e;
+	struct iovec iov[SENDMSG_IOV];
+	struct msghdr m;
+	LONG n, e, done = 0, total = 0, i, k;
+	int stream;
 
 	CHECKFD(a->fd);
+	m = *a->msg;
+	stream = sb->fds[a->fd].type == SOCK_STREAM &&
+	    blocking(sb, a->fd, a->flags) && m.msg_iovlen > 0 &&
+	    m.msg_iovlen <= SENDMSG_IOV;
+	if (stream) {
+		for (i = 0; i < m.msg_iovlen; i++) {
+			iov[i] = m.msg_iov[i];
+			total += iov[i].iov_len;
+		}
+		m.msg_iov = iov;
+	}
 	for (;;) {
-		n = rump___sysimpl_sendmsg(a->fd, a->msg,
+		n = rump___sysimpl_sendmsg(a->fd, &m,
 		    (a->flags & ~MSG_DONTWAIT) | NB_MSG_NOSIGNAL);
-		if (n >= 0)
-			return n;
+		if (n >= 0) {
+			done += n;
+			if (!stream || done >= total)
+				return done;
+			/* skip what was sent; ancillary data went with it */
+			for (k = 0; k < m.msg_iovlen && n >= (LONG)m.msg_iov[k].iov_len;
+			    k++)
+				n -= m.msg_iov[k].iov_len;
+			m.msg_iov += k;
+			m.msg_iovlen -= k;
+			if (m.msg_iovlen > 0) {
+				m.msg_iov[0].iov_base =
+				    (UBYTE *)m.msg_iov[0].iov_base + n;
+				m.msg_iov[0].iov_len -= n;
+			}
+			m.msg_control = NULL;
+			m.msg_controllen = 0;
+			continue;
+		}
 		e = sb_rumperr();
 		if (e != EWOULDBLOCK || !blocking(sb, a->fd, a->flags))
-			return sb_fail(sb, e);
+			return done ? done : sb_fail(sb, e);
 		if ((e = sb_wait_fd(sb, a->fd, WAIT_WRITE,
 		    sb->fds[a->fd].sndtimeo_ms)) != 0)
-			return sb_fail(sb, e);
+			return done ? done : sb_fail(sb, e);
 	}
 }
 
@@ -310,8 +354,10 @@ srv_recvmsg(struct SocketBase *sb, struct msg_args *a)
 
 	CHECKFD(a->fd);
 	for (;;) {
+		/* not MSG_WAITALL: the kernel would sleep in the kernel, deaf
+		   to non-blocking mode, timeouts and Ctrl-C */
 		n = rump___sysimpl_recvmsg(a->fd, a->msg,
-		    a->flags & ~MSG_DONTWAIT);
+		    a->flags & ~(MSG_DONTWAIT | NB_MSG_WAITALL));
 		if (n >= 0)
 			return n;
 		e = sb_rumperr();
@@ -369,7 +415,12 @@ static LONG
 tv_to_ms(const struct __timeval *tv)
 {
 
-	return (LONG)(tv->tv_secs * 1000 + (tv->tv_micro + 999) / 1000);
+	ULONG secs = tv->tv_secs, ms = (tv->tv_micro + 999) / 1000;
+
+	/* no overflow: a huge timeout is the longest one */
+	if (secs >= 0x7fffffffUL / 1000 - 1000)
+		return 0x7fffffff;
+	return (LONG)(secs * 1000 + ms);
 }
 
 static LONG
@@ -541,6 +592,17 @@ srv_dup2(struct SocketBase *sb, struct listen_args *a)
 	else {
 		if (a->backlog >= sb->dtablesize)
 			return sb_fail(sb, EBADF);
+		if (a->backlog == sb->wakefd) {
+			/* the base's own wake socket is there (usually fd 0):
+			   move it out of the way, above the table */
+			LONG nw = rump___sysimpl_fcntl(sb->wakefd,
+			    0 /* F_DUPFD */, SB_MAXFD);
+
+			if (nw < 0)
+				return sb_fail(sb, EBADF);
+			rump___sysimpl_close(sb->wakefd);
+			sb->wakefd = nw;
+		}
 		fd = rump___sysimpl_dup2(a->fd, a->backlog);
 	}
 	if (fd < 0)
@@ -619,6 +681,11 @@ srv_select(struct SocketBase *sb, struct select_args *a)
 
 	timeout = a->tv ? tv_to_ms(a->tv) : -1;
 	for (;;) {
+		/* aborted before the call started (its wake was drained) */
+		if (sb->abortseq == sb->callseq) {
+			zero_sets(a);
+			return sb_fail(sb, EINTR);
+		}
 		n = rump___sysimpl_poll(pfd, np + 1, timeout);
 		if (n < 0)
 			return rumpfail(sb);

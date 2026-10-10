@@ -182,6 +182,11 @@ _start(void)
 				    "AmiBSDNet is already running\n" :
 				    "AmiBSDNet: another TCP/IP stack is running "
 				    "(bsdsocket.library is in use); not started\n"));
+			CloseLibrary((struct Library *)DOSBase);
+			if (wbmsg) {
+				Forbid();
+				ReplyMsg(wbmsg);
+			}
 			return RETURN_WARN;	/* never abort S:User-Startup */
 		}
 	}

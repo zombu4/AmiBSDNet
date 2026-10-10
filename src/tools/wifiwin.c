@@ -287,6 +287,9 @@ scan_proc(void)
 				CopyMem(&t, &job.nets[b + 1], sizeof(t));
 			}
 	job.result = rv;
+	/* under Forbid(), which lasts until this process is gone: the
+	   program may be unloaded as soon as the state says "done" */
+	Forbid();
 	job.state = 2;
 }
 
@@ -475,7 +478,10 @@ do_connect(const struct NetCtrlIface *ifc, int sel)
 		return;
 	}
 	set_status("Restarting WirelessManager...");
-	wm_stop();
+	if (wm_stop() != 0) {
+		set_status("WirelessManager does not stop; try again");
+		return;
+	}
 	if (!wm_installed() || wm_start(ifc->device, ifc->unit) != 0) {
 		set_status("C:WirelessManager is missing");
 		return;

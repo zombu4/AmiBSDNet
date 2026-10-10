@@ -128,6 +128,37 @@ test_tcp(void)
 	check("WaitSelect() returns on a user signal",
 	    n == 0 && sigs == SIGBREAKF_CTRL_E);
 
+	/* a Ctrl-C during a call that completes is not lost: the program
+	   still sees it afterwards */
+	SetSignal(SIGBREAKF_CTRL_C, SIGBREAKF_CTRL_C);
+	n = send(s, (APTR)msg, sizeof(msg), 0);
+	check("Ctrl-C during a completed send() is kept",
+	    n == sizeof(msg) &&
+	    (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0);
+	for (got = 0; got < (LONG)sizeof(msg); got += n)
+		if ((n = recv(s, buf + got, sizeof(buf) - got, 0)) <= 0)
+			break;
+
+	/* passing a socket on: ReleaseSocket() and ObtainSocket() */
+	{
+		LONG id = ReleaseSocket(s, 4711), s2;
+
+		check("ReleaseSocket()", id == 4711);
+		s2 = ObtainSocket(4711, AF_INET, SOCK_STREAM, 0);
+		check("ObtainSocket()", s2 >= 0);
+		if (s2 >= 0) {
+			s = s2;
+			n = send(s, (APTR)msg, sizeof(msg), 0);
+			for (got = 0; n > 0 && got < (LONG)sizeof(msg); got += n)
+				if ((n = recv(s, buf + got, sizeof(buf) - got,
+				    0)) <= 0)
+					break;
+			check("obtained socket still echoes",
+			    got == sizeof(msg) &&
+			    memcmp(buf, msg, sizeof(msg)) == 0);
+		}
+	}
+
 	check("CloseSocket()", CloseSocket(s) == 0);
 }
 

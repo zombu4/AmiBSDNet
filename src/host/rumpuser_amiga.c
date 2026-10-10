@@ -351,15 +351,32 @@ amiga_rump_vprintf(const char *fmt, va_list ap)
 }
 
 /*
- * Format with Amiga-style arguments: a packed array of LONGs (RawDoFmt /
- * vsyslog() convention).  %s %c %d %i %u %x %p %%, 'l' accepted.
+ * Format with Amiga-style arguments: a packed array of LONGs (vsyslog()
+ * convention).  %s %c %d %i %u %x %X %o %p %%, with the flags - 0 + space
+ * #, a width and a precision (also '*') and the h/l/ll/z modifiers, so
+ * that every conversion takes exactly its arguments: a format the
+ * formatter did not understand must not shift the later ones (a %s would
+ * then read an integer as a pointer).
  */
+#define	NEXTARG()	(args ? *args++ : 0)
+
+static void
+pad_out(int n, char c)
+{
+
+	while (n-- > 0)
+		log_putc_locked(c);
+}
+
 void
 amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
 {
 	ObtainSemaphore(&logsem);
 	for (; *fmt; fmt++) {
 		const char *str;
+		char tmp[16];
+		int left = 0, zero = 0, width = 0, prec = -1, len, i;
+		ULONG u;
 		LONG v;
 
 		if (*fmt != '%') {
@@ -367,41 +384,117 @@ amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
 			continue;
 		}
 		fmt++;
-		while (*fmt == 'l')
+		for (;; fmt++) {
+			if (*fmt == '-')
+				left = 1;
+			else if (*fmt == '0')
+				zero = 1;
+			else if (*fmt != '+' && *fmt != ' ' && *fmt != '#')
+				break;
+		}
+		if (*fmt == '*') {
+			width = (int)NEXTARG();
+			if (width < 0)
+				left = 1, width = -width;
 			fmt++;
+		} else
+			while (*fmt >= '0' && *fmt <= '9')
+				width = width * 10 + (*fmt++ - '0');
+		if (*fmt == '.') {
+			fmt++;
+			prec = 0;
+			if (*fmt == '*') {
+				prec = (int)NEXTARG();
+				fmt++;
+			} else
+				while (*fmt >= '0' && *fmt <= '9')
+					prec = prec * 10 + (*fmt++ - '0');
+		}
+		while (*fmt == 'l' || *fmt == 'h' || *fmt == 'z')
+			fmt++;
+		if (width > 200)
+			width = 200;
 		switch (*fmt) {
 		case 'd':
 		case 'i':
-			v = args ? *args++ : 0;
-			fmt_num(v < 0 ? -(unsigned long long)v : v, 10, v < 0, 0,
-			    ' ');
-			break;
 		case 'u':
 		case 'x':
+		case 'X':
+		case 'o':
 		case 'p':
-			v = args ? *args++ : 0;
-			fmt_num((ULONG)v, *fmt == 'u' ? 10 : 16, 0, 0, ' ');
+			v = NEXTARG();
+			if ((*fmt == 'd' || *fmt == 'i') && v < 0) {
+				u = -(ULONG)v;
+				tmp[0] = '-';
+				len = 1;
+			} else {
+				u = (ULONG)v;
+				len = 0;
+			}
+			{
+				int base = *fmt == 'o' ? 8 : (*fmt == 'x' ||
+				    *fmt == 'X' || *fmt == 'p') ? 16 : 10;
+				char digits[12];
+				int nd = 0;
+
+				do {
+					digits[nd++] = "0123456789abcdef"[u % base];
+					u /= base;
+				} while (u);
+				while (nd)
+					tmp[len++] = digits[--nd];
+			}
+			if (!left && !zero)
+				pad_out(width - len, ' ');
+			i = 0;
+			if (!left && zero) {
+				if (tmp[0] == '-')
+					log_putc_locked(tmp[i++]);
+				pad_out(width - len, '0');
+			}
+			for (; i < len; i++)
+				log_putc_locked(tmp[i]);
+			if (left)
+				pad_out(width - len, ' ');
 			break;
 		case 'c':
-			log_putc_locked(args ? (int)*args++ : '?');
+			if (!left)
+				pad_out(width - 1, ' ');
+			log_putc_locked((int)NEXTARG());
+			if (left)
+				pad_out(width - 1, ' ');
 			break;
 		case 's':
-			str = args ? (const char *)*args++ : NULL;
+			str = (const char *)NEXTARG();
 			if (str == NULL)
 				str = "(null)";
-			while (*str)
-				log_putc_locked(*str++);
+			for (len = 0; str[len] && (prec < 0 || len < prec); len++)
+				;
+			if (!left)
+				pad_out(width - len, ' ');
+			for (i = 0; i < len; i++)
+				log_putc_locked(str[i]);
+			if (left)
+				pad_out(width - len, ' ');
+			break;
+		case '%':
+			log_putc_locked('%');
 			break;
 		case '\0':
 			fmt--;
 			break;
 		default:
+			/* unknown: printed, and like any conversion it takes
+			   one argument */
+			log_putc_locked('%');
 			log_putc_locked(*fmt);
+			(void)NEXTARG();
 			break;
 		}
 	}
 	ReleaseSemaphore(&logsem);
 }
+#undef	NEXTARG
 
 void
 amiga_rump_printf(const char *fmt, ...)
@@ -955,6 +1048,15 @@ amiga_host_thread_join(void *ptcookie)
 	}
 	Permit();
 	FreeVec(t);
+}
+
+/* whether a joinable thread has ended (also without running its
+   function, if its setup failed) */
+int
+amiga_host_thread_done(void *ptcookie)
+{
+
+	return ((volatile struct amthread *)ptcookie)->done;
 }
 
 void

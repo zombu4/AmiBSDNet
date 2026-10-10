@@ -70,7 +70,7 @@ run_fallback(void)
 			    (UBYTE *)"AmiBSDNet", (UBYTE *)"AmiBSDNet could not "
 			    "connect, and C:NetCtrl is missing to go back\nto the "
 			    "previous TCP/IP stack. Copy S:User-Startup."
-			    "amibsdnet-backup\nto S:User-Startup and reboot.",
+			    "amibsdnet-bak\nto S:User-Startup and reboot.",
 			    (UBYTE *)"OK" };
 
 			EasyRequestArgs(NULL, &es, NULL, NULL);
@@ -109,10 +109,18 @@ trial_watch(void)
 int
 trial_begin(void)
 {
+	struct Process *me = (struct Process *)SysBase->ThisTask;
+	APTR oldwin = me->pr_WindowPtr;
 	char v[8];
+	LONG n;
 
-	if (GetVar((CONST_STRPTR)TRIAL_VAR, (STRPTR)v, sizeof(v),
-	    GVF_GLOBAL_ONLY) < 0)
+	/* no "please insert volume ENV" requester on a system without
+	   ENV: (a boot without Workbench): then there is no trial */
+	me->pr_WindowPtr = (APTR)-1;
+	n = GetVar((CONST_STRPTR)TRIAL_VAR, (STRPTR)v, sizeof(v),
+	    GVF_GLOBAL_ONLY);
+	me->pr_WindowPtr = oldwin;
+	if (n < 0)
 		return 0;
 	if (v[0] != '1') {
 		/* a trial boot ended without a connection */

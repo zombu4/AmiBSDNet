@@ -71,7 +71,7 @@ struct dhcpctx {
 
 	/* filled by the tap (on the I/O process) */
 	volatile int have_reply;
-	UBYTE reply[600];
+	UBYTE reply[1500];		/* up to a full Ethernet frame */
 	volatile ULONG replylen;
 };
 
@@ -314,43 +314,55 @@ fmt_ip(char *buf, ULONG a)
 	buf[n] = '\0';
 }
 
+/* the router and name servers of a lease (also when renewed) */
 static void
-apply_lease(struct dhcpctx *c, const struct lease *l)
+update_lease(struct dhcpctx *c, const struct lease *l)
 {
 	struct iface *ifc = c->ifc;
-	char a[16], g[16];
 	int i;
 
-	if (rump_amibsdnet_ifaddr4(ifc->name, l->addr, l->mask) != 0) {
-		P("%s: DHCP address rejected (errno %d)\n", ifc->name,
-		    amiga_rump_errno());
-		return;
-	}
-	ifc->addr = l->addr;
-	ifc->mask = l->mask;
 	ifc->gateway = l->router;
 	for (i = 0; i < l->ndns && i < 4; i++)
 		ifc->dns[i] = l->dns[i];
 	ifc->ndns = i;
-	ifc->up = 1;
 	stack_update_route();
 	stack_update_dns();
 	if (l->domain[0])
 		netdb_set_domain(l->domain);
+}
+
+/* returns 0 if the kernel took the address */
+static int
+apply_lease(struct dhcpctx *c, const struct lease *l)
+{
+	struct iface *ifc = c->ifc;
+	char a[16], g[16];
+
+	if (rump_amibsdnet_ifaddr4(ifc->name, l->addr, l->mask) != 0) {
+		P("%s: DHCP address rejected (errno %d)\n", ifc->name,
+		    amiga_rump_errno());
+		return -1;
+	}
+	ifc->addr = l->addr;
+	ifc->mask = l->mask;
+	ifc->up = 1;
+	update_lease(c, l);
 	fmt_ip(a, l->addr);
 	fmt_ip(g, l->router);
 	P("%s: DHCP lease %s, gateway %s, %ld DNS, %lu s\n", ifc->name, a, g,
 	    (long)l->ndns, l->leasetime);
+	return 0;
 }
 
-/* one exchange round (a few seconds); returns 0 on success */
+/* one exchange round (a few seconds); returns 0 on success, 1 if the
+   server refused (NAK) the address it was asked for, -1 if none answered */
 static int
 dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 {
 	struct EClockVal ev;
 	struct lease offer;
 	ULONG timeout = 2000;
-	int attempt, type;
+	int attempt, type, nak = 0;
 
 	for (attempt = 0; attempt < 3; attempt++, timeout *= 2) {
 		ReadEClock(&ev);
@@ -372,8 +384,10 @@ dhcp_acquire(struct dhcpctx *c, struct lease *l, const struct lease *prev)
 				l->server = offer.server;
 			return 0;
 		}
+		if (type == DHCPNAK && prev && attempt == 0)
+			nak = 1;	/* the old address: then DISCOVER */
 	}
-	return -1;
+	return nak ? 1 : -1;
 }
 
 /* remove the leased address and route from the kernel */
@@ -396,7 +410,39 @@ struct dhcpclient {
 	struct dhcpctx c;
 	struct lease l;
 	ULONG generation;
+	ULONG renew, expire;		/* absolute (now_s()) times */
 };
+
+/* seconds since boot (monotonic) */
+static ULONG
+now_s(void)
+{
+	int64_t sec;
+	long nsec;
+
+	if (rumpuser_clock_gettime(RUMPUSER_CLOCK_ABSMONO, &sec, &nsec) != 0)
+		return 0;
+	return (ULONG)sec;
+}
+
+/* the renewal (T1) and expiry times of a lease obtained at "now"; an
+   infinite or huge lease is renewed once a day at least */
+static void
+set_times(struct dhcpclient *d, ULONG now)
+{
+	ULONG lease = d->l.leasetime, t1 = d->l.t1;
+
+	if (lease < 20)
+		lease = 20;		/* 0 or 1 s: no busy loop */
+	if (lease > 365 * 86400UL)	/* also "infinite" (0xffffffff) */
+		lease = 365 * 86400UL;
+	if (t1 == 0 || t1 >= lease)
+		t1 = lease / 2;
+	if (t1 > 86400UL)
+		t1 = 86400UL;
+	d->renew = now + t1;
+	d->expire = now + lease;
+}
 
 /*
  * Sleep up to ms, waking early for a link/admin change of the interface
@@ -435,8 +481,8 @@ dhcp_thread(void *arg)
 	struct dhcpctx *c = &d->c;
 	struct iface *ifc = c->ifc;
 	struct lease l;
-	ULONG backoff = 4000, waited;
-	int bound = 0, have_prev = 0, quiet = 0;
+	ULONG backoff = 4000, waited, now;
+	int bound = 0, have_prev = 0, quiet = 0, r;
 
 	c->task = SysBase->ThisTask;
 	while (d->generation == config_generation) {
@@ -467,12 +513,18 @@ dhcp_thread(void *arg)
 			sana_set_tap(c->viu, dhcp_tap, c);
 			if (dhcp_acquire(c, &l, have_prev ? &d->l : NULL) == 0) {
 				sana_set_tap(c->viu, NULL, NULL);
-				apply_lease(c, &l);
 				d->l = l;
 				have_prev = 1;
-				bound = 1;
 				quiet = 0;
 				backoff = 4000;
+				if (apply_lease(c, &l) == 0) {
+					bound = 1;
+					set_times(d, now_s());
+				} else {
+					/* the kernel refused it: ask again later */
+					have_prev = 0;
+					dhcp_pause(d, 10000);
+				}
 				continue;
 			}
 			sana_set_tap(c->viu, NULL, NULL);
@@ -485,29 +537,50 @@ dhcp_thread(void *arg)
 				backoff *= 2;
 			continue;
 		}
-		/* bound: sleep until T1, then renew */
-		waited = 0;
-		while (waited < d->l.t1 && !dhcp_pause(d, 1000))
-			waited++;
-		if (waited < d->l.t1)
-			continue;	/* an event: re-evaluate */
-		sana_set_tap(c->viu, dhcp_tap, c);
-		if (dhcp_acquire(c, &l, &d->l) == 0) {
-			if (l.addr != d->l.addr) {
-				drop_lease(c);
-				apply_lease(c, &l);
-			}
-			d->l = l;
-		} else {
-			P("%s: DHCP renewal failed\n", ifc->name);
-			/* past the lease time the address is no longer ours */
-			if (d->l.leasetime <= d->l.t1 + 60) {
-				drop_lease(c);
-				bound = 0;
-			} else
-				d->l.leasetime -= d->l.t1, d->l.t1 = 60;
+		/*
+		 * bound: renew from T1 on (retrying at most once a minute)
+		 * until the lease expires.  The times are absolute, so the
+		 * time spent in exchanges and wake-ups by link events or
+		 * NetCtrl ONLINE do not stretch the lease.
+		 */
+		now = now_s();
+		if (now >= d->expire) {
+			P("%s: DHCP lease expired\n", ifc->name);
+			drop_lease(c);
+			bound = 0;
+			have_prev = 0;
+			continue;
 		}
+		if (now < d->renew) {
+			waited = d->renew - now;
+			dhcp_pause(d, (waited > 60 ? 60 : waited) * 1000);
+			continue;	/* re-evaluate (also after an event) */
+		}
+		sana_set_tap(c->viu, dhcp_tap, c);
+		r = dhcp_acquire(c, &l, &d->l);
 		sana_set_tap(c->viu, NULL, NULL);
+		if (r == 0) {
+			if (l.addr != d->l.addr || l.mask != d->l.mask) {
+				drop_lease(c);
+				if (apply_lease(c, &l) != 0) {
+					bound = 0;
+					have_prev = 0;
+					continue;
+				}
+			} else
+				update_lease(c, &l);	/* router, DNS */
+			d->l = l;
+			set_times(d, now_s());
+		} else if (r == 1) {
+			/* NAK: the address is no longer ours */
+			P("%s: DHCP server refused the address\n", ifc->name);
+			drop_lease(c);
+			bound = 0;
+			have_prev = 0;
+		} else {
+			P("%s: DHCP renewal failed, retrying\n", ifc->name);
+			d->renew = now_s() + 60;
+		}
 	}
 	if (bound)
 		drop_lease(c);
