@@ -537,8 +537,20 @@ edit_startup(const char *name, int mode)
 			if ((mark[line] = starts_nocase(p, MARK)) != 0)
 				changed++;
 		}
-	} else
+	} else {
 		changed = mark_lines(buf, len, mark, MAXLINES);
+		/* removing: also the lines an earlier switch disabled */
+		if (mode == 1)
+			for (p = buf, line = 0; p < buf + len &&
+			    line < MAXLINES; p = e + 1, line++) {
+				for (e = p; e < buf + len && *e != '\n'; e++)
+					;
+				if (!mark[line] && starts_nocase(p, MARK)) {
+					mark[line] = 1;
+					changed++;
+				}
+			}
+	}
 	if (!changed) {
 		FreeVec(mark);
 		FreeVec(buf);
@@ -788,6 +800,10 @@ otherstacks_fallback(char *msg, int size)
 		 * there is a network (the other stack could not come back,
 		 * or AmiBSDNet could not be taken out of the boot).
 		 */
+		/* what the restore put back anyway (a WBStartup item, the
+		   library) goes again: it would only fight AmiBSDNet */
+		if (!back)
+			otherstacks_apply(OTHERS_DISABLE);
 		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
 		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 		loud(old);

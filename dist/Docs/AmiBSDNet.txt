@@ -41,8 +41,10 @@ or is reset before AmiBSDNet has connected) also counts as failed, and
 the next boot goes back by itself. So after switching, leave the
 machine running until the status icon shows an address.
 "NetCtrl FALLBACK" also goes back by hand at any time; once you are
-happy with AmiBSDNet, "NetCtrl REMOVEOTHERS" deletes the other stack's
-startup entries for good.
+happy with AmiBSDNet (after the trial), "NetCtrl REMOVEOTHERS" deletes
+the other stack's startup lines for good (also the disabled ones); its
+parked files stay in SYS:Storage/AmiBSDNet-Disabled until you delete
+that drawer.
 
 The startup files are saved as S:<name>.amibsdnet-bak before the
 first change. Afterwards the installer checks again and tells you if
