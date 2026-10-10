@@ -494,11 +494,23 @@ sana_iothread(void *arg)
 	/* configure the interface (fails harmlessly if already configured) */
 	base->ios2_Req.io_Command = S2_CONFIGINTERFACE;
 	CopyMem(viu->mac, base->ios2_SrcAddr, ETHER_ADDR_LEN);
+	/*
+	 * A driver that cannot configure itself - its hardware is missing or
+	 * does not answer (genet.device without a working GENET/PHY says
+	 * S2ERR_SOFTWARE) - gets nothing more: S2_ONLINE on such a unit
+	 * froze a PiStorm.  Only "configured already" (BAD_STATE) and "not
+	 * needed" (NOT_SUPPORTED, no such command) carry on.
+	 */
 	if (DoIO((struct IORequest *)base) != 0 &&
-	    base->ios2_Req.io_Error != S2ERR_BAD_STATE)
-		amiga_rump_printf("sana: %s: S2_CONFIGINTERFACE failed (error "
-		    "%d, %ld)\n", viu->devname, base->ios2_Req.io_Error,
+	    base->ios2_Req.io_Error != S2ERR_BAD_STATE &&
+	    base->ios2_Req.io_Error != S2ERR_NOT_SUPPORTED &&
+	    base->ios2_Req.io_Error != IOERR_NOCMD) {
+		amiga_rump_printf("sana: %s: cannot be configured (error %d, "
+		    "%ld): its hardware is missing or not working; not used\n",
+		    viu->devname, base->ios2_Req.io_Error,
 		    (long)base->ios2_WireError);
+		goto fail;
+	}
 	if (is_zero_mac(viu->mac)) {
 		base->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
 		if (DoIO((struct IORequest *)base) == 0)

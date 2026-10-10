@@ -151,7 +151,7 @@ status_report(struct NetCtrlMsg *m)
 	ULONG ns[4], rx, tx, rxd, txd;
 	int i, j, n;
 
-	tb_s(&b, "AmiBSDNet 0.8.1 - NetBSD 11 TCP/IP\n\n");
+	tb_s(&b, "AmiBSDNet 0.8.2 - NetBSD 11 TCP/IP\n\n");
 	for (i = 0, n = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 		struct virtif_user *v;
@@ -166,7 +166,7 @@ status_report(struct NetCtrlMsg *m)
 		tb_s(&b, " unit ");
 		tb_u(&b, ifc->unit);
 		tb_s(&b, ifc->unverified ? "  DRIVER FAILED THE CHECK" :
-		    !ifc->attached ? "  DRIVER NOT FOUND" :
+		    !ifc->attached ? "  DRIVER NOT USED (see the log)" :
 		    ifc->up ? "  UP" : !ifc->admin ? "  OFFLINE" :
 		    !ifc->link ? "  NO LINK" : ifc->dhcp ? "  WAITING FOR DHCP" :
 		    "  DOWN");

@@ -1,4 +1,4 @@
-AmiBSDNet 0.8.1
+AmiBSDNet 0.8.2
 ===============
 
 AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
@@ -150,8 +150,11 @@ Close; it gives up by itself after 30 seconds.
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
 the network; DHCP starts as soon as it has. WirelessManager's messages
 are in T:WirelessManager.log (more of them after "SetEnv AmiBSDNet/Debug
-1" and a reboot). If the status window says "DRIVER NOT FOUND", the
-driver named in the settings is not in DEVS:Networks.
+1" and a reboot). If the status window says "DRIVER NOT USED", the
+driver named in the settings is not in DEVS:Networks, or it could not
+set up its hardware (T:AmiBSDNet.log says which). A driver that cannot
+set up its hardware - genet.device on a Pi without working Ethernet,
+for one - gets no further commands.
 
 PaulaNET
 --------

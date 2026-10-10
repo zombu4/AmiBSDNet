@@ -6,6 +6,7 @@
  */
 #include <exec/types.h>
 #include <exec/memory.h>
+#include <exec/errors.h>
 #include <exec/lists.h>
 #include <exec/nodes.h>
 #include <dos/dos.h>
@@ -40,6 +41,8 @@ struct IOSana2Req {
 	APTR	ios2_BufferManagement;
 };
 #define	S2_GETNETWORKS		0xc011
+#define	S2ERR_BAD_STATE		4	/* configured already */
+#define	S2ERR_NOT_SUPPORTED	8
 #define	S2INFO_SSID		(TAG_USER + 0)
 #define	S2INFO_Signal		(TAG_USER + 8)
 #define	S2INFO_InfoElements	(TAG_USER + 11)
@@ -198,6 +201,7 @@ static struct {
 	LONG err, werr;			/* io_Error, ios2_WireError */
 	int opened;			/* it opened at all */
 	int nomem;			/* no memory for the results */
+	LONG cfgerr;			/* S2_CONFIGINTERFACE failed so */
 	volatile int scanning;		/* configured: the scan itself runs */
 } job;
 
@@ -238,11 +242,21 @@ scan_proc(void)
 						CopyMem(req->ios2_DstAddr,
 						    req->ios2_SrcAddr, 6);
 					req->ios2_Req.io_Command = S2_CONFIGINTERFACE;
-					DoIO((struct IORequest *)req);
+					if (DoIO((struct IORequest *)req) != 0 &&
+					    req->ios2_Req.io_Error != S2ERR_BAD_STATE &&
+					    req->ios2_Req.io_Error != S2ERR_NOT_SUPPORTED &&
+					    req->ios2_Req.io_Error != IOERR_NOCMD) {
+						/* (its hardware does not answer:
+						   nothing more for it) */
+						job.cfgerr = req->ios2_Req.io_Error;
+						job.werr = req->ios2_WireError;
+					}
 				}
 				job.scanning = 1;
-				if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR, 8192,
-				    2048)) == NULL)
+				if (job.cfgerr)
+					;
+				else if ((pool = CreatePool(MEMF_ANY | MEMF_CLEAR,
+				    8192, 2048)) == NULL)
 					job.nomem = 1;
 				else {
 					req->ios2_Req.io_Command = S2_GETNETWORKS;
@@ -349,6 +363,7 @@ scan(const char *device, ULONG unit, int (*cancelled)(void))
 		scopy(job.device, device, sizeof(job.device));
 		job.unit = unit;
 		job.opened = job.nomem = job.scanning = 0;
+		job.cfgerr = 0;
 		job.state = 1;
 		/* (the driver's code runs on this stack: plenty) */
 		if (CreateNewProcTags(NP_Entry, (ULONG)scan_proc,
@@ -509,6 +524,13 @@ do_scan(const struct NetCtrlIface *ifc)
 		    "the scan in 60 s" : "The driver is still being set up");
 	else if (job.nomem)
 		p = put_str(p, "Not enough memory for a scan");
+	else if (job.cfgerr) {
+		p = put_str(p, "The driver cannot be configured (error ");
+		p = put_num(p, job.cfgerr);
+		p = put_str(p, "/");
+		p = put_num(p, job.werr);
+		p = put_str(p, "): hardware missing?");
+	}
 	else if (!job.opened)
 		p = put_str(p, "The driver does not open");
 	else if (job.err) {

@@ -50,7 +50,7 @@ struct Library *bsdsocket_create(void);
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
 #define	DEFAULT_LOG	"T:AmiBSDNet.log"
-#define	VERSTAG		"\0$VER: AmiBSDNet 0.8.1 (10.10.2026)"
+#define	VERSTAG		"\0$VER: AmiBSDNet 0.8.2 (10.10.2026)"
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
@@ -134,7 +134,7 @@ stack_main(void)
 		crash_install();
 	if (amiga_rump_hostinit(0) != 0)
 		goto fail;
-	P("AmiBSDNet 0.8.1 starting\n");
+	P("AmiBSDNet 0.8.2 starting\n");
 
 	if ((rv = rump_init()) != 0) {
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);

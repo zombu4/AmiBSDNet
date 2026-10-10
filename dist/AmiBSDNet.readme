@@ -2,7 +2,7 @@ Short:        NetBSD 11 TCP/IP stack for AmigaOS (bsdsocket)
 Author:       zombu4 (https://github.com/zombu4)
 Uploader:     zombu4 (https://github.com/zombu4)
 Type:         comm/tcp
-Version:      0.8.1
+Version:      0.8.2
 Architecture: m68k-amigaos >= 3.1.0
 Requires:     68020+, Fast RAM, a SANA-II network driver
 Distribution: NoCD
