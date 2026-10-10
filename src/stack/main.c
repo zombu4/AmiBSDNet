@@ -48,7 +48,19 @@ struct Library *bsdsocket_create(void);
 
 static const char verstag[] __attribute__((used)) = VERSTAG;
 
-static struct Task *launcher;
+static struct Task *volatile launcher;	/* NULL once it stopped waiting */
+
+/* the launcher waits at most two minutes: after that it may be gone (an
+   ended Shell), and must not be signalled */
+static void
+wake_launcher(void)
+{
+
+	Forbid();
+	if (launcher)
+		Signal(launcher, SIGBREAKF_CTRL_F);
+	Permit();
+}
 static volatile int startup_result = -1;
 static char cfgpath[256] = DEFAULT_CONFIG;
 static char logpath[256] = DEFAULT_LOG;
@@ -91,7 +103,7 @@ stack_main(void)
 	 * "NetCtrl WAIT" blocks until the network is up.
 	 */
 	startup_result = 0;
-	Signal(launcher, SIGBREAKF_CTRL_F);
+	wake_launcher();
 
 	if (stack_configure_from(cfgpath, FALLBACK_CONFIG) != 0)
 		P("AmiBSDNet: no configuration found, loopback only\n");
@@ -119,7 +131,7 @@ stack_main(void)
 fail:
 	startup_result = 20;
 	trial_failed();		/* a trial switch goes back at once */
-	Signal(launcher, SIGBREAKF_CTRL_F);
+	wake_launcher();
 	/* kernel threads may exist: never return into unloaded code */
 	for (;;)
 		Wait(0x80000000UL);
@@ -251,6 +263,10 @@ _start(void)
 		for (ticks = 0; ticks < 120 * 50 && !(SetSignal(0, 0) &
 		    SIGBREAKF_CTRL_F); ticks += 10)
 			Delay(10);
+		/* from now on nobody signals this task (it may be gone) */
+		Forbid();
+		launcher = NULL;
+		Permit();
 		SetSignal(0, SIGBREAKF_CTRL_F);
 		if (startup_result < 0 && out)
 			PutStr((CONST_STRPTR)"AmiBSDNet: still starting in the "
