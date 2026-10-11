@@ -445,7 +445,8 @@ show_status(struct MsgPort *appport)
 		EasyRequest(NULL, &es, NULL, (ULONG)
 		    "AmiBSDNet does not answer its control port\n"
 		    "(no reply within 10 seconds).\n\n"
-		    "Its log is T:AmiBSDNet.log. Reboot to start it again.");
+		    "Its log is in SYS:Storage/AmiBSDNet-Logs.\n"
+		    "Reboot to start it again.");
 		return;
 	}
 	if (r != 0) {

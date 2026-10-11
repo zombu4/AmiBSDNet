@@ -8,6 +8,7 @@
 #include <proto/exec.h>
 
 #include <amibsdnet/wm.h>
+#include <amibsdnet/logs.h>
 
 #include "rumpuser_amiga.h"
 #include "stack.h"
@@ -47,7 +48,7 @@ start_wm(struct wmstart *w)
 		started_unit = w->unit;
 		started = 1;
 		P("%s: started WirelessManager for %s (its messages are in "
-		    "T:WirelessManager.log)\n", w->name, w->device);
+		    AMIBSDNET_WMLOG ")\n", w->name, w->device);
 	} else
 		P("%s: could not start WirelessManager\n", w->name);
 }

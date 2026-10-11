@@ -5,7 +5,7 @@ AmiBSDNet contains code from the NetBSD operating system
 (https://www.NetBSD.org), compiled from the NetBSD 11 sources. Their licences
 require that binary copies reproduce the copyright notices, the lists of
 conditions and the disclaimers of that code: they follow, for every NetBSD
-source and header compiled into this AmiBSDNet release (873 files). Each
+source and header compiled into this AmiBSDNet release (874 files). Each
 notice is listed once, followed by the files it comes from.
 
 Acknowledgements

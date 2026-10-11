@@ -1537,8 +1537,8 @@ apply(int save)
 		}
 	}
 	if ((i = stack_cmd(NETCTRL_RECONFIG)) == -2) {
-		status("Saved, but AmiBSDNet does not answer (see "
-		    "T:AmiBSDNet.log); reboot");
+		status("Saved, but AmiBSDNet does not answer (see its log "
+		    "in SYS:Storage/AmiBSDNet-Logs); reboot");
 		return -1;
 	}
 	if (i != 0) {
@@ -1553,8 +1553,8 @@ apply(int save)
 		return 1;
 	}
 	if (status_msg()->result != 0) {
-		status("Saved, but the stack could not apply it (see "
-		    "T:AmiBSDNet.log); try again");
+		status("Saved, but the stack could not apply it (see its "
+		    "log in SYS:Storage/AmiBSDNet-Logs); try again");
 		return -1;
 	}
 	CopyMem(&cur, &orig, sizeof(orig));

@@ -180,7 +180,10 @@ virtif_create(struct ifnet *ifp)
 
 	if ((error = VIFHYPER_CREATE(sc->sc_linkstr,
 	    sc, enaddr, &viu)) != 0) {
-		printf("VIFHYPER_CREATE failed: %d\n", error);
+		/* (ENOENT: the driver did not open or set up, which
+		   src/host/sana2.c has logged already in plain words) */
+		if (error != ENOENT)
+			printf("VIFHYPER_CREATE failed: %d\n", error);
 		return error;
 	}
 

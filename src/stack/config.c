@@ -456,8 +456,8 @@ iface_bringup(struct iface *ifc)
 			if (ifc->optional) {
 				/* a plug-in adapter that is not plugged in */
 				ifc->hidden = 1;
-				P("%s: %s not present (hidden; errno %d)\n",
-				    ifc->name, ifc->device, err);
+				P("%s: %s not used (no adapter)\n",
+				    ifc->name, ifc->device);
 			} else
 				P("%s: cannot attach %s (errno %d)\n", ifc->name,
 				    link, err);

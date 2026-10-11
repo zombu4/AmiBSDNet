@@ -23,7 +23,7 @@ Requirements
   firmware files, gic400.library (in memory, in Emu68's ROM or in LIBS:)
   and the version in genet.device's file; the Emu68 version itself is
   not checked. It leaves a driver alone whose requirements are not met
-  (the installer and T:AmiBSDNet.log say why). WinUAE: uaenet.device; Zorro
+  (the installer and the log say why; see Logs). WinUAE: uaenet.device; Zorro
   cards such as the A2065, Ariadne or X-Surf: their own driver
 - no other TCP/IP stack running at the same time (the installer offers
   to take an installed one out of the boot)
@@ -251,15 +251,16 @@ computed again if the network name changes).
 
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
 the network; DHCP starts as soon as it has. WirelessManager's messages
-are in T:WirelessManager.log. For more of them, type
+are in SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. For more of
+them, type
 
     SetEnv SAVE AmiBSDNet/Debug 1
 
 and reboot (SAVE keeps the variable in ENVARC: across the reboot;
 "UnSetEnv SAVE AmiBSDNet/Debug" switches it off again). If the status
 window says "DRIVER NOT USED", the driver named in the settings is not
-in DEVS:Networks, or it could not set up its hardware (T:AmiBSDNet.log
-says which). A driver that cannot set up its hardware - genet.device on
+in DEVS:Networks, or it could not set up its hardware (the log says
+which; see Logs). A driver that cannot set up its hardware - genet.device on
 a Pi without working Ethernet, for one - gets no further commands.
 
 PaulaNET
@@ -315,11 +316,25 @@ window, Enable / Disable switch the network online / offline. Tool
 types: STACKCMD=<command to start the stack> (default C:AmiBSDNet),
 INTERVAL=<seconds between updates>.
 
+Logs
+----
+AmiBSDNet writes its log to SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log,
+and WirelessManager's messages go to
+SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. Both are on the disk,
+so they are still there after a reboot or a power-off; each start
+begins them anew. They can be read while the stack runs:
+
+    Type SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log
+
+If that drawer cannot be written, the logs go to T:AmiBSDNet.log and
+T:WirelessManager.log instead, which are lost at a reboot.
+
 Commands
 --------
 AmiBSDNet [CONFIG=<file>] [LOG=<file>] [DEBUG]
     Starts the stack. Configuration defaults to
-    ENV:AmiBSDNet/AmiBSDNet.conf, the log to T:AmiBSDNet.log.
+    ENV:AmiBSDNet/AmiBSDNet.conf, the log to
+    SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log (see Logs).
 
 NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|...]
         [TIMEOUT=<s>]

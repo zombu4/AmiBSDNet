@@ -28,6 +28,8 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
+#include <amibsdnet/logs.h>
+
 #include "otherstacks.h"
 
 extern struct ExecBase *SysBase;
@@ -1455,7 +1457,7 @@ otherstacks_uninstall(char *msg, int size)
 	LONG len = 0;
 	APTR old;
 	int rv = 0, kept = 0, changed = 0, parked = 0, i, k, r, pass, icon,
-	    restored, sum, bakkept = 0;
+	    restored, sum, bakkept = 0, logskept = 0;
 	ULONG fsize, fcrc;
 	unsigned long nsize, ncrc;
 	struct MsgPort *port;
@@ -1558,10 +1560,16 @@ otherstacks_uninstall(char *msg, int size)
 		if (delete_one(own_files[i]) < 0 &&
 		    !starts_nocase(own_files[i], "T:"))
 			rv = -1;
+	/* (the logs drawer: the running stack and WirelessManager have
+	   their logs in it open, amibsdnet/logs.h; then it stays, and the
+	   message below says it can be deleted after the reboot) */
 	for (i = 0; own_dirs[i]; i++)
-		if (delete_all(own_dirs[i]) != 0 &&
-		    !starts_nocase(own_dirs[i], "ENV:"))
-			rv = -1;
+		if (delete_all(own_dirs[i]) != 0) {
+			if (eq_nocase(own_dirs[i], AMIBSDNET_LOG_DIR))
+				logskept = 1;
+			else if (!starts_nocase(own_dirs[i], "ENV:"))
+				rv = -1;
+		}
 	/* the parking drawer: AmiBSDNet's own parked parts go; another
 	   stack's parked files only went back if all of it was restored,
 	   and what is still there stays (only empty drawers go) */
@@ -1634,6 +1642,9 @@ otherstacks_uninstall(char *msg, int size)
 	    "not be deleted (in use, protected, or a soft link?).\nReboot "
 	    "and run \"NetCtrl UNINSTALL\" again, or delete them by hand.",
 	    "", size);
+	if (logskept)
+		cat(msg, msg, "\n" AMIBSDNET_LOG_DIR " (the logs, open while the "
+		    "stack runs) can be deleted after the reboot.", size);
 	if (kept)
 		cat(msg, msg, "\nA drawer it had created has other files in it "
 		    "now: that drawer and those files were left alone.", size);
@@ -1726,7 +1737,8 @@ otherstacks_fallback(char *msg, int size)
 	}
 
 	old = quiet();
-	/* T: is gone after the reboot: keep the logs */
+	/* logs that had to go to T: (amibsdnet/logs.h) are gone after the
+	   reboot: copied (nothing is copied when they are on disk) */
 	if ((l = CreateDir((CONST_STRPTR)"SYS:Storage/AmiBSDNet-Logs")) != 0)
 		UnLock(l);
 	copy_file("T:AmiBSDNet.log", "SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log");

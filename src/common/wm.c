@@ -34,12 +34,12 @@
 
 #include <amibsdnet/wm.h>
 #include <amibsdnet/devopen.h>
+#include <amibsdnet/logs.h>
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
 
 #define	WM_COMMAND	"C:WirelessManager"
-#define	WM_LOG		"T:WirelessManager.log"
 #define	PREFS_ENV	"ENV:Sys/Wireless.prefs"
 #define	PREFS_ENVARC	"ENVARC:Sys/Wireless.prefs"
 
@@ -169,7 +169,8 @@ wm_stop(void)
 }
 
 /*
- * WirelessManager's messages go to T:WirelessManager.log (VERBOSE if the
+ * WirelessManager's messages go to AMIBSDNET_WMLOG, on disk (T: if that
+ * cannot be written; amibsdnet/logs.h) (VERBOSE if the
  * variable AmiBSDNet/Debug is set); the file stays readable while it runs.
  */
 int
@@ -218,10 +219,7 @@ wm_start(const char *device, unsigned long unit)
 	   without it */
 	if ((in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE)) == 0)
 		return -1;
-	if ((out = Open((CONST_STRPTR)WM_LOG, MODE_NEWFILE)) != 0) {
-		Close(out);
-		out = Open((CONST_STRPTR)WM_LOG, MODE_READWRITE);
-	}
+	out = amibsdnet_log_create(AMIBSDNET_WMLOG, AMIBSDNET_WMLOG_T, NULL);
 	if (out == 0)
 		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 	if (out == 0) {

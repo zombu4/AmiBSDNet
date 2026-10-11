@@ -34,6 +34,7 @@
 
 #include <amibsdnet/notice.h>
 #include <amibsdnet/control.h>
+#include <amibsdnet/logs.h>
 
 #include "rumpuser_amiga.h"
 #include "stack.h"
@@ -52,7 +53,9 @@ void	bsdsocket_kernel_gone(void);
 
 #define	DEFAULT_CONFIG	"ENV:AmiBSDNet/AmiBSDNet.conf"
 #define	FALLBACK_CONFIG	"ENVARC:AmiBSDNet/AmiBSDNet.conf"
-#define	DEFAULT_LOG	"T:AmiBSDNet.log"
+/* on disk, to be there after a reboot; T: if that cannot be written
+   (amibsdnet/logs.h) */
+#define	DEFAULT_LOG	AMIBSDNET_LOG
 #define	VERSTAG		AMIBSDNET_VERSTAG("AmiBSDNet")
 #define	CLAIM_NAME	"AmiBSDNet stack"
 #define	FAILED_NAME	"AmiBSDNet (failed)"
@@ -111,6 +114,15 @@ wake_launcher(void)
 static volatile int startup_result = -1;
 static char cfgpath[256] = DEFAULT_CONFIG;
 static char logpath[256] = DEFAULT_LOG;
+static int logpath_given;		/* LOG= on the command line */
+
+/* T: when the default drawer cannot be written; none for LOG= */
+static const char *
+logfallback(void)
+{
+
+	return logpath_given ? NULL : AMIBSDNET_LOG_T;
+}
 static int guard_failed;		/* the start marker was not made */
 static LONG guard_error;
 
@@ -126,7 +138,7 @@ log_lines(const char *a, const char *b, const char *c)
 	BPTR lf;
 
 	me->pr_WindowPtr = (APTR)-1;
-	if ((lf = Open((CONST_STRPTR)logpath, MODE_NEWFILE)) != 0) {
+	if ((lf = amibsdnet_log_create(logpath, logfallback(), NULL)) != 0) {
 		FPuts(lf, (CONST_STRPTR)a);
 		if (b)
 			FPuts(lf, (CONST_STRPTR)b);
@@ -255,10 +267,13 @@ stack_main(void)
 
 	((struct Process *)SysBase->ThisTask)->pr_WindowPtr = (APTR)-1;
 	/* empty the log, then keep it open with a shared lock so it can be
-	   read (Type T:AmiBSDNet.log) while the stack runs */
-	if ((log = Open((CONST_STRPTR)logpath, MODE_NEWFILE)) != 0) {
-		Close(log);
-		log = Open((CONST_STRPTR)logpath, MODE_READWRITE);
+	   read (Type) while the stack runs */
+	{
+		const char *used = NULL;
+
+		log = amibsdnet_log_create(logpath, logfallback(), &used);
+		if (log && used != logpath)
+			sb_copy(logpath, used, sizeof(logpath));
 	}
 	amiga_rump_loginit((long)log);
 	notice_open(&startnotice, "AmiBSDNet is starting (this window closes "
@@ -433,8 +448,10 @@ _start(void)
 		}
 		if (argv[0])
 			sb_copy(cfgpath, (const char *)argv[0], sizeof(cfgpath));
-		if (argv[1])
+		if (argv[1]) {
 			sb_copy(logpath, (const char *)argv[1], sizeof(logpath));
+			logpath_given = 1;
+		}
 		amiga_rump_debug = argv[2] ? 1 : 0;
 		FreeArgs(rda);
 	}

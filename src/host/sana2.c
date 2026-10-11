@@ -637,9 +637,16 @@ sana_iothread(void *arg)
 	   "DEVS:Networks/<name>" (amibsdnet/devopen.h) */
 	if (amibsdnet_open_sana(viu->devname, viu->unit,
 	    (struct IORequest *)base, 0) != 0) {
-		amiga_rump_printf("sana: cannot open %s unit %lu (error %d; "
-		    "not found in DEVS:Networks?)\n", viu->devname, viu->unit,
-		    base->ios2_Req.io_Error);
+		/* PaulaNET.device refuses the open with IOERR_OPENFAIL when
+		   it finds no adapter ("PaulaNET device not detected",
+		   downloads/sources/PaulaNET/NetDevice/device.c:165-170) */
+		if (viu->paulanet && base->ios2_Req.io_Error == IOERR_OPENFAIL)
+			amiga_rump_printf("sana: no PaulaNET adapter found "
+			    "(PaulaNET.device did not open)\n");
+		else
+			amiga_rump_printf("sana: cannot open %s unit %lu "
+			    "(error %d)\n", viu->devname, viu->unit,
+			    base->ios2_Req.io_Error);
 		mark_failed(viu->devname);
 		goto fail;
 	}
