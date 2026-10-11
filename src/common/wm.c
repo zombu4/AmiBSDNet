@@ -314,7 +314,17 @@ wm_start(const char *device, unsigned long unit)
 	   without it */
 	if ((in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE)) == 0)
 		return -1;
-	out = amibsdnet_log_create(AMIBSDNET_WMLOG, AMIBSDNET_WMLOG_T, NULL);
+	/*
+	 * Its output in a console window on the screen, to be read as it
+	 * comes; the window form is the one in downloads/sources/
+	 * amigados-docs/amigaos-commands.html.txt:503
+	 * ("CON:0/250/640/150/2SHELL/CLOSE").  The log file
+	 * AMIBSDNET_WMLOG if no window opens.
+	 */
+	if ((out = Open((CONST_STRPTR)
+	    "CON:0/250/640/150/WirelessManager/CLOSE", MODE_NEWFILE)) == 0)
+		out = amibsdnet_log_create(AMIBSDNET_WMLOG, AMIBSDNET_WMLOG_T,
+		    NULL);
 	if (out == 0)
 		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 	if (out == 0) {
