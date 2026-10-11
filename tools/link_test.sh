@@ -3,10 +3,12 @@
 # usage: tools/link_test.sh <src/test/name.c> <output>
 set -e
 cd "$(dirname "$0")/.."
+python -I tools/version.py
 T=toolchain/opt/bin
 HF="-m68020-60 -msoft-float -O2 -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
     -Wall -Wno-unused-parameter -Wno-volatile-register-var -Wno-pointer-sign -Wno-array-bounds \
-    -ffile-prefix-map=$(pwd)=. -Inetbsd-src/sys/rump/include -Isrc/host"
+    -ffile-prefix-map=$(pwd)=. -Inetbsd-src/sys/rump/include -Isrc/host \
+    -Isrc/include -Ibuild/gen"
 name=$(basename "$1" .c)
 hostobjs=""
 for src in src/host/*.c; do

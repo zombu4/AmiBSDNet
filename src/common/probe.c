@@ -2,10 +2,14 @@
  * Network adapter detection, shared by NetCtrl PROBE (used by the
  * installer) and the settings window of the status tool.
  *
- * Every driver in DEVS:Networks is opened (unit 0) and asked with
+ * Every driver in DEVS:Networks is opened (unit 0), except those
+ * add() below leaves closed (PaulaNET, reported separately; wifipi and
+ * genet, known by name and checked for their hardware), and asked with
  * NSCMD_DEVICEQUERY which commands it supports: a driver that can scan
- * for networks (S2_GETNETWORKS, SANA-II revision 6) is Wi-Fi, any other
- * is Ethernet.  A driver the running stack already uses is not opened
+ * for networks (S2_GETNETWORKS, 0xc011: not in the NDK's SANA-II
+ * devices/sana2.h, but in the wireless extension by Neil Cafferkey,
+ * downloads/sources/wifipi/include/devices/sana2wireless.h) is Wi-Fi,
+ * any other is Ethernet.  A driver the running stack already uses is not opened
  * a second time: the stack's interface list says what it is.  Drivers
  * without a file (built into ROM, or loaded from
  * elsewhere) are looked for in the system's device list by name.
@@ -24,6 +28,7 @@
 #include <amibsdnet/ctlcall.h>
 #include <amibsdnet/devopen.h>
 #include <amibsdnet/drvcheck.h>
+#include <amibsdnet/hwcheck.h>
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
@@ -177,6 +182,7 @@ stack_kind(const char *name)
 }
 
 char probe_paulanet[64];
+char probe_unusable[300];
 
 static int
 add(struct probe_adapter *a, int n, int max, const char *name)
@@ -195,14 +201,38 @@ add(struct probe_adapter *a, int n, int max, const char *name)
 		return n;
 	/*
 	 * The Emu68 (PiStorm) drivers are known by name and never opened
-	 * here: opening wifipi.device loads the Wi-Fi firmware and starts
-	 * the driver's tasks - during the installation, with nothing else
-	 * needing it, a crash there would take the installation along.
+	 * here: loading wifipi.device sets up the Wi-Fi chip and loads its
+	 * firmware (downloads/sources/wifipi/src/init.c WiFi_Init() calls
+	 * chip_init(), wifipi.c, which calls LoadFirmware()) - during the
+	 * installation, with nothing else needing it, a crash there would
+	 * take the installation along.
 	 */
-	if (eq_nocase(name, "wifipi.device"))
-		kind = 1;
-	else if (eq_nocase(name, "genet.device"))
-		kind = 0;
+	if (eq_nocase(name, "wifipi.device") ||
+	    eq_nocase(name, "genet.device")) {
+		char why[100];
+
+		/* only with their hardware (amibsdnet/hwcheck.h): the files
+		   are there on every Emu68 installation */
+		if (!hw_check(name, 0, why, sizeof(why))) {
+			int l = 0, k;
+
+			while (probe_unusable[l])
+				l++;
+			for (k = 0; name[k] && l < (int)sizeof(probe_unusable) - 3;
+			    k++)
+				probe_unusable[l++] = name[k];
+			probe_unusable[l++] = ':';
+			probe_unusable[l++] = ' ';
+			for (k = 0; why[k] && l < (int)sizeof(probe_unusable) - 3;
+			    k++)
+				probe_unusable[l++] = why[k];
+			if (l < (int)sizeof(probe_unusable) - 1)
+				probe_unusable[l++] = '\n';
+			probe_unusable[l] = '\0';
+			return n;
+		}
+		kind = eq_nocase(name, "wifipi.device");
+	}
 	else if ((kind = stack_kind(name)) < 0 &&
 	    (kind = probe_one(name, 0)) < 0)
 		return n;
@@ -221,6 +251,7 @@ probe_adapters(struct probe_adapter *a, int max)
 	int n = 0, nnames = 0, i, j;
 	BPTR lock;
 
+	probe_unusable[0] = '\0';
 	/* collect the names first: opening a driver may load others */
 	if ((fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
 		if ((lock = Lock((CONST_STRPTR)"DEVS:Networks", ACCESS_READ))) {
@@ -235,10 +266,17 @@ probe_adapters(struct probe_adapter *a, int max)
 		}
 		FreeDosObject(DOS_FIB, fib);
 	}
+	/* (a resident driver whose file was found already is not a second
+	   name: add() would report an unusable one twice) */
 	Forbid();
 	for (i = 0; resident_names[i]; i++)
-		if (FindName(&SysBase->DeviceList, (CONST_STRPTR)resident_names[i]))
-			copy(names[nnames++], resident_names[i], 64);
+		if (FindName(&SysBase->DeviceList, (CONST_STRPTR)resident_names[i])) {
+			for (j = 0; j < nnames &&
+			    !eq_nocase(names[j], resident_names[i]); j++)
+				;
+			if (j == nnames)
+				copy(names[nnames++], resident_names[i], 64);
+		}
 	Permit();
 
 	if (!drv_paulanet_path(probe_paulanet, sizeof(probe_paulanet)))

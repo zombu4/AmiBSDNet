@@ -11,12 +11,13 @@ HF="-m68020-60 -msoft-float -O2 -ffreestanding -fno-builtin -fno-tree-loop-distr
     -ffile-prefix-map=$(pwd)=. -Inetbsd-src/sys/rump/include -Isrc/host \
     -Isrc/lib -Isrc/stack -Isrc/include -Ibuild/gen"
 mkdir -p build/stackobj
+python -I tools/version.py
 python -I tools/gen/gen_bsdsocket.py
 objs=""
 for src in src/stack/main.c src/stack/*.c src/host/*.c src/lib/*.c src/common/*.c; do
 	obj=build/stackobj/$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')
 	case " $objs " in *" $obj "*) continue ;; esac
-	$T/m68k-amiga-elf-gcc.exe $HF -c "$src" -o "$obj"
+	$T/m68k-amiga-elf-gcc.exe $HF -MD -c "$src" -o "$obj"
 	objs="$objs $obj"
 done
 $T/m68k-amiga-elf-gcc.exe -m68020-60 -c build/gen/bsdsocket_vec.s \

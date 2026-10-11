@@ -15,15 +15,22 @@
 
 #include <exec/types.h>
 #include <exec/ports.h>
+#include <exec/execbase.h>
+#include <dos/dosextens.h>
 #include <devices/timer.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 
 #include "control.h"
+
+extern struct DosLibrary *DOSBase;
 
 #define	AMIBSDNET_CTL_TIMEOUT	30	/* seconds */
 
 /* 0: replied; -1: no stack (or no memory); -2: no reply in time (*leftp:
-   the reply port, the message is still the stack's) */
+   the reply port, the message is still the stack's).  Without
+   timer.device the reply is polled with Delay() (5 ticks, 1/10 s:
+   dos.doc Delay), so the caller must be a process. */
 static inline int
 amibsdnet_ctl_call(struct NetCtrlMsg *m, ULONG cmd, ULONG secs,
     struct MsgPort **leftp)
@@ -40,6 +47,10 @@ amibsdnet_ctl_call(struct NetCtrlMsg *m, ULONG cmd, ULONG secs,
 	m->msg.mn_Length = sizeof(*m);
 	m->cmd = cmd;
 	m->text[0] = '\0';
+	/* nothing left from an earlier call if the stack does not fill
+	   them (an older stack, a failed command) */
+	m->nifaces = 0;
+	m->ndns = 0;
 	if ((tport = CreateMsgPort()) != NULL &&
 	    (treq = (struct timerequest *)CreateIORequest(tport,
 	    sizeof(*treq))) != NULL &&
@@ -49,7 +60,11 @@ amibsdnet_ctl_call(struct NetCtrlMsg *m, ULONG cmd, ULONG secs,
 		treq = NULL;
 	}
 	Forbid();
-	if ((port = FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME)) != NULL)
+	port = NULL;
+	/* (Delay() below needs a process) */
+	if ((treq != NULL || ((struct Task *)FindTask(NULL))->tc_Node.ln_Type ==
+	    NT_PROCESS) &&
+	    (port = FindPort((CONST_STRPTR)AMIBSDNET_PORTNAME)) != NULL)
 		PutMsg(port, &m->msg);
 	Permit();
 	if (port == NULL) {
@@ -63,10 +78,15 @@ amibsdnet_ctl_call(struct NetCtrlMsg *m, ULONG cmd, ULONG secs,
 		return -1;
 	}
 	if (treq == NULL) {
-		/* (no timer: wait as before) */
-		WaitPort(reply);
-		GetMsg(reply);
-		got = 1;
+		ULONG ticks;
+
+		for (ticks = 0; ticks < secs * 50; ticks += 5) {
+			if (GetMsg(reply) != NULL) {
+				got = 1;
+				break;
+			}
+			Delay(5);
+		}
 	} else {
 		treq->tr_node.io_Command = TR_ADDREQUEST;
 		treq->tr_time.tv_secs = secs;
@@ -87,20 +107,20 @@ amibsdnet_ctl_call(struct NetCtrlMsg *m, ULONG cmd, ULONG secs,
 		WaitIO((struct IORequest *)treq);
 		CloseDevice((struct IORequest *)treq);
 		DeleteIORequest((struct IORequest *)treq);
-		if (!got) {
-			Forbid();
-			if (GetMsg(reply) != NULL)
-				got = 1;	/* (just in time) */
-			else {
-				/* (its signal goes back to this task now: a
-				   Shell that runs NetCtrl again and again
-				   would run out of them) */
-				reply->mp_Flags = PA_IGNORE;
-				FreeSignal(reply->mp_SigBit);
-				reply->mp_SigBit = (UBYTE)-1;
-			}
-			Permit();
+	}
+	if (!got) {
+		Forbid();
+		if (GetMsg(reply) != NULL)
+			got = 1;	/* (just in time) */
+		else {
+			/* (its signal goes back to this task now: a Shell
+			   that runs NetCtrl again and again would run out of
+			   them) */
+			reply->mp_Flags = PA_IGNORE;
+			FreeSignal(reply->mp_SigBit);
+			reply->mp_SigBit = (UBYTE)-1;
 		}
+		Permit();
 	}
 	if (tport)
 		DeleteMsgPort(tport);

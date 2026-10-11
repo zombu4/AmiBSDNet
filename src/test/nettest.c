@@ -1,10 +1,15 @@
 /*
  * Network test over a real SANA-II device: in WinUAE, uaenet.device unit 0
- * is SLIRP user-mode NAT (guest 10.0.2.15, gateway/host 10.0.2.2, DNS
- * 10.0.2.3).  Brings up sana0, then
+ * is SLIRP user-mode NAT (guest 10.0.2.15, gateway 10.0.2.2, which is the
+ * emulator host's 127.0.0.1).  Brings up sana0, then
  *   1. TCP: connects to an echo server on the emulator host (10.0.2.2:7777,
  *      started by tools/run_emu.py --echo 7777) and checks the echo;
- *   2. UDP: asks SLIRP's DNS forwarder for the address of a host name.
+ *   2. UDP: asks the DNS server on the emulator host (10.0.2.2:53, started
+ *      by tools/run_emu.py --dns 53) for amibsdnet.test, which it answers
+ *      with 192.0.2.7: no Internet needed.
+ *
+ *   tools/link_test.sh src/test/nettest.c build/nettest
+ *   python -I tools/run_emu.py build/nettest --net --echo 7777 --dns 53
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -25,6 +30,7 @@ long rump___sysimpl_sendto(int, const void *, unsigned long, int,
     const void *, unsigned int);
 long rump___sysimpl_recvfrom(int, void *, unsigned long, int, void *,
     unsigned int *);
+int rump___sysimpl_poll(void *, unsigned int, int);
 int rump___sysimpl_close(int);
 
 int rump_amibsdnet_ifcreate(const char *, const char *);
@@ -43,7 +49,21 @@ struct nb_sockaddr_in {
 #define	NB_SOCK_DGRAM	2
 #define	NB_RTM_ADD	1
 
+/* NetBSD's struct pollfd and POLLIN (sys/sys/poll.h) */
+struct nb_pollfd {
+	int	fd;
+	short	events;
+	short	revents;
+};
+#define	NB_POLLIN	0x0001
+
 #define	IP4(a, b, c, d)	(((uint32_t)(a) << 24) | ((b) << 16) | ((c) << 8) | (d))
+
+/* what tools/run_emu.py --dns answers */
+#define	DNS_NAME	"amibsdnet.test"
+#define	DNS_ADDR	IP4(192, 0, 2, 7)
+#define	DNS_ID		0x4a42
+#define	DNS_WAIT_MS	5000
 
 extern void (*__init_array_start[])(void);
 extern void (*__init_array_end[])(void);
@@ -60,6 +80,17 @@ fail(const char *what)
 
 	P("FAIL: %s (errno %d)\n", what, amiga_rump_errno());
 	return 10;
+}
+
+static int
+same(const void *a, const void *b, long n)
+{
+	const unsigned char *x = a, *y = b;
+
+	while (n-- > 0)
+		if (*x++ != *y++)
+			return 0;
+	return 1;
 }
 
 static void
@@ -98,77 +129,137 @@ tcp_echo_test(void)
 			return fail("tcp recv");
 		got += n;
 	}
-	P("tcp: echo \"%s\"\n", buf);
 	rump___sysimpl_close(s);
+	if (got != (long)sizeof(msg) || !same(buf, msg, sizeof(msg))) {
+		P("FAIL: tcp echo differs (%ld bytes)\n", got);
+		return 10;
+	}
+	P("tcp: echo \"%s\"\n", buf);
 	return 0;
 }
 
-/* minimal DNS A query; returns the first answer address or 0 */
+/* skips the (possibly compressed) name at p; NULL if it runs past end */
+static const unsigned char *
+skip_name(const unsigned char *p, const unsigned char *end)
+{
+
+	while (p < end) {
+		if (*p == 0)
+			return p + 1;
+		if ((*p & 0xc0) == 0xc0)
+			return p + 2 <= end ? p + 2 : NULL;
+		if (*p & 0xc0)
+			return NULL;		/* reserved label types */
+		p += *p + 1;
+	}
+	return NULL;
+}
+
+/* a DNS A query for name; checks the answer's ID and that it is addr */
 static int
-udp_dns_test(const char *name)
+udp_dns_test(const char *name, uint32_t want)
 {
 	struct nb_sockaddr_in sin;
-	unsigned char q[512], *p;
+	struct nb_pollfd pfd;
+	unsigned char q[512], *w;
+	const unsigned char *p, *end;
 	const char *label;
 	unsigned int slen;
 	long n;
-	int s, i, an, qd;
+	int s, i, an, qd, r;
 
 	memset(q, 0, 12);
-	q[0] = 0x4a; q[1] = 0x42;		/* id */
+	q[0] = DNS_ID >> 8; q[1] = DNS_ID & 0xff;
 	q[2] = 0x01;				/* recursion desired */
 	q[5] = 1;				/* one question */
-	p = q + 12;
+	w = q + 12;
 	for (label = name; *label; ) {
-		unsigned char *lenp = p++;
+		unsigned char *lenp = w++;
 
 		for (i = 0; label[i] && label[i] != '.'; i++)
-			*p++ = label[i];
+			*w++ = label[i];
 		*lenp = (unsigned char)i;
 		label += i;
 		if (*label == '.')
 			label++;
 	}
-	*p++ = 0;
-	*p++ = 0; *p++ = 1;			/* type A */
-	*p++ = 0; *p++ = 1;			/* class IN */
+	*w++ = 0;
+	*w++ = 0; *w++ = 1;			/* type A */
+	*w++ = 0; *w++ = 1;			/* class IN */
 
 	if ((s = rump___sysimpl_socket30(NB_AF_INET, NB_SOCK_DGRAM, 0)) < 0)
 		return fail("udp socket");
-	sin_set(&sin, IP4(10, 0, 2, 3), 53);
-	if (rump___sysimpl_sendto(s, q, p - q, 0, &sin, sizeof(sin)) !=
-	    p - q)
-		return fail("udp sendto");
+	sin_set(&sin, IP4(10, 0, 2, 2), 53);
+	if (rump___sysimpl_sendto(s, q, w - q, 0, &sin, sizeof(sin)) !=
+	    w - q) {
+		rump___sysimpl_close(s);
+		return fail("udp sendto 10.0.2.2:53");
+	}
+	/* no answer must not hang the test */
+	pfd.fd = s;
+	pfd.events = NB_POLLIN;
+	pfd.revents = 0;
+	if ((r = rump___sysimpl_poll(&pfd, 1, DNS_WAIT_MS)) <= 0) {
+		rump___sysimpl_close(s);
+		if (r == 0) {
+			P("FAIL: no DNS answer from 10.0.2.2:53 within %d ms "
+			    "(tools/run_emu.py --dns 53)\n", DNS_WAIT_MS);
+			return 10;
+		}
+		return fail("udp poll");
+	}
 	slen = sizeof(sin);
 	n = rump___sysimpl_recvfrom(s, q, sizeof(q), 0, &sin, &slen);
 	rump___sysimpl_close(s);
 	if (n < 12)
 		return fail("udp recvfrom");
+	if (((q[0] << 8) | q[1]) != DNS_ID || !(q[2] & 0x80)) {
+		P("FAIL: not the answer to our DNS query (id %04x)\n",
+		    (q[0] << 8) | q[1]);
+		return 10;
+	}
 
+	end = q + n;
 	qd = (q[4] << 8) | q[5];
 	an = (q[6] << 8) | q[7];
 	p = q + 12;
-	while (qd--) {				/* skip questions */
-		while (*p && !(*p & 0xc0))
-			p += *p + 1;
-		p += (*p & 0xc0) ? 2 : 1;
+	while (qd-- > 0) {			/* skip questions */
+		if ((p = skip_name(p, end)) == NULL || p + 4 > end)
+			goto bad;
 		p += 4;
 	}
-	while (an-- && p < q + n) {
+	while (an-- > 0) {
 		int type, rdlen;
 
-		p += (*p & 0xc0) ? 2 : 1;	/* name (compressed) */
+		if ((p = skip_name(p, end)) == NULL || p + 10 > end)
+			goto bad;
 		type = (p[0] << 8) | p[1];
 		rdlen = (p[8] << 8) | p[9];
 		p += 10;
+		if (p + rdlen > end)
+			goto bad;
 		if (type == 1 && rdlen == 4) {
+			uint32_t got = ((uint32_t)p[0] << 24) | (p[1] << 16) |
+			    (p[2] << 8) | p[3];
+
 			P("udp: DNS %s = %u.%u.%u.%u\n", name, p[0], p[1], p[2],
 			    p[3]);
+			if (got != want) {
+				P("FAIL: expected %u.%u.%u.%u\n",
+				    (unsigned)(want >> 24),
+				    (unsigned)(want >> 16) & 255,
+				    (unsigned)(want >> 8) & 255,
+				    (unsigned)want & 255);
+				return 10;
+			}
 			return 0;
 		}
 		p += rdlen;
 	}
 	P("FAIL: no A record for %s (rcode %d)\n", name, q[3] & 15);
+	return 10;
+bad:
+	P("FAIL: DNS answer cut short or malformed (%ld bytes)\n", n);
 	return 10;
 }
 
@@ -204,7 +295,7 @@ test_proc(void)
 
 	result = tcp_echo_test();
 	if (result == 0)
-		result = udp_dns_test("aminet.net");
+		result = udp_dns_test(DNS_NAME, DNS_ADDR);
 	P(result == 0 ? "PASS\n" : "test failed\n");
 out:
 	Forbid();

@@ -2,12 +2,17 @@
  * Other TCP/IP stacks (Roadshow, Miami, AmiTCP, Genesis): only one stack
  * may run, so the installer offers to disable or remove the others.
  *
- * A stack counts as installed if one of its files exists, a line of
- * S:Startup-Sequence or S:User-Startup starts it, or it has an item in
- * SYS:WBStartup.  A bsdsocket.library on disk belongs to some other stack
- * as well (AmiBSDNet's lives in memory only).
+ * A stack counts as installed if one of its files exists (for Miami,
+ * AmiTCP and Genesis: an assign of that name, not a volume), a command
+ * line of S:Startup-Sequence, S:User-Startup or a script in S: they run
+ * with Execute starts one of its commands, or it has an item in
+ * SYS:WBStartup.  A command counts by its name (the last part of its
+ * path), and only from C:, S:, the stack's own assign or the Shell's
+ * path; the words after it (arguments) do not count.  A bsdsocket.library
+ * on disk belongs to some other stack as well (AmiBSDNet's lives in
+ * memory only).
  *
- * Disabling comments out those startup lines ("; [AmiBSDNet] ...") and
+ * Disabling comments out those command lines ("; [AmiBSDNet] ...") and
  * moves the WBStartup items and LIBS:bsdsocket.library to
  * SYS:Storage/AmiBSDNet-Disabled; restoring undoes both.  Removing
  * deletes the lines and those files instead.  The startup files are
@@ -31,15 +36,17 @@ extern struct DosLibrary *DOSBase;
 #define	MARK		"; [AmiBSDNet] "
 #define	MARKLEN		14
 #define	PARKING		"SYS:Storage/AmiBSDNet-Disabled"
+#define	PATHMAX		256
 
 struct stack {
 	const char *name;
-	const char *files[10];		/* any of these existing */
-	const char *words[14];		/* startup lines naming these */
+	const char *files[10];		/* any of these existing ("X:": the
+					   assign X) */
+	const char *commands[14];	/* command lines running these */
+	const char *assign;		/* its programs' assign, or NULL */
 	const char *wbstartup[3];	/* WBStartup items starting so */
 	int found;			/* installed */
 	int atboot;			/* still started at boot */
-	int inscript;			/* ... by a startup script line */
 };
 
 static struct stack stacks[] = {
@@ -47,22 +54,26 @@ static struct stack stacks[] = {
 	  { "C:AddNetInterface", "C:RoadshowControl", "S:Network-Startup",
 	    "DEVS:NetInterfaces", "C:ConfigureNetInterface", "C:NetShutdown",
 	    "C:ShowNetStatus", NULL },
-	  { "Network-Startup", "AddNetInterface", "Roadshow", "NetLogViewer",
+	  { "Network-Startup", "AddNetInterface", "NetLogViewer",
 	    "ConfigureNetInterface", "AddNetRoute", "DeleteNetRoute",
 	    "NetShutdown", "ShowNetStatus", "GetNetStatus",
-	    "RemoveNetInterface", "SampleNetSpeed", "NetInterfaces", NULL },
+	    "RemoveNetInterface", "SampleNetSpeed", "RoadshowControl", NULL },
+	  NULL,
 	  { "NetLogViewer", "Roadshow", NULL } },
 	{ "Miami",
 	  { "Miami:", NULL },
 	  { "Miami", NULL },
+	  "Miami:",
 	  { "Miami", NULL } },
 	{ "AmiTCP",
 	  { "AmiTCP:", NULL },
 	  { "AmiTCP", "startnet", NULL },
+	  "AmiTCP:",
 	  { "AmiTCP", NULL } },
 	{ "Genesis",
 	  { "Genesis:", NULL },
 	  { "Genesis", NULL },
+	  "Genesis:",
 	  { "Genesis", NULL } },
 };
 #define	NSTACKS	(sizeof(stacks) / sizeof(stacks[0]))
@@ -131,6 +142,25 @@ starts_nocase(const char *s, const char *p)
 	return !*p;
 }
 
+static int
+eq_nocase(const char *a, const char *b)
+{
+
+	while (*a && lc((UBYTE)*a) == lc((UBYTE)*b))
+		a++, b++;
+	return *a == *b;
+}
+
+static int
+slen_(const char *s)
+{
+	int n = 0;
+
+	while (s[n])
+		n++;
+	return n;
+}
+
 static void
 cat(char *d, const char *a, const char *b, int n)
 {
@@ -143,7 +173,19 @@ cat(char *d, const char *a, const char *b, int n)
 	d[i] = '\0';
 }
 
-/* no "Please insert volume Miami:" requesters while looking */
+/* a + b into d (n bytes) only if all of it fits */
+static int
+cat_fits(char *d, const char *a, const char *b, int n)
+{
+
+	if (slen_(a) + slen_(b) >= n)
+		return 0;
+	cat(d, a, b, n);
+	return 1;
+}
+
+/* no "Please insert volume Miami:" requesters while looking: with
+   pr_WindowPtr -1 there are none (dos.doc ErrorReport) */
 static APTR
 quiet(void)
 {
@@ -171,42 +213,158 @@ exists(const char *path)
 	return l != 0;
 }
 
+/* an assign of this name ("Miami:"), not a volume or device */
+static int
+assign_exists(const char *name)
+{
+	char n[32];
+	struct DosList *dl;
+	int i, r;
+
+	for (i = 0; name[i] && name[i] != ':' && i < (int)sizeof(n) - 1; i++)
+		n[i] = name[i];
+	n[i] = '\0';
+	dl = LockDosList(LDF_ASSIGNS | LDF_READ);
+	/* "name - Name of device entry (without ':')" (dos.doc
+	   FindDosEntry) */
+	r = FindDosEntry(dl, (CONST_STRPTR)n, LDF_ASSIGNS) != NULL;
+	UnLockDosList(LDF_ASSIGNS | LDF_READ);
+	return r;
+}
+
+static int
+file_exists(const char *path)
+{
+	int l = slen_(path);
+
+	return l > 0 && path[l - 1] == ':' ? assign_exists(path) :
+	    exists(path);
+}
+
+/* the whole file (NUL-terminated); NULL if it is not there or could not
+   all be read (a part must never be written back) */
 static char *
 read_file(const char *name, LONG *lenp)
 {
 	BPTR fh = Open((CONST_STRPTR)name, MODE_OLDFILE);
 	char *buf = NULL;
-	LONG len = 0, size, n;
+	LONG len = 0, size, n = 0;
 
 	*lenp = 0;
 	if (fh == 0)
 		return NULL;
-	Seek(fh, 0, OFFSET_END);
-	size = Seek(fh, 0, OFFSET_BEGINNING);
-	if (size >= 0 && (buf = AllocVec(size + 1, MEMF_ANY)) != NULL) {
-		while (len < size && (n = Read(fh, buf + len, size - len)) > 0)
-			len += n;
-		buf[len] = '\0';
+	if (Seek(fh, 0, OFFSET_END) < 0 ||
+	    (size = Seek(fh, 0, OFFSET_BEGINNING)) < 0 ||
+	    (buf = AllocVec(size + 1, MEMF_ANY)) == NULL) {
+		Close(fh);
+		return NULL;
 	}
+	while (len < size && (n = Read(fh, buf + len, size - len)) > 0)
+		len += n;
 	Close(fh);
+	if (len != size) {
+		FreeVec(buf);
+		return NULL;
+	}
+	buf[len] = '\0';
 	*lenp = len;
 	return buf;
 }
 
+/* both files read in full and the same (a missing one is not) */
+static int
+same_file(const char *a, const char *b)
+{
+	char *x, *y;
+	LONG xl, yl, i;
+	int same = 0;
+
+	if ((x = read_file(a, &xl)) == NULL)
+		return 0;
+	if ((y = read_file(b, &yl)) != NULL) {
+		if (xl == yl) {
+			for (i = 0; i < xl && x[i] == y[i]; i++)
+				;
+			same = i == xl;
+		}
+		FreeVec(y);
+	}
+	FreeVec(x);
+	return same;
+}
+
+/*
+ * The directories of S: (an assign may have several: dol_List,
+ * dos/dosextens.h); 0 when there is none.  The locks are the caller's.
+ */
+#define	MAXSDIRS	8
+
+static int
+s_dirs(BPTR *out)
+{
+	struct DosList *dl;
+	struct AssignList *al;
+	int n = 0;
+
+	dl = LockDosList(LDF_ASSIGNS | LDF_READ);
+	if ((dl = FindDosEntry(dl, (CONST_STRPTR)"S", LDF_ASSIGNS)) != NULL &&
+	    dl->dol_Type == DLT_DIRECTORY) {
+		if (dl->dol_Lock)
+			out[n++] = DupLock(dl->dol_Lock);
+		for (al = dl->dol_misc.dol_assign.dol_List; al && n < MAXSDIRS;
+		    al = al->al_Next)
+			out[n++] = DupLock(al->al_Lock);
+	}
+	UnLockDosList(LDF_ASSIGNS | LDF_READ);
+	return n;
+}
+
+static void
+unlock_all(BPTR *l, int n)
+{
+
+	while (n-- > 0)
+		if (l[n])
+			UnLock(l[n]);
+}
+
+/* is the object behind this path in a directory of S: (or S: itself)? */
+static int
+in_s(const char *path)
+{
+	BPTR s[MAXSDIRS], l, parent;
+	int n, i, r = 0;
+
+	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) == 0)
+		return 0;
+	parent = ParentDir(l);
+	n = s_dirs(s);
+	for (i = 0; i < n; i++)
+		if (s[i] && ((parent && SameLock(parent, s[i]) == LOCK_SAME) ||
+		    SameLock(l, s[i]) == LOCK_SAME))
+			r = 1;
+	unlock_all(s, n);
+	if (parent)
+		UnLock(parent);
+	UnLock(l);
+	return r;
+}
+
 /*
  * The startup scripts: S:Startup-Sequence, S:User-Startup and the
- * scripts they run with Execute (S:Network-Startup and so on), also from
- * lines an earlier switch disabled.
+ * scripts in S: they run with Execute (S:Network-Startup and so on),
+ * also from lines an earlier switch disabled.  A script elsewhere (on
+ * another volume, in a program's drawer) is not edited.
  */
 #define	MAXSCRIPTS	12
 
-static char scripts[MAXSCRIPTS][128];
+static char scripts[MAXSCRIPTS][PATHMAX];
 static int nscripts;
 
 static void
 add_script(const char *p, int n)
 {
-	char name[128];
+	char name[PATHMAX];
 	int i, k;
 
 	if (n <= 0 || n >= (int)sizeof(name) || nscripts >= MAXSCRIPTS)
@@ -214,25 +372,99 @@ add_script(const char *p, int n)
 	for (i = 0; i < n; i++)
 		name[i] = p[i];
 	name[n] = '\0';
-	for (k = 0; k < nscripts; k++) {
-		const char *a = scripts[k], *b = name;
-
-		while (*a && lc((UBYTE)*a) == lc((UBYTE)*b))
-			a++, b++;
-		if (*a == *b)
+	for (k = 0; k < nscripts; k++)
+		if (eq_nocase(scripts[k], name))
 			return;		/* listed already */
-	}
-	if (!exists(name))
+	if (!exists(name) || !in_s(name))
 		return;
 	cat(scripts[nscripts++], name, "", sizeof(scripts[0]));
+}
+
+/* the start of the next word of l[k..n), after blanks */
+static int
+skip_blanks(const char *l, int k, int n)
+{
+
+	while (k < n && (l[k] == ' ' || l[k] == '\t'))
+		k++;
+	return k;
+}
+
+/* a word (quoted or not) at l[k..n): *ws its start, *wl its length;
+   returns where the next one may start */
+static int
+word(const char *l, int k, int n, int *ws, int *wl)
+{
+	int q = k < n && l[k] == '"', e;
+
+	if (q)
+		k++;
+	for (e = k; e < n && (q ? l[e] != '"' : (l[e] != ' ' &&
+	    l[e] != '\t' && l[e] != '\r' && l[e] != ';')); e++)
+		;
+	*ws = k;
+	*wl = e - k;
+	return e < n && q ? e + 1 : e;
+}
+
+static int
+word_is(const char *l, int ws, int wl, const char *w)
+{
+	int i;
+
+	for (i = 0; i < wl && w[i]; i++)
+		if (lc((UBYTE)l[ws + i]) != lc((UBYTE)w[i]))
+			return 0;
+	return i == wl && !w[i];
+}
+
+/*
+ * The command a script line runs, past "Run" and "Execute" and
+ * redirections ("Run >NIL: x", "Execute >NIL: S:x"): its start and
+ * length in l; *exec set if it is a script run with Execute.  0 if the
+ * line runs nothing (empty, a comment).
+ */
+static int
+line_command(const char *l, int n, int *cs, int *cl, int *exec)
+{
+	int k = 0, ws, wl, e;
+
+	*exec = 0;
+	/* only up to a comment (";" outside quotes) */
+	for (e = 0, ws = 0; e < n; e++) {
+		if (l[e] == '"')
+			ws = !ws;
+		else if (l[e] == ';' && !ws)
+			break;
+	}
+	n = e;
+	for (;;) {
+		k = skip_blanks(l, k, n);
+		if (k >= n)
+			return 0;
+		k = word(l, k, n, &ws, &wl);
+		if (wl == 0)
+			return 0;
+		if (l[ws] == '>' || l[ws] == '<')
+			continue;		/* a redirection */
+		if (word_is(l, ws, wl, "Run") || word_is(l, ws, wl, "RunBack"))
+			continue;
+		if (!*exec && word_is(l, ws, wl, "Execute")) {
+			*exec = 1;
+			continue;
+		}
+		*cs = ws;
+		*cl = wl;
+		return 1;
+	}
 }
 
 static void
 build_scripts(void)
 {
-	char *buf, *p, *e, *q;
+	char *buf, *p, *e;
 	LONG len;
-	int i, n;
+	int i, cs, cl, ex;
 
 	nscripts = 0;
 	cat(scripts[nscripts++], "S:Startup-Sequence", "", sizeof(scripts[0]));
@@ -241,6 +473,8 @@ build_scripts(void)
 		if ((buf = read_file(scripts[i], &len)) == NULL)
 			continue;
 		for (p = buf; p < buf + len; p = e + 1) {
+			const char *q;
+
 			for (e = p; e < buf + len && *e != '\n'; e++)
 				;
 			q = p;
@@ -248,81 +482,61 @@ build_scripts(void)
 				q++;
 			if (e - q >= MARKLEN && starts_nocase(q, MARK))
 				q += MARKLEN;
-			if (e - q < 8 || !starts_nocase(q, "Execute") ||
-			    (q[7] != ' ' && q[7] != '\t'))
-				continue;
-			q += 8;
-			while (q < e && (*q == ' ' || *q == '\t'))
-				q++;
-			/* redirections ("Execute >NIL: S:x") are not the script */
-			while (q < e && (*q == '>' || *q == '<')) {
-				while (q < e && *q != ' ' && *q != '\t')
-					q++;
-				while (q < e && (*q == ' ' || *q == '\t'))
-					q++;
-			}
-			if (q < e && *q == '"') {
-				q++;
-				for (n = 0; q + n < e && q[n] != '"'; n++)
-					;
-			} else
-				for (n = 0; q + n < e && q[n] != ' ' &&
-				    q[n] != '\t' && q[n] != '\r' && q[n] != ';';
-				    n++)
-					;
-			add_script(q, n);
+			if (line_command(q, e - q, &cs, &cl, &ex) && ex)
+				add_script(q + cs, cl);
 		}
 		FreeVec(buf);
 	}
 }
 
-/* a command line (not a comment, not ours) starting a detected stack? */
-/* like has(), but w must start a word: "startnet" is not in "RestartNet" */
+/* does the command c[0..n) name one of the stack's commands, from a place
+   its commands are in? */
 static int
-has_word(const char *s, int n, const char *w)
+command_of(const struct stack *s, const char *c, int n)
 {
-	int i, j, c;
+	int f, j, k, ok;
 
-	for (i = 0; i < n; i++) {
-		if (i > 0) {
-			c = lc((UBYTE)s[i - 1]);
-			if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
-				continue;
-		}
-		for (j = 0; w[j] && i + j < n &&
-		    lc((UBYTE)s[i + j]) == lc((UBYTE)w[j]); j++)
+	/* its name: after the last ':' or '/' */
+	for (f = n; f > 0 && c[f - 1] != ':' && c[f - 1] != '/'; f--)
+		;
+	/* where from: nowhere said (the Shell's path), C:, S:, or the
+	   stack's assign */
+	ok = f == 0 || (f == 2 && (lc((UBYTE)c[0]) == 'c' ||
+	    lc((UBYTE)c[0]) == 's') && c[1] == ':');
+	if (!ok && s->assign) {
+		for (k = 0; s->assign[k] && k < f &&
+		    lc((UBYTE)c[k]) == lc((UBYTE)s->assign[k]); k++)
 			;
-		if (!w[j])
-			return 1;
+		ok = !s->assign[k];
 	}
+	if (!ok)
+		return 0;
+	for (j = 0; s->commands[j]; j++)
+		if (word_is(c, f, n - f, s->commands[j]))
+			return 1;
 	return 0;
 }
 
+/* a command line (not a comment, not ours) starting a detected stack? */
 static struct stack *
 line_stack(const char *l, int n, int only_found)
 {
-	unsigned i, j;
-	int k = 0, e, quote = 0;
+	unsigned i;
+	int k = 0, cs, cl, ex;
 
 	while (k < n && (l[k] == ' ' || l[k] == '\t'))
 		k++;
 	if (k == n || l[k] == ';')
 		return NULL;
-	/* only the command, not a comment after it ("EndIf ; Roadshow") */
-	for (e = k; e < n; e++) {
-		if (l[e] == '"')
-			quote = !quote;
-		else if (l[e] == ';' && !quote)
-			break;
-	}
-	if (has(l + k, e - k, "AmiBSDNet"))
+	if (!line_command(l + k, n - k, &cs, &cl, &ex))
+		return NULL;
+	if (has(l + k + cs, cl, "AmiBSDNet"))
 		return NULL;
 	for (i = 0; i < NSTACKS; i++) {
 		if ((only_found && !stacks[i].found) || !selected(&stacks[i]))
 			continue;
-		for (j = 0; stacks[i].words[j]; j++)
-			if (has_word(l + k, e - k, stacks[i].words[j]))
-				return &stacks[i];
+		if (command_of(&stacks[i], l + k + cs, cl))
+			return &stacks[i];
 	}
 	return NULL;
 }
@@ -332,7 +546,7 @@ line_stack(const char *l, int n, int only_found)
  */
 
 static void
-scan_wbstartup(int mark)
+scan_wbstartup(void)
 {
 	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
 	BPTR l;
@@ -347,7 +561,7 @@ scan_wbstartup(int mark)
 					for (j = 0; stacks[i].wbstartup[j]; j++)
 						if (starts_nocase((const char *)
 						    fib->fib_FileName,
-						    stacks[i].wbstartup[j]) && mark) {
+						    stacks[i].wbstartup[j])) {
 							stacks[i].found =
 							    stacks[i].atboot = 1;
 							say("SYS:WBStartup",
@@ -370,9 +584,9 @@ otherstacks_check(char *names, int size)
 	char *buf, *p, *e;
 
 	for (i = 0; i < NSTACKS; i++) {
-		stacks[i].found = stacks[i].atboot = stacks[i].inscript = 0;
+		stacks[i].found = stacks[i].atboot = 0;
 		for (j = 0; stacks[i].files[j]; j++)
-			if (exists(stacks[i].files[j])) {
+			if (file_exists(stacks[i].files[j])) {
 				stacks[i].found = 1;
 				say("installed", stacks[i].files[j], -1);
 			}
@@ -387,13 +601,13 @@ otherstacks_check(char *names, int size)
 			for (e = p; e < buf + len && *e != '\n'; e++)
 				;
 			if ((s = line_stack(p, e - p, 0)) != NULL) {
-				s->found = s->atboot = s->inscript = 1;
+				s->found = s->atboot = 1;
 				say(scripts[i], p, e - p);
 			}
 		}
 		FreeVec(buf);
 	}
-	scan_wbstartup(1);
+	scan_wbstartup();
 	if ((disk_bsdsocket = exists("LIBS:bsdsocket.library")) != 0)
 		say("installed", "LIBS:bsdsocket.library", -1);
 	loud(old);
@@ -458,29 +672,7 @@ make_parking(const char *sub)
 	}
 }
 
-static int copy_file(const char *, const char *);
-
-/* park (rename into PARKING/sub) or delete a file */
-static int
-park(const char *path, const char *sub, const char *name, int remove)
-{
-	char dest[160];
-
-	if (!exists(path))
-		return 0;
-	if (remove)
-		return DeleteFile((CONST_STRPTR)path) ? 1 : -1;
-	make_parking(sub);
-	cat(dest, PARKING "/", sub, sizeof(dest));
-	cat(dest, dest, "/", sizeof(dest));
-	cat(dest, dest, name, sizeof(dest));
-	DeleteFile((CONST_STRPTR)dest);		/* an older parked copy */
-	if (Rename((CONST_STRPTR)path, (CONST_STRPTR)dest))
-		return 1;
-	/* another volume (LIBS: may be assigned anywhere): copy, delete */
-	return copy_file(path, dest) && DeleteFile((CONST_STRPTR)path) ? 1 : -1;
-}
-
+/* a copy, every write checked; a copy that failed is not left behind */
 static int
 copy_file(const char *from, const char *to)
 {
@@ -492,11 +684,56 @@ copy_file(const char *from, const char *to)
 	if (buf == NULL)
 		return 0;
 	if ((fh = Open((CONST_STRPTR)to, MODE_NEWFILE)) != 0) {
-		ok = Write(fh, buf, len) == len;
-		Close(fh);
+		ok = len == 0 || Write(fh, buf, len) == len;
+		if (!Close(fh))
+			ok = 0;
+		if (!ok)
+			DeleteFile((CONST_STRPTR)to);
 	}
 	FreeVec(buf);
 	return ok;
+}
+
+/*
+ * Park (rename into PARKING/sub) or delete a file.  An older parked copy
+ * of the same name is kept (as <name>.prev) until the new one is in
+ * place, and put back if it cannot be.
+ */
+static int
+park(const char *path, const char *sub, const char *name, int remove)
+{
+	char dest[PATHMAX], prev[PATHMAX];
+	int had;
+
+	if (!exists(path))
+		return 0;
+	if (remove)
+		return DeleteFile((CONST_STRPTR)path) ? 1 : -1;
+	make_parking(sub);
+	if (slen_(PARKING) + 1 + slen_(sub) + 1 + slen_(name) + 5 >= PATHMAX)
+		return -1;
+	cat(dest, PARKING "/", sub, sizeof(dest));
+	cat(dest, dest, "/", sizeof(dest));
+	cat(dest, dest, name, sizeof(dest));
+	cat(prev, dest, ".prev", sizeof(prev));
+	if ((had = exists(dest)) != 0) {
+		DeleteFile((CONST_STRPTR)prev);
+		if (!Rename((CONST_STRPTR)dest, (CONST_STRPTR)prev))
+			return -1;
+	}
+	if (Rename((CONST_STRPTR)path, (CONST_STRPTR)dest) ||
+	    /* another volume (LIBS: may be assigned anywhere): copy,
+	       delete */
+	    (copy_file(path, dest) && DeleteFile((CONST_STRPTR)path))) {
+		if (had)
+			DeleteFile((CONST_STRPTR)prev);
+		return 1;
+	}
+	if (exists(path))
+		DeleteFile((CONST_STRPTR)dest);	/* (a copy: the file stays) */
+	if (had)
+		Rename((CONST_STRPTR)prev, (CONST_STRPTR)dest);
+	return -1;
 }
 
 /*
@@ -507,7 +744,7 @@ copy_file(const char *from, const char *to)
 struct safewrite {
 	BPTR	fh;
 	int	ok;
-	char	tmp[110];
+	char	tmp[PATHMAX];
 	const char *name;
 };
 
@@ -517,7 +754,10 @@ sw_open(struct safewrite *sw, const char *name)
 
 	sw->name = name;
 	sw->ok = 1;
-	cat(sw->tmp, name, ".amibsdnet-new", sizeof(sw->tmp));
+	sw->fh = 0;
+	/* (a name too long for <name>.amibsdnet-new: not changed) */
+	if (!cat_fits(sw->tmp, name, ".amibsdnet-new", sizeof(sw->tmp)))
+		return -1;
 	sw->fh = Open((CONST_STRPTR)sw->tmp, MODE_NEWFILE);
 	return sw->fh != 0 ? 0 : -1;
 }
@@ -534,14 +774,15 @@ sw_write(struct safewrite *sw, const void *p, LONG n)
 static int
 sw_close(struct safewrite *sw)
 {
-	char old[110];
+	char old[PATHMAX];
 	struct FileInfoBlock *fib;
 	LONG prot = -1;
 	BPTR l;
 
 	if (!Close(sw->fh))
 		sw->ok = 0;
-	if (!sw->ok) {
+	if (!sw->ok || !cat_fits(old, sw->name, ".amibsdnet-old",
+	    sizeof(old))) {
 		DeleteFile((CONST_STRPTR)sw->tmp);
 		return -1;
 	}
@@ -556,11 +797,19 @@ sw_close(struct safewrite *sw)
 		FreeDosObject(DOS_FIB, fib);
 	}
 	/*
-	 * Never a moment without the file: the original is renamed out of
-	 * the way first, and put back if the new one cannot take its place.
-	 * (A script that is running keeps reading the old text.)
+	 * The text is never lost: the original is renamed out of the way
+	 * ("If the file or directory 'newName' exists, Rename() fails",
+	 * dos.doc Rename), so for a moment <name> is missing, and it is put
+	 * back if the new one cannot take its place.  A <name>.amibsdnet-old
+	 * left from before is the file's text if <name> is missing (a
+	 * restore that failed, below): it goes back first; next to a
+	 * <name> it is an older text (its deletion at the end failed), and
+	 * it goes.
 	 */
-	cat(old, sw->name, ".amibsdnet-old", sizeof(old));
+	if ((l = Lock((CONST_STRPTR)sw->name, ACCESS_READ)) != 0)
+		UnLock(l);
+	else
+		Rename((CONST_STRPTR)old, (CONST_STRPTR)sw->name);
 	DeleteFile((CONST_STRPTR)old);
 	if (!Rename((CONST_STRPTR)sw->name, (CONST_STRPTR)old)) {
 		DeleteFile((CONST_STRPTR)sw->tmp);
@@ -580,46 +829,30 @@ sw_close(struct safewrite *sw)
 	return 0;
 }
 
-/* the first word of a script line: "If", "EndIf", ... */
+/* the first backup of a startup file is the original: made before the
+   first change, never overwritten; 0 when it is there */
 static int
-keyword(const char *p, int n, const char *kw)
+keep_backup(const char *name)
 {
-	int k = 0, l = 0;
+	char backup[PATHMAX];
 
-	while (k < n && (p[k] == ' ' || p[k] == '\t'))
-		k++;
-	while (kw[l] && k + l < n && lc((UBYTE)p[k + l]) == lc((UBYTE)kw[l]))
-		l++;
-	return !kw[l] && (k + l == n || p[k + l] == ' ' || p[k + l] == '\t' ||
-	    p[k + l] == '\r');
+	if (!cat_fits(backup, name, ".amibsdnet-bak", sizeof(backup)))
+		return -1;
+	return exists(backup) || copy_file(name, backup) ? 0 : -1;
 }
 
-/*
- * Which lines to take out: those starting another stack, and when such a
- * line is an "If", its whole block up to the matching "EndIf" (so no
- * stray EndIf is left behind).  mark[] gets one entry per line.
- */
+/* which lines to take out: those starting another stack's command;
+   mark[] gets one entry per line */
 static int
 mark_lines(const char *buf, LONG len, UBYTE *mark, int max, int only_found)
 {
 	const char *p, *e;
-	int line = 0, n = 0, depth = 0;
+	int line = 0, n = 0;
 
 	for (p = buf; p < buf + len && line < max; p = e + 1, line++) {
 		for (e = p; e < buf + len && *e != '\n'; e++)
 			;
-		mark[line] = 0;
-		if (depth) {
-			mark[line] = 1;
-			if (keyword(p, e - p, "If"))
-				depth++;
-			else if (keyword(p, e - p, "EndIf"))
-				depth--;
-		} else if (line_stack(p, e - p, only_found) != NULL) {
-			mark[line] = 1;
-			if (keyword(p, e - p, "If"))
-				depth = 1;
-		}
+		mark[line] = line_stack(p, e - p, only_found) != NULL;
 		n += mark[line];
 	}
 	return n;
@@ -632,13 +865,13 @@ static int
 edit_startup(const char *name, int mode)
 {
 	LONG len;
-	char *buf = read_file(name, &len), *p, *e, backup[96];
+	char *buf = read_file(name, &len), *p, *e;
 	UBYTE *mark;
 	struct safewrite sw;
 	int changed = 0, line;
 
 	if (buf == NULL)
-		return 0;
+		return exists(name) ? -1 : 0;
 	if ((mark = AllocVec(MAXLINES, MEMF_ANY | MEMF_CLEAR)) == NULL) {
 		FreeVec(buf);
 		return -1;
@@ -656,8 +889,8 @@ edit_startup(const char *name, int mode)
 		/*
 		 * Removing: also the lines an earlier switch disabled - with
 		 * a stack chosen (otherstacks_only), only that stack's: the
-		 * disabled lines are looked at without their mark, If blocks
-		 * included, the same way as active ones.
+		 * disabled lines are looked at without their mark, the same
+		 * way as active ones.
 		 */
 		if (mode == 1) {
 			char *plain = NULL;
@@ -711,11 +944,7 @@ edit_startup(const char *name, int mode)
 		FreeVec(buf);
 		return 0;
 	}
-	/* the first backup is the original: never overwritten, and no change
-	   without it */
-	cat(backup, name, ".amibsdnet-bak", sizeof(backup));
-	if ((!exists(backup) && !copy_file(name, backup)) ||
-	    sw_open(&sw, name) != 0) {
+	if (keep_backup(name) != 0 || sw_open(&sw, name) != 0) {
 		FreeVec(mark);
 		FreeVec(buf);
 		return -1;
@@ -743,12 +972,15 @@ edit_startup(const char *name, int mode)
 
 #define	MAXITEMS	16
 
+/* the WBStartup items of the stacks: moved (or deleted, or back) in
+   rounds of MAXITEMS, collected first in each (renaming while scanning
+   confuses ExNext()) */
 static int
 move_wbstartup(int mode)
 {
 	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
 	char (*names)[108], path[160];
-	int n = 0, i, rv = 0;
+	int n, total = 0, i, rv = 0;
 	unsigned s, j;
 	BPTR l;
 
@@ -759,42 +991,51 @@ move_wbstartup(int mode)
 		FreeDosObject(DOS_FIB, fib);
 		return -1;
 	}
-	/* collect first: renaming while scanning confuses ExNext() */
-	if ((l = Lock((CONST_STRPTR)(mode == 2 ? PARKING "/WBStartup" :
-	    "SYS:WBStartup"), ACCESS_READ)) != 0) {
-		if (Examine(l, fib))
-			while (ExNext(l, fib) && n < MAXITEMS)
-				for (s = 0; s < NSTACKS; s++)
-					for (j = 0; stacks[s].wbstartup[j]; j++)
-						if ((mode == 2 || stacks[s].found) &&
-						    selected(&stacks[s]) &&
-						    starts_nocase((const char *)
-						    fib->fib_FileName,
-						    stacks[s].wbstartup[j])) {
-							cat(names[n++], (const char *)
-							    fib->fib_FileName, "", 108);
-							s = NSTACKS - 1;
-							break;
-						}
-		UnLock(l);
-	}
-	FreeDosObject(DOS_FIB, fib);
-	for (i = 0; i < n; i++) {
-		if (mode == 2) {
-			char dest[160];
-
-			cat(path, PARKING "/WBStartup/", names[i], sizeof(path));
-			cat(dest, "SYS:WBStartup/", names[i], sizeof(dest));
-			if (!Rename((CONST_STRPTR)path, (CONST_STRPTR)dest))
-				rv = -1;
-		} else {
-			cat(path, "SYS:WBStartup/", names[i], sizeof(path));
-			if (park(path, "WBStartup", names[i], mode == 1) < 0)
-				rv = -1;
+	do {
+		n = 0;
+		if ((l = Lock((CONST_STRPTR)(mode == 2 ? PARKING "/WBStartup" :
+		    "SYS:WBStartup"), ACCESS_READ)) != 0) {
+			if (Examine(l, fib))
+				while (n < MAXITEMS && ExNext(l, fib))
+					for (s = 0; s < NSTACKS; s++)
+						for (j = 0; stacks[s].wbstartup[j]; j++)
+							if ((mode == 2 ||
+							    stacks[s].found) &&
+							    selected(&stacks[s]) &&
+							    starts_nocase((const char *)
+							    fib->fib_FileName,
+							    stacks[s].wbstartup[j])) {
+								cat(names[n++],
+								    (const char *)
+								    fib->fib_FileName,
+								    "", 108);
+								s = NSTACKS - 1;
+								break;
+							}
+			UnLock(l);
 		}
-	}
+		for (i = 0; i < n; i++) {
+			if (mode == 2) {
+				char dest[160];
+
+				cat(path, PARKING "/WBStartup/", names[i],
+				    sizeof(path));
+				cat(dest, "SYS:WBStartup/", names[i], sizeof(dest));
+				if (!Rename((CONST_STRPTR)path, (CONST_STRPTR)dest))
+					rv = -1;
+			} else {
+				cat(path, "SYS:WBStartup/", names[i], sizeof(path));
+				if (park(path, "WBStartup", names[i], mode == 1) < 0)
+					rv = -1;
+			}
+		}
+		total += n;
+	/* (another round only while every item of this one went: what is
+	   left is then a new one) */
+	} while (n == MAXITEMS && rv == 0);
+	FreeDosObject(DOS_FIB, fib);
 	FreeVec(names);
-	return rv < 0 ? -1 : n;
+	return rv < 0 ? -1 : total;
 }
 
 /* ------------------------------------------------------------------------
@@ -804,38 +1045,117 @@ move_wbstartup(int mode)
 #define	OWN_MARK	"; [AmiBSDNet-off] "
 #define	OWN_MARKLEN	18
 
-/* comment out the lines inside ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" */
+/* exactly this marker line (not ";BEGIN AmiBSDNet-something") */
 static int
-own_startup_off(void)
+block_line(const char *p, const char *e, const char *marker)
+{
+	int l = 0;
+
+	while (marker[l])
+		l++;
+	return e - p >= l && starts_nocase(p, marker) &&
+	    (e - p == l || p[l] == '\r' || p[l] == ' ' || p[l] == '\t');
+}
+
+/* the ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" block of buf: 1 if there is
+   one, 0 if not, -1 if it is damaged (BEGIN twice, or no END: the rest
+   of the file would count as inside) */
+static int
+own_block(const char *buf, LONG len)
+{
+	const char *p, *e;
+	int inside = 0, found = 0;
+
+	for (p = buf; p < buf + len; p = e + 1) {
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		if (block_line(p, e, ";BEGIN AmiBSDNet")) {
+			if (inside)
+				return -1;
+			inside = found = 1;
+		} else if (block_line(p, e, ";END AmiBSDNet"))
+			inside = 0;
+	}
+	return inside ? -1 : found;
+}
+
+/*
+ * The lines inside ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" of
+ * S:User-Startup: commented out with OWN_MARK (on 0), or back (on 1).
+ * Not changed if that block is damaged; a backup first.
+ */
+static int
+own_startup_set(int on)
 {
 	static const char *name = "S:User-Startup";
 	LONG len;
 	char *buf = read_file(name, &len), *p, *e;
 	struct safewrite sw;
-	int inside = 0;
+	int inside = 0, r, changed = 0;
 
 	if (buf == NULL)
-		return -1;
-	if (sw_open(&sw, name) != 0) {
+		return exists(name) ? -1 : 0;
+	if ((r = own_block(buf, len)) <= 0) {
+		FreeVec(buf);
+		return r;		/* no block: nothing to do */
+	}
+	/* anything to change? */
+	for (p = buf; p < buf + len; p = e + 1) {
+		for (e = p; e < buf + len && *e != '\n'; e++)
+			;
+		if (block_line(p, e, ";END AmiBSDNet"))
+			inside = 0;
+		if (inside && (on ? starts_nocase(p, OWN_MARK) : *p != ';'))
+			changed = 1;
+		if (block_line(p, e, ";BEGIN AmiBSDNet"))
+			inside = 1;
+	}
+	if (!changed) {
+		FreeVec(buf);
+		return 0;
+	}
+	if (keep_backup(name) != 0 || sw_open(&sw, name) != 0) {
 		FreeVec(buf);
 		return -1;
 	}
+	inside = 0;
 	for (p = buf; p < buf + len; p = e + 1) {
 		int n;
 
 		for (e = p; e < buf + len && *e != '\n'; e++)
 			;
 		n = e - p + (e < buf + len);
-		if (starts_nocase(p, ";END AmiBSDNet"))
+		if (block_line(p, e, ";END AmiBSDNet"))
 			inside = 0;
-		if (inside && *p != ';')
-			sw_write(&sw, OWN_MARK, OWN_MARKLEN);
-		sw_write(&sw, p, n);
-		if (starts_nocase(p, ";BEGIN AmiBSDNet"))
+		if (inside && on && starts_nocase(p, OWN_MARK))
+			sw_write(&sw, p + OWN_MARKLEN, n - OWN_MARKLEN);
+		else {
+			if (inside && !on && *p != ';')
+				sw_write(&sw, OWN_MARK, OWN_MARKLEN);
+			sw_write(&sw, p, n);
+		}
+		if (block_line(p, e, ";BEGIN AmiBSDNet"))
 			inside = 1;
 	}
 	FreeVec(buf);
 	return sw_close(&sw);
+}
+
+static int
+own_startup_off(void)
+{
+
+	return own_startup_set(0);
+}
+
+int
+otherstacks_self_on(void)
+{
+	APTR old = quiet();
+	int r = own_startup_set(1);
+
+	loud(old);
+	return r < 0 ? -1 : 0;
 }
 
 
@@ -844,18 +1164,6 @@ own_startup_off(void)
  */
 
 #define	INSTALL_LOG	"S:AmiBSDNet-Install.log"
-
-static int
-slen_(const char *s)
-{
-	int n = 0;
-
-	while (s[n])
-		n++;
-	return n;
-}
-
-static int block_line(const char *, const char *, const char *);
 
 /* the ";BEGIN AmiBSDNet" ... ";END AmiBSDNet" block out of S:User-Startup
    (0: done or not there; -1: not changed - unreadable, unwritable, or a
@@ -867,31 +1175,15 @@ own_startup_remove(void)
 	LONG len;
 	char *buf, *p, *e;
 	struct safewrite sw;
-	int inside = 0, found = 0;
-	BPTR l;
+	int inside = 0, r;
 
-	if ((l = Lock((CONST_STRPTR)name, ACCESS_READ)) == 0)
+	if (!exists(name))
 		return 0;		/* no S:User-Startup */
-	UnLock(l);
 	if ((buf = read_file(name, &len)) == NULL)
 		return -1;
-	for (p = buf; p < buf + len; p = e + 1) {
-		for (e = p; e < buf + len && *e != '\n'; e++)
-			;
-		if (block_line(p, e, ";BEGIN AmiBSDNet")) {
-			if (inside)
-				break;		/* BEGIN BEGIN: damaged */
-			inside = found = 1;
-		} else if (block_line(p, e, ";END AmiBSDNet"))
-			inside = 0;
-	}
-	if (inside) {
+	if ((r = own_block(buf, len)) <= 0) {
 		FreeVec(buf);
-		return -1;
-	}
-	if (!found) {
-		FreeVec(buf);
-		return 0;
+		return r;
 	}
 	if (sw_open(&sw, name) != 0) {
 		FreeVec(buf);
@@ -914,39 +1206,69 @@ own_startup_remove(void)
 	return sw_close(&sw);
 }
 
-/* exactly this marker line (not ";BEGIN AmiBSDNet-something") */
-static int
-block_line(const char *p, const char *e, const char *marker)
-{
-	int l = 0;
-
-	while (marker[l])
-		l++;
-	return e - p >= l && starts_nocase(p, marker) &&
-	    (e - p == l || p[l] == '\r' || p[l] == ' ' || p[l] == '\t');
-}
-
-/* a file, or a drawer with everything in it: only for AmiBSDNet's own
-   drawers (the log drawer, the parking drawer, its settings) */
-static int
-delete_all(const char *path)
+/* the type of the entry itself (ST_*, dos/dosextens.h), as its directory
+   lists it: a soft link is not followed (a Lock() on it would be); 0 if
+   it is not there */
+static LONG
+entry_type(const char *path)
 {
 	struct FileInfoBlock *fib;
-	char sub[256], (*names)[108] = NULL;
+	char dir[PATHMAX];
+	const char *name = (const char *)FilePart((CONST_STRPTR)path);
+	LONG type = 0;
+	BPTR l;
+	int i, n = (const char *)PathPart((CONST_STRPTR)path) - path;
+
+	if (n >= (int)sizeof(dir) || !name[0])
+		return 0;
+	for (i = 0; i < n; i++)
+		dir[i] = path[i];
+	dir[n] = '\0';
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) == NULL)
+		return 0;
+	if ((l = Lock((CONST_STRPTR)dir, ACCESS_READ)) != 0) {
+		if (Examine(l, fib))
+			while (ExNext(l, fib))
+				if (eq_nocase((const char *)fib->fib_FileName,
+				    name)) {
+					type = fib->fib_DirEntryType;
+					break;
+				}
+		UnLock(l);
+	}
+	FreeDosObject(DOS_FIB, fib);
+	return type;
+}
+
+/*
+ * A file, or a drawer with everything in it: only for AmiBSDNet's own
+ * drawers (the log drawer, the parking drawer, its settings).  A hard
+ * link is deleted as the link ("If one of the links (or the original
+ * entry for the file) is deleted, the data remains until there are no
+ * links left", dos.doc MakeLink); a soft link is left alone (what
+ * DeleteFile() does with one dos.doc does not say) and counts as not
+ * deleted.
+ */
+static int
+delete_tree(const char *path, LONG type)
+{
+	struct FileInfoBlock *fib;
+	char sub[PATHMAX], (*names)[108] = NULL;
 	LONG *types = NULL;
 	BPTR l;
-	int n, i, rv = 0, isdir = 0;
+	int n, i, rv = 0;
 
-	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) == 0)
+	if (type == 0)
 		return 0;		/* not there */
-	if ((fib = AllocDosObject(DOS_FIB, NULL)) == NULL) {
-		UnLock(l);
+	if (type == ST_SOFTLINK)
 		return -1;
+	if (type != ST_USERDIR) {
+		SetProtection((CONST_STRPTR)path, 0);
+		return DeleteFile((CONST_STRPTR)path) ? 0 : -1;
 	}
-	if (Examine(l, fib))
-		isdir = fib->fib_DirEntryType == ST_USERDIR;
-	UnLock(l);
-	if (isdir && (names = AllocVec(64 * 108, MEMF_ANY)) != NULL &&
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) == NULL)
+		return -1;
+	if ((names = AllocVec(64 * 108, MEMF_ANY)) != NULL &&
 	    (types = AllocVec(64 * sizeof(LONG), MEMF_ANY)) != NULL) {
 		do {
 			n = 0;
@@ -967,18 +1289,12 @@ delete_all(const char *path)
 				}
 				cat(sub, path, "/", sizeof(sub));
 				cat(sub, sub, names[i], sizeof(sub));
-				if (types[i] == ST_USERDIR) {
-					if (delete_all(sub) != 0)
-						rv = -1;
-				} else {
-					/* (files, and links as links) */
-					SetProtection((CONST_STRPTR)sub, 0);
-					if (!DeleteFile((CONST_STRPTR)sub))
-						rv = -1;
-				}
+				if (delete_tree(sub, types[i]) != 0)
+					rv = -1;
 			}
 		} while (n == 64 && rv == 0);
-	}
+	} else
+		rv = -1;
 	if (types)
 		FreeVec(types);
 	if (names)
@@ -990,17 +1306,27 @@ delete_all(const char *path)
 	return rv;
 }
 
+static int
+delete_all(const char *path)
+{
+
+	return delete_tree(path, entry_type(path));
+}
+
 /*
- * One entry the installer listed, deleted on its own: a file, a link as
- * the link, a drawer only if it is empty (what someone else put there
- * stays, and so does the drawer).  0: gone (or was not there), 1: a
- * drawer that is not empty (kept), -1: could not be deleted.
+ * One entry the installer listed, deleted on its own: a file, a hard
+ * link as the link, a drawer only if it is empty (what someone else put
+ * there stays, and so does the drawer); a soft link is left alone (see
+ * delete_tree()).  0: gone (or was not there), 1: a drawer that is not
+ * empty (kept), -1: could not be deleted.
  */
 static int
 delete_one(const char *path)
 {
 	LONG err;
 
+	if (entry_type(path) == ST_SOFTLINK)
+		return -1;
 	SetProtection((CONST_STRPTR)path, 0);
 	if (DeleteFile((CONST_STRPTR)path))
 		return 0;
@@ -1014,13 +1340,15 @@ delete_one(const char *path)
 
 /*
  * A path from the log that may be deleted: absolute ("NAME:something"),
- * not a volume or assign itself, no parent ("/"), and nothing in S:
- * (the startup files; the log itself is deleted separately).
+ * not a volume or assign itself, no parent ("/"), and nothing in a
+ * directory of S: (wherever S: is assigned: SYS:S/... too) or a startup
+ * script build_scripts() found (the log itself is deleted separately).
  */
 static int
 log_path_ok(const char *p)
 {
-	int i, colon = -1;
+	int i, colon = -1, k, script = 0;
+	BPTR l, sl;
 
 	for (i = 0; p[i]; i++)
 		if (p[i] == ':') {
@@ -1036,12 +1364,27 @@ log_path_ok(const char *p)
 			return 0;
 	if (colon == 1 && (p[0] == 'S' || p[0] == 's'))
 		return 0;
-	return 1;
+	if (in_s(p))
+		return 0;
+	if ((l = Lock((CONST_STRPTR)p, ACCESS_READ)) != 0) {
+		for (k = 0; k < nscripts; k++)
+			if ((sl = Lock((CONST_STRPTR)scripts[k], ACCESS_READ))
+			    != 0) {
+				if (SameLock(l, sl) == LOCK_SAME)
+					script = 1;
+				UnLock(sl);
+			}
+		UnLock(l);
+	}
+	return !script;
 }
 
-/* what is always AmiBSDNet's */
+/* what is always AmiBSDNet's (C:Ping is not: the name is common, and the
+   install log lists AmiBSDNet's with its size and CRC) */
+#define	SELF	"C:NetCtrl"	/* the uninstaller itself */
+
 static const char *const own_files[] = {
-	"C:AmiBSDNet", "C:NetCtrl", "C:Ping", "C:SerialShell",
+	"C:AmiBSDNet", "C:SerialShell",		/* (C:NetCtrl: SELF) */
 	"SYS:WBStartup/AmiBSDNetStatus", "SYS:WBStartup/AmiBSDNetStatus.info",
 	"T:AmiBSDNet.log", "T:AmiBSDNet-RS.txt", "T:WirelessManager.log", NULL
 };
@@ -1057,17 +1400,64 @@ static const char *const own_dirs[] = {
    then (the unpacked archive itself has them in Docs/ and Status/) */
 static const char *const drawer_files[] = {
 	"AmiBSDNet.txt", "AmiBSDNet.txt.info", "LICENSE.txt", "LICENSE.txt.info",
-	"ThirdParty.txt", "ThirdParty.txt.info", "AmiBSDNetStatus",
+	"ThirdParty.txt", "ThirdParty.txt.info", "NetBSD.txt", "NetBSD.txt.info",
+	"AmiBSDNetStatus",
 	"AmiBSDNetStatus.info", NULL
 };
+
+/*
+ * A "FILE <path>" line of the log, or "FILE <path> <size> <crc32>": the
+ * file as the installer created it (size in decimal, CRC-32 in 8 hex
+ * digits, as NetCtrl CHECKSUM prints them).  p..p+k is what follows
+ * "FILE "; returns the path's length; *sum is set if size and CRC are
+ * there.
+ */
+static int
+log_line(const char *p, int k, int *sum, ULONG *size, ULONG *crc)
+{
+	int e = k, i, h;
+	ULONG v;
+
+	*sum = 0;
+	/* the CRC: 8 hex digits after the last blank */
+	for (i = e; i > 0 && p[i - 1] != ' '; i--)
+		;
+	if (e - i != 8 || i < 3)
+		return k;
+	for (v = 0, h = i; h < e; h++) {
+		int c = lc((UBYTE)p[h]);
+
+		if (c >= '0' && c <= '9')
+			v = v << 4 | (c - '0');
+		else if (c >= 'a' && c <= 'f')
+			v = v << 4 | (c - 'a' + 10);
+		else
+			return k;
+	}
+	*crc = v;
+	/* the size: digits before it */
+	e = i - 1;
+	for (i = e; i > 0 && p[i - 1] >= '0' && p[i - 1] <= '9'; i--)
+		;
+	if (i == e || i < 2 || p[i - 1] != ' ' || e - i > 10)
+		return k;
+	for (v = 0, h = i; h < e; h++)
+		v = v * 10 + (p[h] - '0');
+	*size = v;
+	*sum = 1;
+	return i - 1;
+}
 
 int
 otherstacks_uninstall(char *msg, int size)
 {
-	char *list = NULL, *p, *e, *s, path[200], names[128];
+	char *list = NULL, *p, *e, *s, path[PATHMAX];
 	LONG len = 0;
 	APTR old;
-	int rv = 0, kept = 0, i, k, r, pass, icon, restored;
+	int rv = 0, kept = 0, changed = 0, parked = 0, i, k, r, pass, icon,
+	    restored, sum, bakkept = 0;
+	ULONG fsize, fcrc;
+	unsigned long nsize, ncrc;
 	struct MsgPort *port;
 	struct FileInfoBlock *fib;
 	BPTR l;
@@ -1085,9 +1475,9 @@ otherstacks_uninstall(char *msg, int size)
 		    "that block by hand, then uninstall again).", "", size);
 		return -1;
 	}
-	/* another stack an earlier switch took out of the boot: back */
+	/* another stack an earlier switch took out of the boot: back (this
+	   also finds the startup scripts, for log_path_ok()) */
 	restored = otherstacks_apply(OTHERS_RESTORE) == 0;
-	otherstacks_check(names, sizeof(names));
 	old = quiet();
 	/* the serial Shell stops (it is gone after the reboot anyway) */
 	Forbid();
@@ -1098,15 +1488,15 @@ otherstacks_uninstall(char *msg, int size)
 	   ("FILE <path>" lines; the other lines are notes).  From the end:
 	   what was put in a drawer is listed after the drawer, and goes
 	   first */
-	if ((l = Lock((CONST_STRPTR)INSTALL_LOG, ACCESS_READ)) != 0) {
-		UnLock(l);
-		if ((list = read_file(INSTALL_LOG, &len)) == NULL)
-			rv = -1;
-	}
+	if (exists(INSTALL_LOG) &&
+	    (list = read_file(INSTALL_LOG, &len)) == NULL)
+		rv = -1;
 	if (list) {
-		/* (two rounds: icons last, and only those whose file or drawer
-		   is gone - a drawer that stays keeps its icon) */
-		for (pass = 0; pass < 2; pass++)
+		/* (four rounds, below: files (0), the icons whose file is
+		   gone (1), drawers (2) - empty by then of what was listed,
+		   icons too - and the icons whose drawer is gone (3); an
+		   icon whose file or drawer stays, stays too) */
+		for (pass = 0; pass < 4; pass++)
 		for (e = list + len; e > list; e = s) {
 			/* the line p..e; s: the '\n' before it */
 			for (p = e; p > list && p[-1] != '\n'; p--)
@@ -1117,6 +1507,7 @@ otherstacks_uninstall(char *msg, int size)
 			for (k = 0; p + 5 + k < e && p[5 + k] != '\n' &&
 			    p[5 + k] != '\r'; k++)
 				;
+			k = log_line(p + 5, k, &sum, &fsize, &fcrc);
 			if (k >= (int)sizeof(path)) {
 				if (pass == 0)
 					rv = -1;	/* too long: not cut short */
@@ -1126,18 +1517,25 @@ otherstacks_uninstall(char *msg, int size)
 				path[i] = p[5 + i];
 			path[k] = '\0';
 			icon = k > 5 && starts_nocase(path + k - 5, ".info");
-			if (!log_path_ok(path) || icon != pass)
+			if (!log_path_ok(path) || eq_nocase(path, SELF) ||
+			    icon != (pass & 1) ||
+			    (!icon && (entry_type(path) > 0) != (pass == 2)))
 				continue;
 			if (icon) {
 				/* its file or drawer (the name without
 				   ".info") is still there: the icon stays */
 				path[k - 5] = '\0';
-				if ((l = Lock((CONST_STRPTR)path,
-				    ACCESS_READ)) != 0) {
-					UnLock(l);
+				if (exists(path))
 					continue;
-				}
 				path[k - 5] = '.';
+			}
+			/* changed since it was installed (a hosts file, the
+			   Wi-Fi networks): the user's now, it stays */
+			if (sum && entry_type(path) < 0 &&
+			    (drv_file_sum(path, &nsize, &ncrc) != 0 ||
+			    nsize != fsize || ncrc != fcrc)) {
+				changed = 1;
+				continue;
 			}
 			if ((r = delete_one(path)) < 0)
 				rv = -1;
@@ -1164,12 +1562,25 @@ otherstacks_uninstall(char *msg, int size)
 		if (delete_all(own_dirs[i]) != 0 &&
 		    !starts_nocase(own_dirs[i], "ENV:"))
 			rv = -1;
-	/* parked files of another stack: only once they are back */
-	if (restored)
-		delete_all(PARKING);
+	/* the parking drawer: AmiBSDNet's own parked parts go; another
+	   stack's parked files only went back if all of it was restored,
+	   and what is still there stays (only empty drawers go) */
+	if (delete_all(PARKING "/AmiBSDNet") != 0)
+		rv = -1;
+	if (restored) {
+		if (delete_one(PARKING "/WBStartup") > 0 ||
+		    delete_one(PARKING "/Libs") > 0)
+			parked = 1;
+		if (delete_one(PARKING) > 0)
+			parked = 1;
+	}
 	/* the backups of the startup files it changed (S:*.amibsdnet-*):
 	   only when all went well - after a failed restore they are the
-	   only copies of the original startup files */
+	   only copies of the original startup files.  Those REMOVEROADSHOW
+	   made (*.amibsdnet-rs) stay: Roadshow is not put back.  A
+	   <name>.amibsdnet-bak goes only if <name> is the same again: lines
+	   a removal deleted (OTHERS_REMOVE, REMOVEROADSHOW) are not put
+	   back, and then it is the only copy of them */
 	if (restored && rv == 0 &&
 	    (fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
 		char (*bak)[108] = AllocVec(32 * 108, MEMF_ANY);
@@ -1177,39 +1588,72 @@ otherstacks_uninstall(char *msg, int size)
 
 		if (bak && (l = Lock((CONST_STRPTR)"S:", ACCESS_READ)) != 0) {
 			if (Examine(l, fib))
-				while (nb < 32 && ExNext(l, fib))
+				while (nb < 32 && ExNext(l, fib)) {
+					const char *fn = (const char *)
+					    fib->fib_FileName;
+					int fl = slen_(fn);
+
 					if (fib->fib_DirEntryType < 0 &&
-					    has((const char *)fib->fib_FileName,
-					    slen_((const char *)fib->fib_FileName),
-					    ".amibsdnet-"))
-						cat(bak[nb++], (const char *)
-						    fib->fib_FileName, "", 108);
+					    has(fn, fl, ".amibsdnet-") &&
+					    !(fl > 3 && eq_nocase(fn + fl - 3,
+					    "-rs")))
+						cat(bak[nb++], fn, "", 108);
+				}
 			UnLock(l);
 		}
 		for (i = 0; i < nb; i++) {
+			int bl = slen_(bak[i]);
+			char orig[PATHMAX];
+
 			cat(path, "S:", bak[i], sizeof(path));
+			if (bl > 14 && eq_nocase(bak[i] + bl - 14,
+			    ".amibsdnet-bak")) {
+				cat(orig, path, "", sizeof(orig));
+				orig[slen_(orig) - 14] = '\0';
+				if (!same_file(path, orig)) {
+					bakkept = 1;
+					continue;
+				}
+			}
 			delete_one(path);
 		}
 		if (bak)
 			FreeVec(bak);
 		FreeDosObject(DOS_FIB, fib);
 	}
-	/* the log last: if something failed, a second run still knows */
+	/* NetCtrl and the log last, and only if all went well: the message
+	   below tells to run "NetCtrl UNINSTALL" again, and that run needs
+	   both */
+	if (rv == 0 && delete_one(SELF) < 0)
+		rv = -1;
 	if (rv == 0)
 		delete_one(INSTALL_LOG);
 	loud(old);
 	cat(msg, rv == 0 ? "AmiBSDNet is removed. Reboot: the stack still in "
 	    "memory goes then." : "AmiBSDNet is removed, but some files could "
-	    "not be deleted (in use or protected?).\nReboot and run "
-	    "\"NetCtrl UNINSTALL\" again, or delete them by hand.", "", size);
+	    "not be deleted (in use, protected, or a soft link?).\nReboot "
+	    "and run \"NetCtrl UNINSTALL\" again, or delete them by hand.",
+	    "", size);
 	if (kept)
 		cat(msg, msg, "\nA drawer it had created has other files in it "
 		    "now: that drawer and those files were left alone.", size);
+	if (changed)
+		cat(msg, msg, "\nFiles it had installed that were changed since "
+		    "(such as DEVS:Internet/hosts or Wireless.prefs) were left "
+		    "alone.", size);
 	if (!restored)
 		cat(msg, msg, "\nThe stack it had switched from could not be put "
 		    "back completely: its parked files are still in "
 		    "SYS:Storage/AmiBSDNet-Disabled, and S:*.amibsdnet-bak are "
 		    "the original startup files.", size);
+	else if (bakkept)
+		cat(msg, msg, "\nS:*.amibsdnet-bak (the startup files as they "
+		    "were before) were kept: the startup files are not the same "
+		    "now.", size);
+	if (restored && parked)
+		cat(msg, msg, "\nSYS:Storage/AmiBSDNet-Disabled still has "
+		    "files in it that were not put back: they were left "
+		    "alone.", size);
 	return rv;
 }
 
@@ -1270,7 +1714,8 @@ otherstacks_fallback(char *msg, int size)
 			back = 1;
 			old = quiet();
 			/* (and really gone: a C:AmiBSDNet line outside its
-			   own block is not taken out) */
+			   own block is not taken out; NetCtrl REENABLE puts
+			   the block's lines back) */
 			offok = own_startup_off() == 0 &&
 			    !otherstacks_self_atboot();
 			loud(old);
@@ -1290,7 +1735,7 @@ otherstacks_fallback(char *msg, int size)
 
 	if (!back || !offok) {
 		/*
-		 * AmiBSDNet stays, with its own Wi-Fi driver: the trial ends
+		 * AmiBSDNet stays (the Wi-Fi driver is untouched): the trial ends
 		 * here, so that it starts normally from the next boot on and
 		 * there is a network (the other stack could not come back,
 		 * or AmiBSDNet could not be taken out of the boot).
@@ -1303,9 +1748,11 @@ otherstacks_fallback(char *msg, int size)
 		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 		loud(old);
 		cat(msg, !back && startup_rv == 0 ?
-		    "There is no other TCP/IP stack to go back to, so nothing\n"
-		    "was changed: AmiBSDNet stays. It starts at every boot\n"
-		    "(reboot now if it is not running)." :
+		    "No other TCP/IP stack would start at boot (by a startup\n"
+		    "line or a WBStartup item): AmiBSDNet stays. Another stack's\n"
+		    "LIBS:bsdsocket.library or WBStartup items, if there are\n"
+		    "any, are in SYS:Storage/AmiBSDNet-Disabled. AmiBSDNet\n"
+		    "starts at every boot (reboot now if it is not running)." :
 		    !back ?
 		    "The previous TCP/IP stack could not be put back into the\n"
 		    "startup files (are they write-protected?). AmiBSDNet stays,\n"
@@ -1336,18 +1783,20 @@ otherstacks_fallback(char *msg, int size)
 	    "could be put back (see \"NetCtrl CHECK\"). Reboot to use it.",
 	    "\n\nAmiBSDNet's logs were saved in SYS:Storage/AmiBSDNet-Logs.",
 	    size);
+	cat(msg, msg, "\n\"NetCtrl REENABLE\" puts AmiBSDNet back into "
+	    "S:User-Startup.", size);
 	return rv;
 }
 
 int
 otherstacks_apply(int mode)
 {
-	char dummy[128];
+	char found[128];
 	APTR old;
 	int i, rv = 0;
 
 	if (mode != 2)
-		otherstacks_check(dummy, sizeof(dummy));
+		otherstacks_check(found, sizeof(found));
 	old = quiet();
 	startup_rv = 0;
 	build_scripts();
@@ -1357,14 +1806,21 @@ otherstacks_apply(int mode)
 	if (move_wbstartup(mode) < 0)
 		rv = -1;
 	if (mode == 2) {
-		if (exists(PARKING "/Libs/bsdsocket.library") &&
-		    !exists("LIBS:bsdsocket.library") &&
-		    !Rename((CONST_STRPTR)PARKING "/Libs/bsdsocket.library",
-		    (CONST_STRPTR)"LIBS:bsdsocket.library") &&
-		    !(copy_file(PARKING "/Libs/bsdsocket.library",
-		    "LIBS:bsdsocket.library") &&
-		    DeleteFile((CONST_STRPTR)PARKING "/Libs/bsdsocket.library")))
-			rv = -1;
+		/* the parked library back; if there is a LIBS:bsdsocket.library
+		   again, it is not put back, and that is not a full restore:
+		   the parked one stays */
+		if (exists(PARKING "/Libs/bsdsocket.library")) {
+			if (exists("LIBS:bsdsocket.library"))
+				rv = -1;
+			else if (!Rename((CONST_STRPTR)PARKING
+			    "/Libs/bsdsocket.library",
+			    (CONST_STRPTR)"LIBS:bsdsocket.library") &&
+			    !(copy_file(PARKING "/Libs/bsdsocket.library",
+			    "LIBS:bsdsocket.library") &&
+			    DeleteFile((CONST_STRPTR)PARKING
+			    "/Libs/bsdsocket.library")))
+				rv = -1;
+		}
 	} else if (otherstacks_only == NULL &&
 	    park("LIBS:bsdsocket.library", "Libs", "bsdsocket.library",
 	    mode == 1) < 0)

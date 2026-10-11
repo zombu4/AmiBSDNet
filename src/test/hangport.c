@@ -1,7 +1,18 @@
 /*
  * A stack that hangs: the AmiBSDNet control port, whose messages are
- * never answered (until Ctrl-C).  Checks that NetCtrl and the status
- * icon give up instead of waiting for ever.  Usage: Run hangport
+ * never answered (until Ctrl-C).  Checks that NetCtrl gives up instead
+ * of waiting for ever (AMIBSDNET_CTL_TIMEOUT, 30 seconds,
+ * src/include/amibsdnet/ctlcall.h; the status icon waits 10 seconds,
+ * src/tools/status.c, and is not run here).  On an Amiga: Run hangport,
+ * then try NetCtrl STATUS.  In the emulator (build/NetCtrl from
+ * tools/build_amiga.sh or tools/package.py):
+ *
+ *   tools/build_amiga.sh src/test/hangport.c build/hangport
+ *   python -I tools/run_emu.py build/hangport --background
+ *       --file build/NetCtrl --cmd "DH0:NetCtrl STATUS" --timeout 120
+ *
+ * It passes when NetCtrl STATUS returns (the run reaches its end); its
+ * output and return code are in DH0:stdout.txt.
  */
 #include <exec/types.h>
 #include <exec/execbase.h>

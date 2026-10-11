@@ -2,7 +2,15 @@
  * bsdsocket.library client test: an ordinary Amiga program using the
  * AmiTCP/Roadshow API through the NDK's inline calls (the real library
  * ABI).  Run after "Run AmiBSDNet"; in WinUAE's SLIRP network the echo
- * server is 10.0.2.2:7777 (tools/run_emu.py --echo 7777).
+ * server is 10.0.2.2:7777 (tools/run_emu.py --echo 7777), and the name
+ * server 10.0.2.2:53 (tools/run_emu.py --dns 53, named in
+ * tests/slirp-static.conf), which knows amibsdnet.test: no Internet
+ * needed.
+ *
+ *   tools/build_stack.sh
+ *   tools/build_amiga.sh src/test/socktest.c build/socktest
+ *   python -I tools/run_emu.py build/socktest --stack tests/slirp-static.conf
+ *       --echo 7777 --dns 53
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -159,29 +167,30 @@ test_tcp(void)
 		}
 	}
 
-	/* Dup2Socket() onto descriptor 0 (where the library keeps an internal
-	   socket of its own), then talk through 0 */
+	/* Dup2Socket() onto another descriptor, then talk through it.  (The
+	   library keeps its own wake socket at SB_PRIVFD or above,
+	   src/lib/library.c move_private(), so s itself may be 0: the
+	   target must differ from s.) */
 	{
-		LONG d = Dup2Socket(s, 0);
+		LONG t = s == 0 ? 5 : 0, d = Dup2Socket(s, t);
 
-		check("Dup2Socket(s, 0)", d == 0);
-		if (d == 0) {
-			n = send(0, (APTR)msg, sizeof(msg), 0);
+		check("Dup2Socket(s, t)", d == t);
+		if (d == t) {
+			n = send(t, (APTR)msg, sizeof(msg), 0);
 			for (got = 0; n > 0 && got < (LONG)sizeof(msg); got += n)
-				if ((n = recv(0, buf + got, sizeof(buf) - got,
+				if ((n = recv(t, buf + got, sizeof(buf) - got,
 				    0)) <= 0)
 					break;
-			check("echo through descriptor 0",
+			check("echo through the duplicate",
 			    got == sizeof(msg) &&
 			    memcmp(buf, msg, sizeof(msg)) == 0);
-			/* and Ctrl-C still interrupts (the internal socket
-			   was moved, not lost) */
+			/* and Ctrl-C still interrupts */
 			SetSignal(SIGBREAKF_CTRL_C, SIGBREAKF_CTRL_C);
-			n = recv(0, buf, sizeof(buf), 0);
+			n = recv(t, buf, sizeof(buf), 0);
 			check("Ctrl-C still interrupts after Dup2Socket",
 			    n == -1 && errno_ == EINTR);
 			SetSignal(0, SIGBREAKF_CTRL_C);
-			CloseSocket(0);
+			CloseSocket(t);
 		}
 	}
 
@@ -194,11 +203,13 @@ test_resolver(void)
 	struct hostent *h;
 	struct addrinfo *ai = NULL;
 
-	h = gethostbyname((STRPTR)"aminet.net");
-	check("gethostbyname(\"aminet.net\") via DNS", h != NULL &&
-	    h->h_length == 4 && h->h_addr_list[0] != NULL);
-	if (h) {
-		say("     aminet.net = ");
+	/* tools/run_emu.py --dns answers amibsdnet.test with 192.0.2.7 */
+	h = gethostbyname((STRPTR)"amibsdnet.test");
+	check("gethostbyname(\"amibsdnet.test\") via DNS", h != NULL &&
+	    h->h_length == 4 && h->h_addr_list[0] != NULL &&
+	    *(ULONG *)h->h_addr_list[0] == 0xc0000207UL);
+	if (h && h->h_addr_list[0]) {
+		say("     amibsdnet.test = ");
 		say((const char *)Inet_NtoA(*(ULONG *)h->h_addr_list[0]));
 		say("\n");
 	}
@@ -213,13 +224,27 @@ test_resolver(void)
 		freeaddrinfo(ai);
 }
 
+static int
+streq_(const char *a, const char *b)
+{
+
+	while (*a && *a == *b)
+		a++, b++;
+	return *a == *b;
+}
+
 static void
 test_misc(void)
 {
 	char name[64];
 
-	check("inet_addr() / Inet_NtoA() round trip",
-	    inet_addr((STRPTR)"192.168.10.7") == 0xc0a80a07UL);
+	ULONG a = inet_addr((STRPTR)"192.168.10.7");
+	const char *s;
+
+	check("inet_addr(\"192.168.10.7\")", a == 0xc0a80a07UL);
+	s = (const char *)Inet_NtoA(a);
+	check("Inet_NtoA() gives \"192.168.10.7\" back",
+	    s != NULL && streq_(s, "192.168.10.7"));
 	check("gethostname()", gethostname((STRPTR)name, sizeof(name)) == 0);
 	say("     hostname: ");
 	say(name);

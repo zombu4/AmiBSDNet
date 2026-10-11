@@ -1,15 +1,26 @@
-; AmiBSDNet installation script for the Amiga Installer (Workbench 3.2+)
+; AmiBSDNet installation script for the Amiga Installer
 ;
 ; Installs the AmiBSDNet network stack, its tools and the Workbench status
 ; icon, writes the network configuration and starts the stack at boot
 ; from S:User-Startup.
+;
+; tools/package.py puts the lines that set #ver (the version) and
+; #sum-<file> ("<size> <crc32>" of each staged file, for the install
+; log) in front of this script when it builds the package.
+;
+; Installer language: Installer.guide of Installer 43.3 (Aminet
+; util/misc/Installer-43_3.lha).  Only what it documents is used:
+; "and"/"or" take two arguments; askchoice is not used (the guide says
+; it returns a bit mask, but "default" is the number of a choice), so
+; every question is an askbool (0 = the second choice, 1 = the first);
+; loops guard their body with the loop condition, so they work whether
+; "while" tests before or after the body ("do-while" in the guide).
 
 (set #app "AmiBSDNet")
 (set @app-name #app)
-(set #ver "0.8.2")
 
 (if (< (/ (getversion "exec.library" (resident)) 65536) 40)
-	(abort "AmiBSDNet needs AmigaOS 3.1 or later (Workbench 3.2 recommended)."))
+	(abort "AmiBSDNet needs AmigaOS 3.1 or later."))
 
 (if (or (= (database "cpu") "68000") (= (database "cpu") "68010"))
 	(abort "AmiBSDNet needs a 68020 or better CPU (for example a PiStorm)."))
@@ -25,22 +36,23 @@
 (complete 0)
 
 ; -------------------------------------------------------------------
-; other TCP/IP stacks, and whether this is an Emu68 (PiStorm) system:
-; NetCtrl CHECK (from this package) sets AmiBSDNet/OtherStacks,
-; AmiBSDNet/OtherRunning and AmiBSDNet/Emu68
-
 ; AmiBSDNet installed already: install again (update) or uninstall
+
 (if (exists "C:AmiBSDNet")
-	(if (= 1 (askchoice
+	(if (not (askbool
 			(prompt "AmiBSDNet is installed on this Amiga.")
-			(help "Install again: updates AmiBSDNet, keeping your settings.\n\n"
-				"Uninstall: removes everything the installation put on this "
-				"Amiga (listed in S:AmiBSDNet-Install.log): the programs, the "
-				"status icon, the AmiBSDNet drawer, the settings and its line "
-				"in S:User-Startup. A TCP/IP stack it had switched from is put "
-				"back. Your own files and drivers are not touched.")
+			(help "Install again: the programs, the documentation and "
+				"the status icon are updated. You are asked whether to "
+				"keep your network settings, the Wi-Fi network and the "
+				"Shell on the serial port, or to change them.\n\n"
+				"Uninstall: \"NetCtrl UNINSTALL\" takes AmiBSDNet out of "
+				"S:User-Startup and removes the files listed in "
+				"S:AmiBSDNet-Install.log, the programs in C:, the status "
+				"icon in SYS:WBStartup and AmiBSDNet's settings "
+				"(ENVARC:AmiBSDNet). A TCP/IP stack it had switched from "
+				"is put back. Your drivers are not touched.")
 			(choices "Install again (update)" "Uninstall AmiBSDNet")
-			(default 0)))
+			(default 1)))
 		(
 			(if @pretend
 				(exit "(Pretend: nothing was removed.)")
@@ -49,7 +61,9 @@
 						(delete "ENV:AmiBSDNet-Uninstalled" (optional "force")))
 					(run "C/NetCtrl UNINSTALL >T:AmiBSDNet-Uninstall.txt"
 						(prompt "Removing AmiBSDNet")
-						(help @run-help))
+						(help "\"NetCtrl UNINSTALL\" removes AmiBSDNet; "
+							"its report is written to "
+							"T:AmiBSDNet-Uninstall.txt."))
 					(if (= (getenv "AmiBSDNet-Uninstalled") "1")
 						(exit "AmiBSDNet is uninstalled.\n\nReboot now: the "
 							"stack that is still in memory goes then. (What "
@@ -62,24 +76,28 @@
 		)))
 
 (working "Checking the system...")
-(makedir "ENV:AmiBSDNet")
+(makedir "ENV:AmiBSDNet" (safe))
 
-; The install log, S:AmiBSDNet-Install.log: everything this installation
-; creates, one "FILE <path>" line each (and notes), so that the
-; uninstaller (NetCtrl UNINSTALL) removes exactly that.  Files that were
+; -------------------------------------------------------------------
+; The install log, S:AmiBSDNet-Install.log: what this installation
+; creates, one "FILE <path>" line each, so that the uninstaller (NetCtrl
+; UNINSTALL) removes exactly that.  A file copied from this package also
+; has its size and CRC32: "FILE <path> <size> <crc32>".  Files that were
 ; there before (the user's own) are never listed.
 (set #ilog "")
 (set #ilogfile "S:AmiBSDNet-Install.log")
-(set #had-wm (exists "C:WirelessManager"))
 (set #had-wprefs (exists "ENVARC:Sys/Wireless.prefs"))
-(set #had-hosts (exists "DEVS:Internet/hosts"))
 (set #had-internet (exists "DEVS:Internet"))
 ; What an earlier installation listed comes first (a reinstall keeps it;
 ; a file listed twice is no problem).  The log is written as soon as the
-; programs are copied, and again at the end, so that an installation
-; stopped half-way can still be uninstalled.
+; programs are copied, again at each (complete) step after that, and at
+; the end, so that an installation stopped half-way can still be
+; uninstalled.
+; (a "; AmiBSDNet <version> installed" line for each installation; the
+; STARTUP line only once, from the first)
+(set #had-log (exists #ilogfile))
 (if (not @pretend)
-	(if (exists #ilogfile)
+	(if #had-log
 		(copyfiles (source #ilogfile) (dest "T:")
 			(newname "AmiBSDNet-Install.old") (nogauge))
 		(textfile (dest "T:AmiBSDNet-Install.old") (append ""))))
@@ -90,8 +108,51 @@
 			(include "T:AmiBSDNet-Install.old")
 			(append "; AmiBSDNet " #ver " installed: FILE lines are what "
 				"\"NetCtrl UNINSTALL\" removes\n")
-			(append "STARTUP S:User-Startup ;BEGIN AmiBSDNet\n")
+			(append (if #had-log ""
+				"STARTUP S:User-Startup ;BEGIN AmiBSDNet\n"))
 			(append #ilog))))
+
+; Which files are AmiBSDNet's: those that were not there before, and
+; those an earlier AmiBSDNet installation had put there (it noted each
+; in ENVARC:AmiBSDNet/Installed, a file named #o-key).
+(set #owndir "ENVARC:AmiBSDNet/Installed")
+(if (not @pretend) (makedir #owndir))
+; Before a file is copied from this package: #o-path is where it goes,
+; #o-key its note in #owndir, #o-sum the size and CRC32 of the packaged
+; file, #o-force 1 if the user chose to replace a file of his own.  Sets
+; #o-own; if the file is AmiBSDNet's, it is listed in the install log and
+; noted in #owndir.
+(set #o-force 0)
+(procedure P_OWNFILE
+	(
+		(set #o-own (or #o-force
+			(or (not (exists #o-path)) (exists (tackon #owndir #o-key)))))
+		(set #o-force 0)
+		(if #o-own
+			(
+				(set #ilog (cat #ilog "FILE " #o-path " " #o-sum "\n"))
+				(if (not @pretend)
+					(textfile (dest (tackon #owndir #o-key))
+						(append #o-path "\n")))
+			))
+	))
+
+; A file this installation has just written itself, #fs-path: listed in
+; the install log with the size and CRC32 that "NetCtrl CHECKSUM" puts in
+; AmiBSDNet/FileSum; without them if NetCtrl could not read it.
+(procedure P_FILESUM
+	(
+		(if (exists "ENV:AmiBSDNet/FileSum")
+			(delete "ENV:AmiBSDNet/FileSum" (optional "force")))
+		(run (cat "C/NetCtrl CHECKSUM FILE=\"" #fs-path "\" >NIL:"))
+		(set #fs-sum (getenv "AmiBSDNet/FileSum"))
+		(set #ilog (cat #ilog "FILE " #fs-path
+			(if (<> #fs-sum "") (cat " " #fs-sum) "") "\n"))
+	))
+
+; other TCP/IP stacks, and whether this is an Emu68 (PiStorm) system:
+; NetCtrl CHECK (from this package) sets AmiBSDNet/OtherStacks,
+; AmiBSDNet/OtherRunning and AmiBSDNet/Emu68
 (run "C/NetCtrl CHECK >NIL:" (safe))
 (set #others (getenv "AmiBSDNet/OtherStacks"))
 (set #otherrunning (= (getenv "AmiBSDNet/OtherRunning") "1"))
@@ -103,87 +164,134 @@
 ; after it has connected is the switch permanent.  The question is asked
 ; here, but nothing is changed until the very end of the installation,
 ; so aborting the installer anywhere leaves the other stack working.
+; #othersdo: 0 switch (the default), 1 keep, 2 remove Roadshow.  Removing
+; Roadshow cannot be undone, so it is never a default: it is a question
+; of its own whose default is No, asked only at the Average and Expert
+; user levels (the Installer guide: a Novice user is asked no questions,
+; so at the Novice level Roadshow is only switched).
 (set #trial 0)
 (set #othersdo 1)
 (set #roadshow (patmatch "#?Roadshow#?" #others))
 (if (<> #others "")
-	(if #roadshow
+	(
 		(set #othersdo
-			(askchoice
-				(prompt "Another TCP/IP stack is installed:\n" #others
-					"\n\nOnly one TCP/IP stack can run at a time.")
-				(help "Switch: at the end of the installation, " #others
-					" is taken out of the boot. Its startup lines in "
-					"S:Startup-Sequence and S:User-Startup are commented "
-					"out, and its WBStartup items and LIBS:bsdsocket.library "
-					"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
-					"files are saved as <name>.amibsdnet-bak first.\n\n"
-					"This is a trial: if AmiBSDNet does not get connected "
-					"within three minutes after the next boot, it puts "
-					"the other stack back by itself and tells you to "
-					"reboot. Once "
-					"it has connected, the switch stays. You can go back at "
-					"any time with \"NetCtrl FALLBACK\".\n\n"
-					"Keep: nothing is changed, and "
-					"AmiBSDNet is not started while the other stack is "
-					"running.\n\n"
-					"Remove Roadshow completely: at the end of the "
-					"installation everything of Roadshow is deleted from every "
-					"drawer of every volume (also its trial version): its "
-					"programs, libraries, scripts, settings, and every line "
-					"that mentions it in the startup and configuration files. "
-					"A volume or drawer called Work is left alone (keep the "
-					"Roadshow installer there). There is no trial and no way "
-					"back except installing Roadshow again.")
-				(choices (cat "Switch to AmiBSDNet (" #others
-						" comes back if AmiBSDNet fails)")
-					"Keep it (I will take care of it)"
-					"Remove Roadshow completely (deleted, no way back)")
-				(default 2)))
-		; (no Roadshow: no "Remove Roadshow")
-		(set #othersdo
-			(askchoice
-				(prompt "Another TCP/IP stack is installed:\n" #others
-					"\n\nOnly one TCP/IP stack can run at a time.")
-				(help "Switch: at the end of the installation, " #others
-					" is taken out of the boot (its startup lines are "
-					"commented out, its WBStartup items and "
-					"LIBS:bsdsocket.library moved to "
-					"SYS:Storage/AmiBSDNet-Disabled), as a trial: if "
-					"AmiBSDNet does not get connected within three minutes "
-					"after the next boot, everything is put back.\n\n"
-					"Keep: nothing is changed.")
-				(choices (cat "Switch to AmiBSDNet (" #others
-						" comes back if AmiBSDNet fails)")
-					"Keep it (I will take care of it)")
-				(default 0)))))
+			(if (askbool
+					(prompt "Another TCP/IP stack is installed:\n" #others
+						"\n\nOnly one TCP/IP stack can run at a time.")
+					(help "Switch: at the end of the installation, " #others
+						" is taken out of the boot. Its startup lines in "
+						"S:Startup-Sequence and S:User-Startup are commented "
+						"out, and its WBStartup items and LIBS:bsdsocket.library "
+						"are moved to SYS:Storage/AmiBSDNet-Disabled. The startup "
+						"files are saved as <name>.amibsdnet-bak first.\n\n"
+						"This is a trial: if AmiBSDNet does not get connected "
+						"within three minutes after the next boot, it puts "
+						"the other stack back by itself and tells you to "
+						"reboot. Once it has connected, the switch stays. You "
+						"can go back at any time with \"NetCtrl FALLBACK\".\n\n"
+						"Keep: nothing is changed, and AmiBSDNet is not "
+						"started while the other stack is running.")
+					(choices (cat "Switch to AmiBSDNet (" #others
+							" comes back if AmiBSDNet fails)")
+						"Keep it (I will take care of it)")
+					(default 1))
+				0 1))
+		(if (and #roadshow (= #othersdo 0))
+			(if (> @user-level 0)
+				(if (askbool
+						(prompt "Remove Roadshow completely instead of "
+							"switching?\n\nThis deletes Roadshow's programs. "
+							"There is no way back except installing Roadshow "
+							"again.")
+						(help "Remove Roadshow: at the end of the installation "
+							"the files of the Roadshow archive are taken out "
+							"where its installation puts them on SYS:. Its own "
+							"commands, PPP drivers and catalogs are deleted. "
+							"Its settings and scripts (S:Network-Startup, the "
+							"firewall and PPP scripts, DEVS:NetInterfaces, "
+							"DEVS:Internet but hosts and services, "
+							"ENVARC:Roadshow) are moved "
+							"to SYS:Storage/AmiBSDNet-Roadshow, and so are "
+							"LIBS:bsdsocket.library and LIBS:usergroup.library "
+							"if no other TCP/IP stack is installed. Its startup "
+							"lines and WBStartup items are removed, and the "
+							"comments that mention it in S:Startup-Sequence and "
+							"S:User-Startup. Commands with general names (ping, "
+							"ftp...) and anything in other places are left "
+							"alone. There is no trial.\n\n"
+							"Only switch: Roadshow is taken out of the boot as "
+							"a trial and comes back if AmiBSDNet does not get "
+							"connected (see the previous question).")
+						(choices "Remove Roadshow (no way back)"
+							"No, only switch")
+						(default 0))
+					(set #othersdo 2))))
+	))
 
 (complete 10)
 
 ; -------------------------------------------------------------------
 ; programs
 
+; AmiBSDNet, NetCtrl and SerialShell are AmiBSDNet's own names
+(set #o-path "C:AmiBSDNet") (set #o-key "c-amibsdnet")
+(set #o-sum #sum-c-amibsdnet)
+(P_OWNFILE)
+(set #o-path "C:NetCtrl") (set #o-key "c-netctrl")
+(set #o-sum #sum-c-netctrl)
+(P_OWNFILE)
+(set #o-path "C:SerialShell") (set #o-key "c-serialshell")
+(set #o-sum #sum-c-serialshell)
+(P_OWNFILE)
 (copyfiles
 	(prompt "Installing the AmiBSDNet programs to C:")
 	(help @copyfiles-help)
 	(source "C/")
 	(dest "C:")
-	(choices "AmiBSDNet" "NetCtrl" "Ping" "SerialShell")
+	(choices "AmiBSDNet" "NetCtrl" "SerialShell")
 	(nogauge))
-(set #ilog (cat #ilog "FILE C:AmiBSDNet\nFILE C:NetCtrl\nFILE C:Ping\n"
-	"FILE C:SerialShell\n"))
+
+; C:Ping can be another program's (other TCP/IP stacks have one): it is
+; replaced only if the user says so
+(set #copy-ping 1)
+(if (and (exists "C:Ping") (not (exists (tackon #owndir "c-ping"))))
+	(set #copy-ping
+		(askbool
+			(prompt "There is a C:Ping already (it is not AmiBSDNet's). "
+				"Replace it with AmiBSDNet's Ping?")
+			(help "AmiBSDNet's Ping works with any bsdsocket.library "
+				"stack. If you replace C:Ping, the install log lists "
+				"AmiBSDNet's Ping as AmiBSDNet's own file, and uninstalling "
+				"AmiBSDNet removes it. Keep: this installation does not "
+				"replace your C:Ping, and it is not in the install log.")
+			(choices "Replace it" "Keep my C:Ping")
+			(default 0))))
+(if #copy-ping
+	(
+		(set #o-path "C:Ping") (set #o-key "c-ping")
+		(set #o-sum #sum-c-ping)
+		(set #o-force (exists "C:Ping"))
+		(P_OWNFILE)
+		(copyfiles
+			(prompt "Installing Ping to C:")
+			(help @copyfiles-help)
+			(source "C/Ping")
+			(dest "C:")
+			(nogauge))
+	))
 (P_WRITELOG)
 
 ; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt); a newer
-; one already in C: is kept
+; one already in C: is kept (copylib)
+(set #o-path "C:WirelessManager") (set #o-key "c-wirelessmanager")
+(set #o-sum #sum-c-wirelessmanager)
+(P_OWNFILE)
 (copylib
 	(prompt "Installing WirelessManager (Wi-Fi encryption) to C:")
 	(help @copylib-help)
 	(source "C/WirelessManager")
 	(dest "C:")
 	(confirm "expert"))
-(if (and (not #had-wm) (exists "C:WirelessManager"))
-	(set #ilog (cat #ilog "FILE C:WirelessManager\n")))
 
 ; The Wi-Fi driver of a PiStorm (wifipi.device and DEVS:Firmware) belongs
 ; to its Emu68 installation and is never touched here: AmiBSDNet uses the one
@@ -195,6 +303,7 @@
 		"version as your Emu68). Ethernet and other adapters work "
 		"without it."))
 
+(P_WRITELOG)
 (complete 20)
 
 (set #docdest
@@ -204,9 +313,39 @@
 		(help @askdir-help)
 		(default "SYS:")))
 (set #drawer (tackon #docdest "AmiBSDNet"))
+(set @default-dest #drawer)
+; (the drawer and its icon, which makedir makes, have no size and CRC32
+; in the log: listed only if this installation creates them)
 (if (not (exists #drawer))
 	(set #ilog (cat #ilog "FILE " #drawer "\nFILE " #drawer ".info\n")))
 (makedir #drawer (infos))
+; (listed after the drawer: the uninstaller goes from the end, so they go
+; first, and the drawer only if nothing else is in it then)
+(set #n 0)
+(while (< #n 10)
+	(if (< #n 10)
+		(
+			(set #o-key (select #n
+				"docs-amibsdnet-txt" "docs-amibsdnet-txt-info"
+				"docs-license-txt" "docs-license-txt-info"
+				"docs-thirdparty-txt" "docs-thirdparty-txt-info"
+				"docs-netbsd-txt" "docs-netbsd-txt-info"
+				"status-amibsdnetstatus" "status-amibsdnetstatus-info"))
+			(set #o-path (tackon #drawer (select #n
+				"AmiBSDNet.txt" "AmiBSDNet.txt.info"
+				"LICENSE.txt" "LICENSE.txt.info"
+				"ThirdParty.txt" "ThirdParty.txt.info"
+				"NetBSD.txt" "NetBSD.txt.info"
+				"AmiBSDNetStatus" "AmiBSDNetStatus.info")))
+			(set #o-sum (select #n
+				#sum-docs-amibsdnet-txt #sum-docs-amibsdnet-txt-info
+				#sum-docs-license-txt #sum-docs-license-txt-info
+				#sum-docs-thirdparty-txt #sum-docs-thirdparty-txt-info
+				#sum-docs-netbsd-txt #sum-docs-netbsd-txt-info
+				#sum-status-amibsdnetstatus #sum-status-amibsdnetstatus-info))
+			(P_OWNFILE)
+			(set #n (+ #n 1))
+		)))
 (copyfiles
 	(prompt "Installing the documentation")
 	(help @copyfiles-help)
@@ -221,33 +360,30 @@
 	(all)
 	(infos)
 	(nogauge))
-; (listed after the drawer: the uninstaller goes from the end, so they go
-; first, and the drawer only if nothing else is in it then)
-(set #ilog (cat #ilog
-	"FILE " (tackon #drawer "AmiBSDNet.txt") "\n"
-	"FILE " (tackon #drawer "AmiBSDNet.txt.info") "\n"
-	"FILE " (tackon #drawer "LICENSE.txt") "\n"
-	"FILE " (tackon #drawer "LICENSE.txt.info") "\n"
-	"FILE " (tackon #drawer "ThirdParty.txt") "\n"
-	"FILE " (tackon #drawer "ThirdParty.txt.info") "\n"
-	"FILE " (tackon #drawer "AmiBSDNetStatus") "\n"
-	"FILE " (tackon #drawer "AmiBSDNetStatus.info") "\n"))
 
+(P_WRITELOG)
 (complete 40)
 
 ; -------------------------------------------------------------------
 ; network configuration
 
-; find the network adapters: NetCtrl PROBE opens every SANA-II driver
-; and sets AmiBSDNet/Ethernet and AmiBSDNet/WiFi
+; find the network adapters: NetCtrl PROBE opens the SANA-II drivers
+; (not PaulaNET, wifipi and genet: src/common/probe.c add()) and sets
+; AmiBSDNet/Ethernet and AmiBSDNet/WiFi
 (working "Looking for network adapters...")
 (run "C/NetCtrl PROBE >NIL:" (safe))
 (set #eth (getenv "AmiBSDNet/Ethernet"))
 (set #wlan (getenv "AmiBSDNet/WiFi"))
 (set #paula (getenv "AmiBSDNet/PaulaNET"))
+; PiStorm drivers whose hardware is not in this Amiga (genet.device needs
+; a Raspberry Pi 4B or CM4, wifipi.device its firmware...): left out
+(set #unusable (getenv "AmiBSDNet/Unusable"))
+(if (<> #unusable "")
+	(message "These network drivers are installed, but are not used: "
+		"their hardware is not there, or something they need is "
+		"missing:\n\n" #unusable))
 (set #ethunit 0)
 (set #wlanunit 0)
-
 
 ; PaulaNET (Wi-Fi through the floppy port): AmiBSDNet uses it by itself
 ; whenever it is plugged in.  Its driver comes on the adapter's own
@@ -268,8 +404,8 @@
 		(set #drvver (getenv "AmiBSDNet/DriverVersion"))
 	))
 (set #newdrv "DEVS:Networks/PaulaNET.device.new")
-(if (and (not @pretend) (<> #paula "")
-		(exists "PaulaNET:PaulaNET.device" (noreq)))
+(if (and (not @pretend)
+		(and (<> #paula "") (exists "PaulaNET:PaulaNET.device" (noreq))))
 	(if (askbool
 			(prompt "A PaulaNET adapter (Wi-Fi through the floppy port) "
 				"is plugged in.\n\nCopy its driver from the PaulaNET disk "
@@ -278,6 +414,7 @@
 			(help "AmiBSDNet reads the driver twice and compares it with "
 				"the copy, and copies it again if they differ. A driver "
 				"already in DEVS:Networks is replaced only by a good copy. "
+				"The copy is not in the install log. "
 				"Its Wi-Fi network is set up with the PaulaNET Config "
 				"program on the PaulaNET disk.")
 			(default 1))
@@ -285,34 +422,36 @@
 			(set #tries 0)
 			(set #copied 0)
 			(makedir "DEVS:Networks")
-			; to a temporary name: a bad copy never replaces a good driver
+			; to PaulaNET.device.new first: a bad copy never replaces a
+			; good driver
 			(while (and (< #tries 3) (not #copied))
-				(
-					(set #tries (+ #tries 1))
-					(if (exists #newdrv) (delete #newdrv (optional "force")))
-					; a read error must not end the installation: the
-					; comparison below finds a missing or bad copy
-					(copyfiles (source "PaulaNET:PaulaNET.device")
-						(dest "DEVS:Networks") (newname "PaulaNET.device.new")
-						(optional "nofail") (nogauge))
-					(set #chkfile "PaulaNET:PaulaNET.device")
-					(P_CHECKDRV)
-					(set #srcstate #drvstate)
-					(set #srccrc #drvcrc)
-					(set #chkfile #newdrv)
-					(P_CHECKDRV)
-					(if (and (= #drvcrc #srccrc) (<> #drvcrc "")
-							(<> #drvstate "DAMAGED") (<> #srcstate "DAMAGED"))
-						(set #copied 1))
-				))
+				(if (and (< #tries 3) (not #copied))
+					(
+						(set #tries (+ #tries 1))
+						(if (exists #newdrv) (delete #newdrv (optional "force")))
+						; a read error must not end the installation: the
+						; comparison below finds a missing or bad copy
+						(copyfiles (source "PaulaNET:PaulaNET.device")
+							(dest "DEVS:Networks") (newname "PaulaNET.device.new")
+							(optional "nofail") (nogauge))
+						(set #chkfile "PaulaNET:PaulaNET.device")
+						(P_CHECKDRV)
+						(set #srcstate #drvstate)
+						(set #srccrc #drvcrc)
+						(set #chkfile #newdrv)
+						(P_CHECKDRV)
+						(if (and (and (= #drvcrc #srccrc) (<> #drvcrc ""))
+								(and (<> #drvstate "DAMAGED")
+									(<> #srcstate "DAMAGED")))
+							(set #copied 1))
+					)))
 			(if #copied
 				(
 					(if (exists "DEVS:Networks/PaulaNET.device")
 						(delete "DEVS:Networks/PaulaNET.device"
 							(optional "force")))
 					; (not in the install log: the driver comes from
-					; the adapter's own disk and stays when AmiBSDNet
-					; is uninstalled)
+					; the adapter's own disk)
 					(rename #newdrv "DEVS:Networks/PaulaNET.device")
 					; a copy straight in DEVS: would be loaded instead
 					(if (exists "DEVS:PaulaNET.device")
@@ -350,232 +489,430 @@
 				"again from the PaulaNET disk, or re-flash the adapter."))
 	))
 
-(set #manual 1)
-(if (and (= #eth "") (= #wlan "") (<> #paula ""))
-	(set #manual
-		(not (askbool
-			(prompt "Only the PaulaNET adapter was found. AmiBSDNet uses "
-				"it whenever it is plugged in.\n\nUse only PaulaNET?")
-			(help "Choose \"Add a driver\" if this Amiga has another network "
-				"card whose driver was not found.")
-			(choices "Only PaulaNET" "Add a driver")
-			(default 1)))))
-(if (or (<> #eth "") (<> #wlan ""))
-	(set #manual
-		(not (askbool
-			(prompt "Network adapters found:\n\n"
-				(if (<> #eth "") (cat "Ethernet:  " #eth "\n") "")
-				(if (<> #wlan "") (cat "Wi-Fi:  " #wlan "\n") "")
-				"\nUse "
-				(if (and (<> #eth "") (<> #wlan "")) "both adapters"
-					"this adapter")
-				" for the network?"
-				(if (and (<> #eth "") (<> #wlan ""))
-					"\n(They work at the same time; Ethernet is used\nfor the Internet while its cable is connected.)" ""))
-			(help "AmiBSDNet found these SANA-II drivers in DEVS:Networks. "
-				"Choose No to pick the driver yourself. The adapters can "
-				"be changed later in the status icon's Settings window.")
-			(choices "Yes" "Choose myself")
-			(default 1)))))
+; An earlier installation's network settings: kept as they are, or
+; entered again
+(set #confdir "ENVARC:AmiBSDNet")
+(set #conf (tackon #confdir "AmiBSDNet.conf"))
+(set #keepnet 0)
+(if (exists #conf)
+	(set #keepnet
+		(askbool
+			(prompt "There are AmiBSDNet network settings on this Amiga "
+				"(ENVARC:AmiBSDNet/AmiBSDNet.conf). Keep them?")
+			(help "Keep my settings: the file is not changed, and the "
+				"questions about the network adapters, Wi-Fi, the address "
+				"and the host name are skipped.\n\n"
+				"Enter them again: you are asked those questions, and the "
+				"file is written anew. Of the old file only the PaulaNET "
+				"lines (\"paulanet ...\" and \"autodetect ...\") are kept; "
+				"everything else in it (for example \"domain\" lines) is "
+				"replaced. Wi-Fi settings already in "
+				"ENVARC:Sys/Wireless.prefs are kept unless you choose to "
+				"replace them.")
+			(choices "Keep my settings" "Enter them again")
+			(default 1))))
 
-(if #manual
+; checks the host name #hname: sets #hok (letters, digits and '-', 1 to
+; 63 characters, not starting or ending with '-')
+(procedure P_HOSTOK
+	(set #hok
+		(and (and (> (strlen #hname) 0) (< (strlen #hname) 64))
+			(and (patmatch "#([a-zA-Z0-9]|-)" #hname)
+				(and (not (patmatch "-#?" #hname))
+					(not (patmatch "#?-" #hname)))))))
+
+; checks the IPv4 address #iptext ("a.b.c.d", each 0 to 255; with
+; #ipprefix 1 followed by "/n", n from 1 to 32), as the stack reads it
+; (src/stack/config.c parse_ip): sets #ipok
+(procedure P_IPOK
 	(
-		(set #devfile
-			(askfile
-				(prompt "Choose the SANA-II driver of your network hardware "
-					"(PiStorm Wi-Fi: wifipi.device, WinUAE: uaenet.device; "
-					"type the name if it is not listed)")
-				(help "AmiBSDNet talks to your network card through its SANA-II "
-					"driver, normally found in DEVS:Networks/. Your card's "
-					"documentation names the driver. If it is not listed "
-					"(for example because it is built into ROM), type its "
-					"name into the file field.")
-				(default "DEVS:Networks/")))
-		(set #device (fileonly #devfile))
-		(set #unit
-			(asknumber
-				(prompt "Unit number of the network card (usually 0)")
-				(help "Only needed when one driver handles several cards.")
-				(range 0 31)
-				(default 0)))
-		(if (askbool
-				(prompt "Is " #device " a Wi-Fi adapter (for example the "
-					"PiStorm's wifipi.device)?")
-				(help "For Wi-Fi, AmiBSDNet needs the network name and "
-					"passphrase. You can change them later in the status "
-					"icon's Settings window.")
-				(default (if (patmatch "#?(wifi|wlan|prism|wireless)#?"
-					#device) 1 0)))
-			((set #eth "") (set #wlan #device) (set #wlanunit #unit))
-			((set #eth #device) (set #ethunit #unit) (set #wlan "")))
+		(set #ipok 1)
+		(set #ipi 0)
+		(set #ipn (strlen #iptext))
+		(set #ipdots 0)
+		(set #ipdig 0)
+		(set #ipval 0)
+		(set #ipslash 0)
+		(set #ippre 0)
+		(set #ipprd 0)
+		(while (and #ipok (< #ipi #ipn))
+			(if (and #ipok (< #ipi #ipn))
+				(
+					(set #ipc (substr #iptext #ipi 1))
+					(if (patmatch "[0-9]" #ipc)
+						(if #ipslash
+							(
+								(set #ippre (+ (* #ippre 10) (+ #ipc)))
+								(set #ipprd (+ #ipprd 1))
+							)
+							(
+								(set #ipval (+ (* #ipval 10) (+ #ipc)))
+								(set #ipdig (+ #ipdig 1))
+								(if (or (> #ipdig 3) (> #ipval 255))
+									(set #ipok 0))
+							))
+						(if (= #ipc ".")
+							(if (or #ipslash (or (= #ipdig 0) (= #ipdots 3)))
+								(set #ipok 0)
+								(
+									(set #ipdots (+ #ipdots 1))
+									(set #ipdig 0)
+									(set #ipval 0)
+								))
+							(if (= #ipc "/")
+								(if (or (not #ipprefix)
+										(or #ipslash
+											(or (= #ipdig 0) (<> #ipdots 3))))
+									(set #ipok 0)
+									(set #ipslash 1))
+								(set #ipok 0))))
+					(set #ipi (+ #ipi 1))
+				)))
+		(if (or (<> #ipdots 3) (= #ipdig 0)) (set #ipok 0))
+		(if #ipprefix
+			(if (or (not #ipslash)
+					(or (or (= #ipprd 0) (> #ipprd 2))
+						(or (< #ippre 1) (> #ippre 32))))
+				(set #ipok 0)))
 	))
 
-; Wi-Fi: the network name and passphrase go to Wireless.prefs, which
-; WirelessManager (started by AmiBSDNet) uses to join the network
-(if (<> #wlan "")
+(if (not #keepnet)
 	(
-		(set #write-wifi 1)
-		(if (exists "ENVARC:Sys/Wireless.prefs")
-			(set #write-wifi
-				(askbool
-					(prompt "Wi-Fi settings already exist "
-						"(ENVARC:Sys/Wireless.prefs). Replace them?")
-					(help "Choose No to keep your current Wi-Fi network.")
-					(default 0))))
-		(if #write-wifi
+		(set #manual 1)
+		(if (and (and (= #eth "") (= #wlan "")) (<> #paula ""))
+			(set #manual
+				(not (askbool
+					(prompt "Only the PaulaNET adapter was found. AmiBSDNet uses "
+						"it whenever it is plugged in.\n\nUse only PaulaNET?")
+					(help "Choose \"Add a driver\" if this Amiga has another "
+						"network card whose driver was not found.")
+					(choices "Only PaulaNET" "Add a driver")
+					(default 1)))))
+		(if (or (<> #eth "") (<> #wlan ""))
+			(set #manual
+				(not (askbool
+					(prompt "Network adapters found:\n\n"
+						(if (<> #eth "") (cat "Ethernet:  " #eth "\n") "")
+						(if (<> #wlan "") (cat "Wi-Fi:  " #wlan "\n") "")
+						"\nUse "
+						(if (and (<> #eth "") (<> #wlan "")) "both adapters"
+							"this adapter")
+						" for the network?"
+						(if (and (<> #eth "") (<> #wlan ""))
+							"\n(They work at the same time; Ethernet is used\nfor the Internet while its cable is connected.)" ""))
+					(help "AmiBSDNet found these SANA-II drivers in "
+						"DEVS:Networks. Choose \"Choose myself\" to pick the "
+						"driver yourself. The adapters can be changed later "
+						"in the status icon's Settings window.")
+					(choices "Yes" "Choose myself")
+					(default 1)))))
+
+		(if #manual
 			(
-				(set #ssid
-					(askstring
-						(prompt "Name (SSID) of your Wi-Fi network\n"
-							"(leave empty to choose it later from the "
-							"status icon)")
-						(help "Exactly as shown by your router, including "
-							"upper and lower case.")
-						(default "")))
-				(if (<> #ssid "")
+				(set #devfile
+					(askfile
+						(prompt "Choose the SANA-II driver of your network "
+							"hardware (PiStorm Wi-Fi: wifipi.device, WinUAE: "
+							"uaenet.device; type the name if it is not listed)")
+						(help "AmiBSDNet talks to your network card through "
+							"its SANA-II driver, normally found in "
+							"DEVS:Networks/. Your card's documentation names "
+							"the driver. If it is not listed (for example "
+							"because it is built into ROM), type its name "
+							"into the file field.")
+						(default "DEVS:Networks/")))
+				(set #device (fileonly #devfile))
+				(set #unit
+					(asknumber
+						(prompt "Unit number of the network card (usually 0)")
+						(help "Only needed when one driver handles several "
+							"cards.")
+						(range 0 31)
+						(default 0)))
+				(if (askbool
+						(prompt "Is " #device " a Wi-Fi adapter (for example "
+							"the PiStorm's wifipi.device)?")
+						(help "For Wi-Fi, AmiBSDNet needs the network name and "
+							"passphrase. You can change them later in the "
+							"status icon's Settings window.")
+						(default (if (patmatch "#?(wifi|wlan|prism|wireless)#?"
+							#device) 1 0)))
+					((set #eth "") (set #wlan #device) (set #wlanunit #unit))
+					((set #eth #device) (set #ethunit #unit) (set #wlan "")))
+			))
+
+		; Wi-Fi: the network name and passphrase go to Wireless.prefs,
+		; which WirelessManager (started by AmiBSDNet) uses to join the
+		; network (its format: the Manual in the prism2v2 archive)
+		(if (<> #wlan "")
+			(
+				(set #write-wifi 1)
+				(if (exists "ENVARC:Sys/Wireless.prefs")
+					(set #write-wifi
+						(askbool
+							(prompt "Wi-Fi settings already exist "
+								"(ENVARC:Sys/Wireless.prefs). Replace them?")
+							(help "Choose No to keep your current Wi-Fi "
+								"network.")
+							(default 0))))
+				(if #write-wifi
 					(
-						; WPA wants 8 to 63 characters; a '"' would end
+						; an SSID has 1 to 32 characters; a '"' would end
 						; the quoted value in Wireless.prefs
-						(set #psk
-							(askstring
-								(prompt "Wi-Fi passphrase (leave empty for "
-									"an open network)")
-								(help "8 to 63 characters for WPA/WPA2.")
-								(default "")))
-						(while (and (<> #psk "")
-								(or (< (strlen #psk) 8) (> (strlen #psk) 63)
-									(patmatch "#?\"#?" #psk)))
-							(set #psk
-								(askstring
-									(prompt "The passphrase must have 8 to "
-										"63 characters, and no \". Wi-Fi "
-										"passphrase (leave empty for an open "
-										"network):")
-									(help "8 to 63 characters for WPA/WPA2. "
-										"It can also be set later in the "
-										"status icon's Wi-Fi window.")
-									(default ""))))
-						(makedir "ENVARC:Sys")
-						(if (= #psk "")
-							(textfile
-								(dest "ENVARC:Sys/Wireless.prefs")
-								(append "network={\n\tssid=\"" #ssid "\"\n"
-									"\tkey_mgmt=NONE\n}\n"))
-							(textfile
-								(dest "ENVARC:Sys/Wireless.prefs")
-								(append "network={\n\tssid=\"" #ssid "\"\n"
-									"\tpsk=\"" #psk "\"\n"
-									"\tkey_mgmt=WPA-PSK\n}\n")))
-						(makedir "ENV:Sys")
-						(copyfiles (source "ENVARC:Sys/Wireless.prefs")
-							(dest "ENV:Sys") (nogauge))
-						(if (not #had-wprefs)
-							(set #ilog (cat #ilog
-								"FILE ENVARC:Sys/Wireless.prefs\n"
-								"FILE ENV:Sys/Wireless.prefs\n")))
+						(set #ssid "")
+						(set #ssidbad 1)
+						(while #ssidbad
+							(if #ssidbad
+								(
+									(set #ssid
+										(askstring
+											(prompt "Name (SSID) of your Wi-Fi "
+												"network\n(leave empty to choose "
+												"it later from the status icon)"
+												(if (= #ssidbad 2)
+													(cat "\n\nThe name can have up "
+														"to 32 characters and no "
+														"\".") ""))
+											(help "Exactly as shown by your "
+												"router, including upper and "
+												"lower case. A network whose "
+												"name has a \" in it cannot be "
+												"set up here.")
+											(default #ssid)))
+									(set #ssidbad
+										(if (or (> (strlen #ssid) 32)
+												(patmatch "#?\"#?" #ssid))
+											2 0))
+								)))
+						(if (<> #ssid "")
+							(
+								(set #hidden
+									(askbool
+										(prompt "Is " #ssid " a hidden network "
+											"(one that does not show its name)?")
+										(help "For a hidden network, "
+											"WirelessManager looks for it by "
+											"its name (\"scan_ssid=1\" in "
+											"Wireless.prefs, see "
+											"WirelessManager's manual).")
+										(default 0)))
+								; WPA wants 8 to 63 characters; a '"' would
+								; end the quoted value in Wireless.prefs
+								(set #psk "")
+								(set #pskbad 1)
+								(while #pskbad
+									(if #pskbad
+										(
+											(set #psk
+												(askstring
+													(prompt "Wi-Fi passphrase "
+														"(leave empty for an open "
+														"network)"
+														(if (= #pskbad 2)
+															(cat "\n\nThe passphrase "
+																"must have 8 to 63 "
+																"characters, and "
+																"no \".") ""))
+													(help "8 to 63 characters for "
+														"WPA/WPA2. It can also be "
+														"set later in the status "
+														"icon's Wi-Fi window.")
+													(default "")))
+											(set #pskbad
+												(if (= #psk "") 0
+													(if (or (or (< (strlen #psk) 8)
+																(> (strlen #psk) 63))
+															(patmatch "#?\"#?" #psk))
+														2 0)))
+										)))
+								(makedir "ENVARC:Sys")
+								(textfile
+									(dest "ENVARC:Sys/Wireless.prefs")
+									(append "network={\n\tssid=\"" #ssid "\"\n")
+									(append (if #hidden "\tscan_ssid=1\n" ""))
+									(append (if (= #psk "") "\tkey_mgmt=NONE\n"
+										(cat "\tpsk=\"" #psk "\"\n"
+											"\tkey_mgmt=WPA-PSK\n")))
+									(append "}\n"))
+								(makedir "ENV:Sys")
+								(copyfiles (source "ENVARC:Sys/Wireless.prefs")
+									(dest "ENV:Sys") (nogauge))
+								; size and CRC32 of what was just written
+								; (NetCtrl CHECKSUM), so that the uninstaller
+								; keeps the file once it has been changed
+								(if (not #had-wprefs)
+									(
+										(set #fs-path "ENVARC:Sys/Wireless.prefs")
+										(P_FILESUM)
+										(set #fs-path "ENV:Sys/Wireless.prefs")
+										(P_FILESUM)
+									))
+							))
 					))
 			))
+
+		; PaulaNET alone always uses DHCP
+		(set #mode 0)
+		(if (or (<> #eth "") (<> #wlan ""))
+			(set #mode
+				(if (askbool
+						(prompt "How does this Amiga get its network address?")
+						(help "Most home networks hand out addresses "
+							"automatically (DHCP). Choose a fixed address only "
+							"if your network needs one; it is used for Ethernet "
+							"if there is an Ethernet adapter, else for Wi-Fi.")
+						(choices "Automatically (DHCP)" "Fixed address")
+						(default 1))
+					0 1)))
+
+		(set #hname "amiga")
+		(set #hok 0)
+		(set #hbad 0)
+		(while (not #hok)
+			(if (not #hok)
+				(
+					(set #hname
+						(askstring
+							(prompt "Name of this computer on the network"
+								(if #hbad
+									(cat "\n\n(letters, digits and '-' only, "
+										"1 to 63 characters, not '-' first "
+										"or last)") ""))
+							(help "Letters, digits and '-' only, 1 to 63 "
+								"characters, not starting or ending with "
+								"'-'.")
+							(default #hname)))
+					(P_HOSTOK)
+					(set #hbad (not #hok))
+				)))
+
+		(set #addr "")
+		(set #gw "")
+		(set #dns "")
+		(if (= #mode 1)
+			(
+				(set #ipprefix 1)
+				(set #ipok 0)
+				(set #addr "192.168.1.20/24")
+				(while (not #ipok)
+					(if (not #ipok)
+						(
+							(set #addr
+								(askstring
+									(prompt "Address and prefix length of this "
+										"Amiga, for example 192.168.1.20/24")
+									(help "Four numbers from 0 to 255 with dots "
+										"between them, then '/' and the prefix "
+										"length (1 to 32). The /24 means "
+										"netmask 255.255.255.0.")
+									(default #addr)))
+							(set #iptext #addr)
+							(P_IPOK)
+						)))
+				(set #ipprefix 0)
+				(set #ipok 0)
+				(set #gw "192.168.1.1")
+				(while (not #ipok)
+					(if (not #ipok)
+						(
+							(set #gw
+								(askstring
+									(prompt "Address of your router (default "
+										"gateway), for example 192.168.1.1; "
+										"leave empty if there is none")
+									(help "Four numbers from 0 to 255 with dots "
+										"between them.")
+									(default #gw)))
+							(set #iptext #gw)
+							(if (= #gw "") (set #ipok 1) (P_IPOK))
+						)))
+				(set #ipok 0)
+				(set #dns #gw)
+				(while (not #ipok)
+					(if (not #ipok)
+						(
+							(set #dns
+								(askstring
+									(prompt "Address of your DNS server (often "
+										"the router); leave empty if there is "
+										"none")
+									(help "Four numbers from 0 to 255 with dots "
+										"between them.")
+									(default #dns)))
+							(set #iptext #dns)
+							(if (= #dns "") (set #ipok 1) (P_IPOK))
+						)))
+			))
+
+		; one interface per adapter, Ethernet first (the preferred route);
+		; a fixed address goes to the first one
+		(set #fixedtext (cat " address " #addr))
+		(set #ethline "")
+		(set #wlanline "")
+		(set #next "sana0")
+		(if (<> #eth "")
+			(
+				(set #ethline (cat "interface  sana0 " #eth " " #ethunit
+					(if (= #mode 1) #fixedtext " dhcp") "\n"))
+				(set #next "sana1")
+			))
+		(if (<> #wlan "")
+			(set #wlanline (cat "interface  " #next " " #wlan " " #wlanunit
+				(if (and (= #mode 1) (= #eth "")) #fixedtext " dhcp")
+				" wifi\n")))
+
+		(makedir #confdir)
+		; keep the PaulaNET settings of an earlier installation (Settings
+		; window): NetCtrl KEEPCONF copies its "paulanet" and "autodetect"
+		; lines
+		(set #keep "T:AmiBSDNet.keep")
+		(if (exists #keep) (delete #keep (optional "force") (safe)))
+		; (PaulaNET alone: an old "autodetect off" would leave no network)
+		; ((run) "returns the primary result of the program directly",
+		; Installer.guide; NetCtrl KEEPCONF returns 10 when <out> cannot
+		; be written in full, src/tools/netctrl.c keepconf())
+		(if (<> 0 (run (cat "C/NetCtrl KEEPCONF FILE=" #keep
+				(if (and (= #eth "") (= #wlan "")) " NOAUTODETECT" "")
+				" >NIL:") (safe)))
+			(abort "The PaulaNET settings of the earlier installation "
+				"could not be kept (" #keep " could not be written). "
+				#conf " was not written."))
+		(if (not (exists #keep))
+			(textfile (dest #keep) (append "") (safe)))
+		(textfile
+			(include #keep)
+			(prompt "Writing the network configuration")
+			(help "The network configuration is written to "
+				"ENVARC:AmiBSDNet/AmiBSDNet.conf.")
+			(dest #conf)
+			(append "# AmiBSDNet configuration (see the AmiBSDNet "
+				"documentation; the status icon's Settings window edits it)\n")
+			(append "hostname   " #hname "\n")
+			(append #ethline)
+			(append #wlanline)
+			(append (if (<> #gw "") (cat "gateway    " #gw "\n") ""))
+			(append (if (<> #dns "") (cat "nameserver " #dns "\n") "")))
+
+		; the running system reads ENV:
+		(makedir "ENV:AmiBSDNet")
+		(copyfiles (source #conf) (dest "ENV:AmiBSDNet") (nogauge))
 	))
-
-; PaulaNET alone always uses DHCP
-(set #mode 0)
-(if (or (<> #eth "") (<> #wlan ""))
-	(set #mode
-		(askchoice
-			(prompt "How does this Amiga get its network address?")
-			(help "Most home networks hand out addresses automatically "
-				"(DHCP). Choose a fixed address only if your network needs "
-				"one; it is used for Ethernet if there is an Ethernet "
-				"adapter, else for Wi-Fi.")
-			(choices "Automatically (DHCP)" "Fixed address")
-			(default 0))))
-
-(set #hostname
-	(askstring
-		(prompt "Name of this computer on the network")
-		(help "Letters, digits and '-' only.")
-		(default "amiga")))
-
-(set #addr "")
-(set #gw "")
-(set #dns "")
-(if (= #mode 1)
-	(
-		(set #addr
-			(askstring
-				(prompt "Address and prefix length of this Amiga, "
-					"for example 192.168.1.20/24")
-				(help "The /24 means netmask 255.255.255.0.")
-				(default "192.168.1.20/24")))
-		(set #gw
-			(askstring
-				(prompt "Address of your router (default gateway)")
-				(help @askstring-help)
-				(default "192.168.1.1")))
-		(set #dns
-			(askstring
-				(prompt "Address of your DNS server (often the router)")
-				(help @askstring-help)
-				(default #gw)))
-	))
-
-; one interface per adapter, Ethernet first (the preferred route); a
-; fixed address goes to the first one
-(set #fixedtext (cat " address " #addr))
-(set #ethline "")
-(set #wlanline "")
-(set #next "sana0")
-(if (<> #eth "")
-	(
-		(set #ethline (cat "interface  sana0 " #eth " " #ethunit
-			(if (= #mode 1) #fixedtext " dhcp") "\n"))
-		(set #next "sana1")
-	))
-(if (<> #wlan "")
-	(set #wlanline (cat "interface  " #next " " #wlan " " #wlanunit
-		(if (and (= #mode 1) (= #eth "")) #fixedtext " dhcp")
-		" wifi\n")))
-
-(set #confdir "ENVARC:AmiBSDNet")
-(makedir #confdir)
-(set #conf (tackon #confdir "AmiBSDNet.conf"))
-; keep the PaulaNET settings of an earlier installation (Settings window)
-(set #keep "T:AmiBSDNet.keep")
-(if (exists #keep) (delete #keep (optional "force") (safe)))
-; (PaulaNET alone: an old "autodetect off" would leave no network)
-(run (cat "C/NetCtrl KEEPCONF FILE=" #keep
-	(if (and (= #eth "") (= #wlan "")) " NOAUTODETECT" "") " >NIL:") (safe))
-(if (not (exists #keep))
-	(textfile (dest #keep) (append "") (safe)))
-(textfile
-	(include #keep)
-	(prompt "Writing the network configuration")
-	(help @textfile-help)
-	(dest #conf)
-	(append "# AmiBSDNet configuration (see the AmiBSDNet documentation; "
-		"the status icon's Settings window edits it)\n")
-	(append "hostname   " #hostname "\n")
-	(append #ethline)
-	(append #wlanline)
-	(append (if (<> #gw "") (cat "gateway    " #gw "\n") ""))
-	(append (if (<> #dns "") (cat "nameserver " #dns "\n") "")))
-
-; the running system reads ENV:
-(makedir "ENV:AmiBSDNet")
-(copyfiles (source #conf) (dest "ENV:AmiBSDNet") (nogauge))
 
 ; a hosts file for local names, unless one exists
 (if (not (exists "DEVS:Internet/hosts"))
 	(
-		(makedir "DEVS:Internet")
-		(textfile
-			(dest "DEVS:Internet/hosts")
-			(append "# host name table: address  name  [aliases]\n")
-			(append "127.0.0.1  localhost\n"))
-		(set #ilog (cat #ilog (if #had-internet "" "FILE DEVS:Internet\n")
-			"FILE DEVS:Internet/hosts\n"))
+		(if (not #had-internet)
+			(set #ilog (cat #ilog "FILE DEVS:Internet\n")))
+		(set #o-path "DEVS:Internet/hosts") (set #o-key "internet-hosts")
+		(set #o-sum #sum-internet-hosts)
+		(P_OWNFILE)
+		(copyfiles
+			(source "Internet/hosts")
+			(dest "DEVS:Internet")
+			(nogauge))
 	))
 
+(P_WRITELOG)
 (complete 70)
 
 ; -------------------------------------------------------------------
@@ -588,29 +925,46 @@
 	(help @startup-help)
 	(command "Run >NIL: C:SerialShell AUTO\nC:AmiBSDNet\n"))
 
+; the Shell on the serial port: an earlier setting is kept unless the
+; user switches it off here
 (if (not @pretend)
-	(if (askbool
-			(prompt "Start a Shell on the serial port at every boot?\n\n"
-				"19200 baud, 8 data bits, no parity, 1 stop bit, no "
-				"handshaking (no XON/XOFF, no RTS/CTS). It can be switched "
-				"on and off, and its speed changed, in the status icon's "
-				"Settings window.")
-			(help "For a terminal program on another computer, connected "
-				"with a null-modem cable. Type EndShell to end a Shell; a "
-				"new one starts. \"SerialShell STOP\" stops it until the "
-				"next boot.")
-			(default 0))
+	(if (exists "ENVARC:AmiBSDNet/SerialShell")
 		(
-			(makedir "ENVARC:AmiBSDNet")
-			(textfile (dest "ENVARC:AmiBSDNet/SerialShell") (append "19200"))
-			(textfile (dest "ENV:AmiBSDNet/SerialShell") (append "19200"))
+			(set #serbaud (getenv "AmiBSDNet/SerialShell"))
+			(if (not (askbool
+					(prompt "The Shell on the serial port is switched on"
+						(if (<> #serbaud "") (cat " (" #serbaud " baud)") "")
+						". Keep it on?")
+					(help "It starts at every boot, for a terminal program "
+						"on another computer connected with a null-modem "
+						"cable. It can also be switched on and off, and its "
+						"speed changed, in the status icon's Settings window.")
+					(choices "Keep it on" "Switch it off")
+					(default 1)))
+				(
+					(delete "ENVARC:AmiBSDNet/SerialShell" (optional "force"))
+					(if (exists "ENV:AmiBSDNet/SerialShell")
+						(delete "ENV:AmiBSDNet/SerialShell"
+							(optional "force")))
+				))
 		)
-		(
-			(if (exists "ENVARC:AmiBSDNet/SerialShell")
-				(delete "ENVARC:AmiBSDNet/SerialShell" (optional "force")))
-			(if (exists "ENV:AmiBSDNet/SerialShell")
-				(delete "ENV:AmiBSDNet/SerialShell" (optional "force")))
-		)))
+		(if (askbool
+				(prompt "Start a Shell on the serial port at every boot?\n\n"
+					"19200 baud, 8 data bits, no parity, 1 stop bit, no "
+					"handshaking (no XON/XOFF, no RTS/CTS). It can be "
+					"switched on and off, and its speed changed, in the "
+					"status icon's Settings window.")
+				(help "For a terminal program on another computer, connected "
+					"with a null-modem cable. Type EndShell to end a Shell; a "
+					"new one starts. \"SerialShell STOP\" stops it until the "
+					"next boot.")
+				(default 0))
+			(
+				(makedir "ENVARC:AmiBSDNet")
+				(textfile (dest "ENVARC:AmiBSDNet/SerialShell")
+					(append "19200"))
+				(textfile (dest "ENV:AmiBSDNet/SerialShell") (append "19200"))
+			))))
 
 (if (askbool
 		(prompt "Show the AmiBSDNet status icon on the Workbench at every "
@@ -618,11 +972,21 @@
 		(help "The icon shows whether you are online and your address. "
 			"Double-click it for details, to go online or offline.")
 		(default 1))
-	(copyfiles
-		(source (tackon #drawer "AmiBSDNetStatus"))
-		(dest "SYS:WBStartup")
-		(infos)
-		(nogauge)))
+	(
+		(set #o-path "SYS:WBStartup/AmiBSDNetStatus")
+		(set #o-key "wbstartup-amibsdnetstatus")
+		(set #o-sum #sum-status-amibsdnetstatus)
+		(P_OWNFILE)
+		(set #o-path "SYS:WBStartup/AmiBSDNetStatus.info")
+		(set #o-key "wbstartup-amibsdnetstatus-info")
+		(set #o-sum #sum-status-amibsdnetstatus-info)
+		(P_OWNFILE)
+		(copyfiles
+			(source (tackon #drawer "AmiBSDNetStatus"))
+			(dest "SYS:WBStartup")
+			(infos)
+			(nogauge))
+	))
 
 ; the install log, complete
 (P_WRITELOG)
@@ -636,31 +1000,34 @@
 ; is installed and started from S:User-Startup (checked) is the other
 ; stack taken out of the boot, as a trial (see above)
 
-(if (and (= #othersdo 0) (not @pretend))
-	(
-		(run "C/NetCtrl CHECK >NIL:" (safe))
-		(if (<> (getenv "AmiBSDNet/SelfAtBoot") "1")
-			(message "AmiBSDNet is not started from S:User-Startup (was "
-				"that step skipped?), so " #others " was left as it "
-				"is. Run the installer again to switch.")
-			(
-				(run "C/NetCtrl DISABLEOTHERS >NIL:"
-					(prompt "Taking " #others " out of the boot")
-					(help @run-help))
-				(run "C/NetCtrl CHECK >NIL:" (safe))
-				(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
-				(if (<> #atboot "")
-					(message "Not everything could be taken out of the "
-						"boot:\n" #atboot "\n\n"
-						"Please check S:Startup-Sequence, S:User-Startup "
-						"and SYS:WBStartup yourself before rebooting: "
-						"AmiBSDNet does not start while another TCP/IP "
-						"stack is running."))
-				(textfile (dest "ENVARC:AmiBSDNet/Trial") (append "1"))
-				(textfile (dest "ENV:AmiBSDNet/Trial") (append "1"))
-				(set #trial 1)
-			))
-	))
+(if (and (= #othersdo 0) (<> #others ""))
+	(if (not @pretend)
+		(
+			(run "C/NetCtrl CHECK >NIL:" (safe))
+			(if (<> (getenv "AmiBSDNet/SelfAtBoot") "1")
+				(message "AmiBSDNet is not started from S:User-Startup (was "
+					"that step skipped?), so " #others " was left as it "
+					"is. Run the installer again to switch.")
+				(
+					(run "C/NetCtrl DISABLEOTHERS >NIL:"
+						(prompt "Taking " #others " out of the boot")
+						(help "\"NetCtrl DISABLEOTHERS\" takes the other "
+							"TCP/IP stack out of the boot; \"NetCtrl "
+							"FALLBACK\" puts it back."))
+					(run "C/NetCtrl CHECK >NIL:" (safe))
+					(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
+					(if (<> #atboot "")
+						(message "Not everything could be taken out of the "
+							"boot:\n" #atboot "\n\n"
+							"Please check S:Startup-Sequence, S:User-Startup "
+							"and SYS:WBStartup yourself before rebooting: "
+							"AmiBSDNet does not start while another TCP/IP "
+							"stack is running."))
+					(textfile (dest "ENVARC:AmiBSDNet/Trial") (append "1"))
+					(textfile (dest "ENV:AmiBSDNet/Trial") (append "1"))
+					(set #trial 1)
+				))
+		)))
 
 ; "Remove Roadshow completely": deleted everywhere except Work, no trial
 (set #removed 0)
@@ -683,8 +1050,8 @@
 						(getenv "AmiBSDNet/RoadshowList")
 						"\nThe full list is in T:AmiBSDNet-RS.txt "
 						"(\"NetCtrl FINDROADSHOW\" shows it again).")
-					(message "Roadshow is completely gone (only the Work "
-						"volume or drawer was left alone)."))
+					(message "Roadshow is removed. Its settings are in "
+						"SYS:Storage/AmiBSDNet-Roadshow."))
 				; another stack than Roadshow is not removed: say so
 				(run "C/NetCtrl CHECK >NIL:" (safe))
 				(if (<> (getenv "AmiBSDNet/OthersAtBoot") "")
@@ -696,22 +1063,24 @@
 			))
 	))
 
-(if (and (= #othersdo 1) (<> #others "") (not @pretend))
-	(
-		; "Keep" also after an earlier switch: put the other stack back
-		; (nothing happens if it was never taken out) and end a trial
-		(run "C/NetCtrl RESTOREOTHERS >NIL:" (safe))
-		(if (exists "ENVARC:AmiBSDNet/Trial")
-			(delete "ENVARC:AmiBSDNet/Trial" (optional "force") (safe)))
-		(if (exists "ENV:AmiBSDNet/Trial")
-			(delete "ENV:AmiBSDNet/Trial" (optional "force") (safe)))
-		(run "C/NetCtrl CHECK >NIL:" (safe))
-		(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
-		(if (<> #atboot "")
-			(message "Note: " #atboot " is still started at boot.\n\n"
-				"AmiBSDNet does not start while another TCP/IP stack is "
-				"running."))
-	))
+(if (and (= #othersdo 1) (<> #others ""))
+	(if (not @pretend)
+		(
+			; "Keep" also after an earlier switch: put the other stack
+			; back (nothing happens if it was never taken out) and end a
+			; trial
+			(run "C/NetCtrl RESTOREOTHERS >NIL:" (safe))
+			(if (exists "ENVARC:AmiBSDNet/Trial")
+				(delete "ENVARC:AmiBSDNet/Trial" (optional "force") (safe)))
+			(if (exists "ENV:AmiBSDNet/Trial")
+				(delete "ENV:AmiBSDNet/Trial" (optional "force") (safe)))
+			(run "C/NetCtrl CHECK >NIL:" (safe))
+			(set #atboot (getenv "AmiBSDNet/OthersAtBoot"))
+			(if (<> #atboot "")
+				(message "Note: " #atboot " is still started at boot.\n\n"
+					"AmiBSDNet does not start while another TCP/IP stack is "
+					"running."))
+		)))
 
 (if #trial
 	(exit
@@ -740,12 +1109,8 @@
 (if #otherrunning
 	(exit
 		"AmiBSDNet is installed.\n\n"
-		"Reboot to start the network"
-		(if #otherrunning
-			(cat " (the other TCP/IP stack is still running "
-				"until then)")
-			"")
-		".\n\"NetCtrl\" shows the network status.")
+		"Reboot to start the network (the other TCP/IP stack is still "
+		"running until then).\n\"NetCtrl\" shows the network status.")
 	(exit
 		"AmiBSDNet is installed.\n\n"
 		"Reboot to start the network, or type C:AmiBSDNet in a Shell "

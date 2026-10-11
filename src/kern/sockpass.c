@@ -31,6 +31,7 @@ int
 rump_amibsdnet_fd_export(int fd, int move, void **fpp)
 {
 	file_t *fp;
+	int error;
 
 	rump_schedule();
 	if ((fp = fd_getfile(fd)) == NULL) {
@@ -45,10 +46,21 @@ rump_amibsdnet_fd_export(int fd, int move, void **fpp)
 	mutex_enter(&fp->f_lock);
 	fp->f_count++;
 	mutex_exit(&fp->f_lock);
-	/* fd_close() drops the fd_getfile() reference itself */
-	if (move)
-		fd_close(fd);
-	else
+	/*
+	 * fd_close() drops the fd_getfile() reference itself.  It fails
+	 * (EBADF) only when another thread is closing the descriptor
+	 * already (kern/kern_descrip.c:623-641): the socket is being closed
+	 * by its owner, so it is not handed on and our hold goes too.
+	 * Otherwise it ends in closef(), which with our hold only drops a
+	 * count and returns 0 (kern_descrip.c:842-847).
+	 */
+	if (move) {
+		if ((error = fd_close(fd)) != 0) {
+			(void)closef(fp);
+			rump_unschedule();
+			return error;
+		}
+	} else
 		fd_putfile(fd);
 	*fpp = fp;
 	rump_unschedule();

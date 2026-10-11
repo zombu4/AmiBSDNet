@@ -120,11 +120,16 @@ notice_show(struct notice *nt, const char *text, int len)
 		nt->line[nt->n][k] = text[k] >= ' ' ? text[k] : ' ';
 	nt->line[nt->n][k] = '\0';
 	nt->n++;
-	/* in front of whatever opened meanwhile (Workbench's windows):
-	   Intuition does that in its own task, so give it a moment */
+	/* in front of whatever opened meanwhile (Workbench's windows),
+	   only when something covers it.  Intuition arranges the window
+	   "the next time Intuition receives an input event, which happens
+	   currently at a minimum rate of ten times per second"
+	   (downloads/sources/NDK3.2/Autodocs/intuition.doc:7774-7777,
+	   WindowToFront): at most 1/10 s, 5 ticks of Delay() (50 per
+	   second, dos.doc:1215, TICKS_PER_SECOND in dos/dos.h) */
 	if (win->WLayer && win->WLayer->front) {
 		WindowToFront(win);
-		Delay(2);
+		Delay(5);
 	}
 	rp = win->RPort;
 	fh = rp->TxHeight + 1;
@@ -197,8 +202,23 @@ guard_flush(const char *path)
 	}
 }
 
-/* 1: the last start never finished (this one is skipped; the marker is
-   gone, so the next is normal); 0: go ahead (the marker is made) */
+/* set by guard_begin() when the marker could not be made (then a freeze
+   during this start goes unnoticed), with the DOS error */
+static int guard_nomarker __attribute__((unused));
+static LONG guard_nomarker_error __attribute__((unused));
+
+/*
+ * 1: the last start never finished (this one is skipped; the marker is
+ * gone, so the next is normal); 0: go ahead (the marker is made, or
+ * guard_nomarker says why not).
+ *
+ * The marker stays until guard_end(): for a program that starts at boot
+ * that is the whole start window (the stack: START_SECS).  A reset or
+ * power-off inside that window counts as a freeze, and the next start is
+ * skipped once.  A second copy of the program started inside the window
+ * would take the marker as a freeze too, so programs that must not run
+ * twice check for a running copy before calling this.
+ */
 static inline int
 guard_begin(const char *name)
 {
@@ -210,6 +230,8 @@ guard_begin(const char *name)
 
 	me->pr_WindowPtr = (APTR)-1;
 	guard_path(path, name);
+	guard_nomarker = 0;
+	guard_nomarker_error = 0;
 	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
 		UnLock(l);
 		DeleteFile((CONST_STRPTR)path);
@@ -221,6 +243,10 @@ guard_begin(const char *name)
 			UnLock(l);
 		if ((fh = Open((CONST_STRPTR)path, MODE_NEWFILE)) != 0)
 			Close(fh);
+		else {
+			guard_nomarker = 1;
+			guard_nomarker_error = IoErr();
+		}
 	}
 	guard_flush(path);
 	me->pr_WindowPtr = old;

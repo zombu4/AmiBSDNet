@@ -6,6 +6,7 @@
 #include <exec/execbase.h>
 #include <exec/ports.h>
 #include <exec/libraries.h>
+#include <exec/lists.h>
 #include <proto/exec.h>
 
 #include <amibsdnet/control.h>
@@ -17,6 +18,19 @@
 extern struct ExecBase *SysBase;
 
 static struct MsgPort *ctlport;
+
+/* RECONFIG requests waiting for the reconfiguration to end */
+static struct List reconfig_waiting;
+
+/*
+ * How much of a message the sender gave (mn_Length, set by
+ * amibsdnet_ctl_call() to sizeof(struct NetCtrlMsg); older clients send
+ * the shorter message without the DNS fields).  A field is written only
+ * if the message reaches that far.
+ */
+#define	MSG_HAS(m, field) \
+	((m)->msg.mn_Length >= __builtin_offsetof(struct NetCtrlMsg, field) + \
+	    sizeof((m)->field))
 
 /* tiny text builder for the status report */
 struct tb {
@@ -90,8 +104,7 @@ iface_list(struct NetCtrlMsg *m)
 {
 	int i, j;
 
-	/* older clients send the shorter message without the DNS fields */
-	if (m->msg.mn_Length >= sizeof(*m))
+	if (MSG_HAS(m, dns))
 		m->ndns = netdb_get_nameservers(m->dns, 4);
 
 	m->nifaces = 0;
@@ -151,7 +164,7 @@ status_report(struct NetCtrlMsg *m)
 	ULONG ns[4], rx, tx, rxd, txd;
 	int i, j, n;
 
-	tb_s(&b, "AmiBSDNet 0.8.2 - NetBSD 11 TCP/IP\n\n");
+	tb_s(&b, "AmiBSDNet " AMIBSDNET_VERSION " - NetBSD 11 TCP/IP\n\n");
 	for (i = 0, n = 0; i < nifaces; i++) {
 		struct iface *ifc = &ifaces[i];
 		struct virtif_user *v;
@@ -228,6 +241,11 @@ int
 control_init(void)
 {
 
+	/* an empty list (exec/lists.h: IsListEmpty() is lh_TailPred
+	   pointing at the list itself) */
+	reconfig_waiting.lh_Head = (struct Node *)&reconfig_waiting.lh_Tail;
+	reconfig_waiting.lh_Tail = NULL;
+	reconfig_waiting.lh_TailPred = (struct Node *)&reconfig_waiting;
 	if ((ctlport = CreateMsgPort()) == NULL)
 		return -1;
 	ctlport->mp_Node.ln_Name = (char *)AMIBSDNET_PORTNAME;
@@ -243,19 +261,100 @@ control_sigmask(void)
 	return ctlport ? 1UL << ctlport->mp_SigBit : 0;
 }
 
+/* the state fields every reply has, then the reply */
+static void
+reply(struct NetCtrlMsg *m, LONG result)
+{
+	ULONG addr;
+	int i;
+
+	m->result = result;
+	addr = netcfg_primary_address();
+	m->online = addr != 0x7f000001UL;
+	m->address = m->online ? addr : 0;
+	m->opencount = lib_opencount();
+	m->link = 0;
+	for (i = 0; i < nifaces; i++)
+		if (ifaces[i].link && ifaces[i].attached)
+			m->link = 1;
+	ReplyMsg(&m->msg);
+}
+
+/* the reconfiguration is over: answer the RECONFIG requests */
+void
+control_reconfig_done(int result)
+{
+	struct Node *n;
+
+	while ((n = RemHead(&reconfig_waiting)) != NULL)
+		reply((struct NetCtrlMsg *)n, result);
+}
+
+/*
+ * The kernel is gone (rumpuser_exit()): nothing may call into it any more.
+ * The port leaves the public list, and every message already sent is
+ * answered with -1 without the state fields that ask the kernel.
+ * amibsdnet_ctl_call() finds the port and puts its message under
+ * Forbid() (ctlcall.h), so after RemPort() under Forbid() no message can
+ * arrive that is not in the queue now.
+ */
+void
+control_shutdown(void)
+{
+	struct NetCtrlMsg *m;
+	struct Node *n;
+
+	if (ctlport == NULL)
+		return;
+	Forbid();
+	RemPort(ctlport);
+	Permit();
+	while ((n = RemHead(&reconfig_waiting)) != NULL) {
+		m = (struct NetCtrlMsg *)n;
+		m->result = -1;
+		m->online = 0;
+		m->address = 0;
+		m->link = 0;
+		ReplyMsg(&m->msg);
+	}
+	while ((m = (struct NetCtrlMsg *)GetMsg(ctlport)) != NULL) {
+		if (MSG_HAS(m, link)) {
+			m->result = -1;
+			m->online = 0;
+			m->address = 0;
+			m->link = 0;
+		}
+		ReplyMsg(&m->msg);
+	}
+}
+
 void
 control_handle(void)
 {
 	struct NetCtrlMsg *m;
-	ULONG addr;
+	LONG result;
 
-	while ((m = (struct NetCtrlMsg *)GetMsg(ctlport)) != NULL) {
-		m->result = 0;
+	/* (the kernel stopped meanwhile, on one of its threads: the rest is
+	   left in the port for control_shutdown(), which answers without
+	   the kernel; the main loop calls it next, src/stack/main.c
+	   kernel_gone()) */
+	while (!amiga_rump_exited &&
+	    (m = (struct NetCtrlMsg *)GetMsg(ctlport)) != NULL) {
+		/* too short for the fields every reply has: returned as it
+		   came */
+		if (!MSG_HAS(m, link)) {
+			ReplyMsg(&m->msg);
+			continue;
+		}
+		result = 0;
 		switch (m->cmd) {
 		case NETCTRL_STATE:
 			break;
 		case NETCTRL_STATUS:
-			status_report(m);
+			if (MSG_HAS(m, text))
+				status_report(m);
+			else
+				result = -1;
 			break;
 		case NETCTRL_ONLINE:
 			stack_online();
@@ -264,27 +363,39 @@ control_handle(void)
 			stack_offline();
 			break;
 		case NETCTRL_RECONFIG:
-			m->result = stack_reconfigure();
+			/* (answered when it is over: the port is served
+			   meanwhile) */
+			if ((result = stack_reconfigure_begin()) > 0) {
+				AddTail(&reconfig_waiting, &m->msg.mn_Node);
+				continue;
+			}
 			break;
 		case NETCTRL_IFLIST:
-			iface_list(m);
+			if (MSG_HAS(m, ifaces))
+				iface_list(m);
+			else
+				result = -1;
+			break;
+		/* (tests of what follows a kernel panic: DEBUG only) */
+		case NETCTRL_PANIC:
+			if (!amiga_rump_debug) {
+				result = -1;
+				break;
+			}
+			/* answered first: the panic does not return
+			   (src/kern/debugpanic.c), and the main loop that
+			   would answer later is not reached again */
+			reply(m, 0);
+			rump_amibsdnet_panic(0);
+			continue;
+		case NETCTRL_PANICTHREAD:
+			result = amiga_rump_debug ?
+			    (rump_amibsdnet_panic(1) == 0 ? 0 : -1) : -1;
 			break;
 		default:
-			m->result = -1;
+			result = -1;
 			break;
 		}
-		addr = netcfg_primary_address();
-		m->online = addr != 0x7f000001UL;
-		m->address = m->online ? addr : 0;
-		m->opencount = lib_opencount();
-		{
-			int i;
-
-			m->link = 0;
-			for (i = 0; i < nifaces; i++)
-				if (ifaces[i].link && ifaces[i].attached)
-					m->link = 1;
-		}
-		ReplyMsg(&m->msg);
+		reply(m, result);
 	}
 }

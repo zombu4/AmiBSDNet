@@ -1,91 +1,170 @@
-AmiBSDNet 0.8.2
-===============
-
-AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later
-(Workbench 3.2 recommended), built from the networking code of the
-NetBSD 11 kernel: the real BSD TCP/IP, IPv4 and IPv6 implementation,
-running as a "rump kernel" on top of Exec. Programs use it through the
-standard bsdsocket.library (AmiTCP / Roadshow API), so existing Amiga
-network software works without changes.
+AmiBSDNet is a TCP/IP network stack for AmigaOS 3.1 and later, built
+from the networking code of the NetBSD 11 kernel: the real BSD TCP/IP,
+IPv4 and IPv6 implementation, running as a "rump kernel" on top of
+Exec. Programs use it through the standard bsdsocket.library (AmiTCP /
+Roadshow API), so existing Amiga network software works without
+changes.
 
 Requirements
 ------------
+- AmigaOS 3.1 or later (the installer stops on an older system)
 - a 68020 or better CPU; a PiStorm (Emu68) is the main target
 - Fast RAM: the stack uses about 3.5 MB, all of it Fast RAM (no Chip RAM)
-- a network card with a SANA-II driver. On a PiStorm: wifipi.device
-  (Wi-Fi) or genet.device (Ethernet, Pi 4/CM4) from your Emu68 package;
-  WinUAE: uaenet.device; Zorro cards such as the A2065, Ariadne or
-  X-Surf: their own driver
+- a network card with a SANA-II driver. On a PiStorm, according to the
+  drivers' own documentation and sources:
+  - wifipi.device (Wi-Fi): a Raspberry Pi Zero 2 W, 3B, 3A+, 3B+, 4B or
+    CM4, and the Wi-Fi firmware for it in DEVS:Firmware (from
+    Emu68-tools)
+  - genet.device (Ethernet): only a Raspberry Pi 4B or CM4 (PiStorm32-
+    lite), Emu68 1.1 alpha.1 or newer, LIBS:gic400.library, and
+    genet.device 2.2 or newer
+  Before it touches one of these drivers AmiBSDNet checks the Pi model
+  (and for genet.device its Ethernet) in Emu68's device tree, the
+  firmware files, gic400.library (in memory, in Emu68's ROM or in LIBS:)
+  and the version in genet.device's file; the Emu68 version itself is
+  not checked. It leaves a driver alone whose requirements are not met
+  (the installer and T:AmiBSDNet.log say why). WinUAE: uaenet.device; Zorro
+  cards such as the A2065, Ariadne or X-Surf: their own driver
 - no other TCP/IP stack running at the same time (the installer offers
   to take an installed one out of the boot)
 
+What has been tested
+--------------------
+This version has been tested in the WinUAE emulator only: installed
+with the Workbench 3.2 Installer (Kickstart 3.2.2, 68040), with WinUAE's
+uaenet.device. It has not been tested on PiStorm hardware: not with
+wifipi.device, genet.device or PaulaNET, and not with Zorro network
+cards. What this text says about those drivers comes from their
+documentation and sources.
+
 Installation
 ------------
-Double-click "Install". First the installer looks for another TCP/IP
-stack (Roadshow, Miami, AmiTCP, Genesis, or any bsdsocket.library on
-disk). If one is found it offers to:
+Double-click "Install". The installer asks, in this order:
 
-  Switch       its startup lines in S:Startup-Sequence and S:User-Startup
-               are commented out ("; [AmiBSDNet] ..."), and its WBStartup
-               items and LIBS:bsdsocket.library are moved to
-               SYS:Storage/AmiBSDNet-Disabled.
-  Keep it      nothing is changed.
-  Remove Roadshow completely
-               (the default when Roadshow is found) everything of
-               Roadshow is deleted, see "NetCtrl REMOVEROADSHOW"; no
-               trial and no way back except reinstalling Roadshow from
-               your Work drawer or volume, which is left alone.
+1. If AmiBSDNet is installed already: "Install again (update)" or
+   "Uninstall AmiBSDNet" (see Uninstalling).
 
-Switching is a trial. After the next boot AmiBSDNet has three minutes
+2. If another TCP/IP stack is installed (Roadshow, Miami, AmiTCP,
+   Genesis, or any bsdsocket.library on disk):
+
+     Switch       (the default) its startup lines in S:Startup-Sequence
+                  and S:User-Startup are commented out ("; [AmiBSDNet]
+                  ..."), and its WBStartup items and
+                  LIBS:bsdsocket.library are moved to
+                  SYS:Storage/AmiBSDNet-Disabled. This is a trial (see
+                  below).
+     Keep it      nothing is changed.
+
+   If it is Roadshow and you chose Switch, a second question asks
+   whether to remove Roadshow completely instead. Its default is No:
+   removing is done only if you choose it. Roadshow's programs are
+   then deleted and its settings moved to SYS:Storage/AmiBSDNet-Roadshow
+   (see "NetCtrl REMOVEROADSHOW"); there is no trial and no way back
+   except reinstalling Roadshow. At the Novice user level this question
+   is not asked (a Novice installation asks nothing), so Roadshow is
+   only switched; the installer's icon starts it at the Average level.
+
+3. If there is a C:Ping that is not AmiBSDNet's: whether to replace it
+   with AmiBSDNet's Ping (default: keep yours).
+
+4. Where to create the AmiBSDNet drawer (default SYS:): the drawer
+   "AmiBSDNet" is created there, with this documentation and the
+   status icon.
+
+5. If a PaulaNET adapter is plugged in: whether to copy its driver to
+   DEVS:Networks (see PaulaNET).
+
+6. If AmiBSDNet's network settings exist already (an earlier
+   installation): keep them as they are (the default; questions 7 to
+   10 are then skipped), or enter them again.
+
+7. The network adapters. The installer finds them by itself (every
+   SANA-II driver in DEVS:Networks, and drivers built into ROM such as
+   WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If you have
+   both, both are set up. If none is found, or you want another one,
+   you choose the driver file, its unit number and whether it is Wi-Fi.
+   If only PaulaNET was found, you can use only PaulaNET.
+
+8. For Wi-Fi: whether to replace existing Wi-Fi settings
+   (ENVARC:Sys/Wireless.prefs), the network name (SSID), whether it is
+   a hidden network, and the passphrase. Leave the name empty to choose
+   the network later from the status icon.
+
+9. Whether the network uses DHCP (most do) or a fixed address.
+
+10. The host name of this Amiga (letters, digits and '-'); then, for a
+    fixed address, the address with its prefix length (for example
+    192.168.1.20/24), the router (gateway) and the DNS server. The
+    installer checks that they are valid IPv4 addresses.
+
+11. In Average and Expert mode: a confirmation of the lines added to
+    S:User-Startup:
+
+        Run >NIL: C:SerialShell AUTO
+        C:AmiBSDNet
+
+    (The first starts the Shell on the serial port if it is switched
+    on; it comes first so that it is there even if the network does
+    not start.)
+
+12. The Shell on the serial port (see SerialShell): whether to switch
+    it on (default: no). If it is on already, whether to keep it on
+    (default: yes).
+
+13. Whether to show the status icon on the Workbench at every boot
+    (copies AmiBSDNetStatus to SYS:WBStartup; default: yes).
+
+Switching from the other stack happens last, after everything else is
+installed. The stack starts in the background; boot is not delayed
+while it waits for a DHCP server.
+
+The PiStorm's Wi-Fi driver (wifipi.device and DEVS:Firmware) is never
+touched: it belongs to your Emu68 installation (it relies on Emu68's
+devicetree.resource). AmiBSDNet uses the one that is installed; if
+there is none, install it from Emu68-tools, preferably of the same
+release as your Emu68.
+
+The switch is a trial. After the next boot AmiBSDNet has three minutes
 to get connected. If it does, the switch stays. If it does not, it goes
 back by itself ("NetCtrl FALLBACK"): the other stack is put back,
 AmiBSDNet is taken out of the boot, its logs are saved in
-SYS:Storage/AmiBSDNet-Logs, and a requester asks you to reboot. You are never left without a network:
-a trial boot that ends without a connection (the machine hangs, crashes
-or is reset before AmiBSDNet has connected) also counts as failed, and
-the next boot goes back by itself. So after switching, leave the
-machine running until the status icon shows an address.
-"NetCtrl FALLBACK" also goes back by hand at any time; once you are
-happy with AmiBSDNet (after the trial), "NetCtrl REMOVEOTHERS" deletes
-the other stack's startup lines for good (also the disabled ones); its
-parked files stay in SYS:Storage/AmiBSDNet-Disabled until you delete
-that drawer.
+SYS:Storage/AmiBSDNet-Logs, and a requester asks you to reboot. You are
+never left without a network: a trial boot that ends without a
+connection (the machine hangs, crashes or is reset before AmiBSDNet has
+connected) also counts as failed, and the next boot goes back by
+itself. So after switching, leave the machine running until the status
+icon shows an address. "NetCtrl FALLBACK" also goes back by hand at any
+time; once you are happy with AmiBSDNet (after the trial), "NetCtrl
+REMOVEOTHERS" deletes the other stack's startup lines for good (also
+the disabled ones); its parked files stay in
+SYS:Storage/AmiBSDNet-Disabled until you delete that drawer.
 
-The startup files are saved as S:<name>.amibsdnet-bak before the
-first change. Afterwards the installer checks again and tells you if
-anything of the other stack would still be started at boot. AmiBSDNet
-itself does not start while another stack is running (and never stops
-the rest of S:User-Startup).
+The startup files are saved as S:<name>.amibsdnet-bak before the first
+change. Afterwards the installer checks again and tells you if anything
+of the other stack would still be started at boot. AmiBSDNet itself
+does not start while another stack is running (and never stops the
+rest of S:User-Startup).
 
-It then installs the programs and WirelessManager. The PiStorm's Wi-Fi
-driver (wifipi.device and DEVS:Firmware) is never touched: it belongs
-to your Emu68 installation (it relies on Emu68's devicetree.resource).
-AmiBSDNet uses the one that is installed; if there is none, install it
-from Emu68-tools, preferably of the same release as your Emu68.
+The install log
+---------------
+S:AmiBSDNet-Install.log lists the files and drawers the installer
+created, one "FILE <path>" line each; a file also has its size and
+CRC32 as the installer left it ("FILE <path> <size> <crc32>"), and the
+uninstaller deletes such a file only if it is still unchanged. Files
+that were there before (your own) are not listed. Listed are: the
+programs in C: (C:Ping only if it was not there or you chose to replace
+it), C:WirelessManager if it was not there, the AmiBSDNet drawer (no
+size and CRC32 for a drawer and the drawer's icon) and its files, the
+status icon copied to SYS:WBStartup, DEVS:Internet/hosts (and
+DEVS:Internet) if there was none, and ENVARC:Sys/Wireless.prefs and
+ENV:Sys/Wireless.prefs if there were none.
 
-The installer finds your network adapters by itself (every SANA-II
-driver in DEVS:Networks, and drivers built into ROM such as WinUAE's uaenet.device) and tells Ethernet from Wi-Fi. If
-you have both, both are set up. For Wi-Fi it asks for the network name
-and passphrase (or leave them empty and choose the network later from
-the status icon). It then asks whether your network uses DHCP (most do)
-or a fixed address, and whether to show the status icon on the
-Workbench. If no adapter is found you can choose the driver yourself.
-It adds these lines to S:User-Startup:
-
-    Run >NIL: C:SerialShell AUTO
-    C:AmiBSDNet
-
-(The first starts the Shell on the serial port if it is switched on;
-it comes first so that it is there even if the network does not
-start.)
-
-The stack starts in the background; boot is not delayed while it waits
-for a DHCP server.
-
-Everything the installer puts on the Amiga is listed in
-S:AmiBSDNet-Install.log. Files that were there before (your own) are
-never listed.
-
+Not in the log: the lines in S:User-Startup (the log names the block,
+";BEGIN AmiBSDNet"), the settings in ENVARC:AmiBSDNet and ENV:AmiBSDNet
+(AmiBSDNet.conf, SerialShell, Trial, and Installed, where the installer
+notes which files are AmiBSDNet's), the PaulaNET.device copied to
+DEVS:Networks, and the changes made when switching from another stack
+(see above).
 
 While the Amiga starts
 ----------------------
@@ -100,19 +179,23 @@ that first minute) is not tried again at the next boot: that one boot
 comes up without it, and a requester on the Workbench says so. The boot
 after that starts it normally again.
 
-
 Uninstalling
 ------------
 Run the installer again and choose "Uninstall AmiBSDNet" (or type
 "NetCtrl UNINSTALL" in a Shell). It takes AmiBSDNet out of
 S:User-Startup first; if that file cannot be changed, nothing is
-removed. It then deletes everything in the install log, the programs,
-the status icon and the settings (ENVARC:AmiBSDNet), and finally the
-log itself. If you saved your own files in a drawer the installer
-created, the drawer and those files stay. A TCP/IP stack that
-AmiBSDNet was switched from is put back. Your drivers are not touched.
-What was done is in T:AmiBSDNet-Uninstall.txt. Reboot afterwards: the
-stack that is still in memory goes then.
+removed. It then deletes what the install log lists (a file with a
+size and CRC32 only if it is unchanged: a hosts file or Wireless.prefs
+you edited stays), the programs C:AmiBSDNet, C:NetCtrl and
+C:SerialShell, the status icon in
+SYS:WBStartup, the settings (ENVARC:AmiBSDNet and ENV:AmiBSDNet),
+SYS:Storage/AmiBSDNet-Logs, and finally the log itself. If you saved
+your own files in a drawer the installer created, the drawer and those
+files stay. A TCP/IP stack that AmiBSDNet was switched from is put
+back. Your drivers are not touched; a PaulaNET.device the installer
+copied to DEVS:Networks stays. NetCtrl's report (whether everything
+was removed, and what was kept) is in T:AmiBSDNet-Uninstall.txt. Reboot afterwards: the stack that is still
+in memory goes then.
 
 Ethernet and Wi-Fi together
 ---------------------------
@@ -140,32 +223,55 @@ wpa_supplicant port, installed to C:WirelessManager), which reads
 ENV:Sys/Wireless.prefs. WirelessManager is included in this package
 (see ThirdParty.txt for its authors and licence); the Wi-Fi driver is
 the one installed with Emu68. AmiBSDNet starts WirelessManager itself
-for a Wi-Fi interface if it is not already running. The installer asks for
-the network name and passphrase; to change networks later, double-click
-the status icon and choose Wi-Fi...: the window lists the networks in
-range (strongest first), and Connect stores the network, restarts
-WirelessManager and fetches a new address. A scan can be stopped with
-Close; it gives up by itself after 30 seconds.
+for a Wi-Fi interface if it is not already running. The installer asks
+for the network name and passphrase; to change networks later,
+double-click the status icon and choose Wi-Fi...: the window lists the
+networks in range (strongest first), and Connect stores the network,
+restarts WirelessManager and fetches a new address. A scan can be
+stopped with Close; it gives up by itself after 60 seconds of
+scanning. The time the driver takes to get ready first counts a fifth
+of that, so in all it gives up after at most 5 minutes.
+
+The installer cannot set up a network whose name contains a '"', or a
+passphrase that contains one.
+
+Hidden networks (ones that do not show their name): answer Yes to the
+installer's question, which adds "scan_ssid=1" to the network's entry
+in Wireless.prefs (as WirelessManager's manual describes). Connect in
+the Wi-Fi window and the Settings window write the entry of the network
+anew with its name and passphrase; its other lines (such as
+"scan_ssid=1") are kept. For a network whose security the driver does
+not report, Connect with an empty passphrase keeps the saved one.
+
+WirelessManager's manual (in the prism2v2 archive on Aminet) says that
+a textual WPA/WPA2 passphrase causes a start-up delay of up to several
+minutes on a slow CPU; a hexadecimal key, computed with the
+wpa_passphrase command from that archive, avoids it (it has to be
+computed again if the network name changes).
 
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
 the network; DHCP starts as soon as it has. WirelessManager's messages
-are in T:WirelessManager.log (more of them after "SetEnv AmiBSDNet/Debug
-1" and a reboot). If the status window says "DRIVER NOT USED", the
-driver named in the settings is not in DEVS:Networks, or it could not
-set up its hardware (T:AmiBSDNet.log says which). A driver that cannot
-set up its hardware - genet.device on a Pi without working Ethernet,
-for one - gets no further commands.
+are in T:WirelessManager.log. For more of them, type
+
+    SetEnv SAVE AmiBSDNet/Debug 1
+
+and reboot (SAVE keeps the variable in ENVARC: across the reboot;
+"UnSetEnv SAVE AmiBSDNet/Debug" switches it off again). If the status
+window says "DRIVER NOT USED", the driver named in the settings is not
+in DEVS:Networks, or it could not set up its hardware (T:AmiBSDNet.log
+says which). A driver that cannot set up its hardware - genet.device on
+a Pi without working Ethernet, for one - gets no further commands.
 
 PaulaNET
 --------
 PaulaNET (https://github.com/RobSmithDev/PaulaNET) is Wi-Fi through the
-floppy port, using a Raspberry Pi Pico W. AmiBSDNet uses it by itself
-whenever it is plugged in: at every start it looks for PaulaNET.device
-in DEVS:, DEVS:Networks or on the adapter's own PaulaNET: disk, and adds
-it as one more DHCP interface, used for the Internet only when no other
-interface is connected. Without the adapter it stays hidden. The Wi-Fi
-network is set up with the PaulaNET Config program on the PaulaNET
-disk, not in AmiBSDNet.
+floppy port, using a Raspberry Pi Pico W or Pico 2 W. AmiBSDNet uses it
+by itself whenever it is plugged in: at every start it looks for
+PaulaNET.device in DEVS:, DEVS:Networks or on the adapter's own
+PaulaNET: disk, and adds it as one more DHCP interface, used for the
+Internet only when no other interface is connected. Without the adapter
+it stays hidden. The Wi-Fi network is set up with the PaulaNET Config
+program on the PaulaNET disk, not in AmiBSDNet.
 
 PaulaNET.device is not included in this package (its author has not
 published it under a licence that allows that). The installer copies it
@@ -195,15 +301,19 @@ The Settings window holds the whole configuration: the Ethernet and
 Wi-Fi drivers (Detect finds them), automatic (DHCP) or fixed address,
 gateway, DNS server, host name, and the Wi-Fi network and passphrase
 (Scan... lists the networks in range), PaulaNET, and the Shell on the
-serial port with its speed (see SerialShell). Save stores the settings and
-applies them at once, without a reboot; Use applies them until the next
-reboot. A fixed address is used for Ethernet if there is an Ethernet
-adapter, else for Wi-Fi.
+serial port with its speed (see SerialShell). Save stores the settings
+and applies them at once, without a reboot; Use applies them until the
+next reboot. A fixed address stays on the interface that has it in the
+configuration; if none has one, it is used for Ethernet if there is an
+Ethernet adapter, else for Wi-Fi. With Automatic (DHCP) the window
+takes its gateway line and its name server (the first "nameserver"
+line) out of the configuration; further "nameserver" lines stay, and
+are used after the DHCP server's.
 
-It is also the "AmiBSDNet" commodity
-in Exchange: Show opens the status window, Enable / Disable switch the
-network online / offline. Tool types: STACKCMD=<command to start
-the stack> (default C:AmiBSDNet), INTERVAL=<seconds between updates>.
+It is also the "AmiBSDNet" commodity in Exchange: Show opens the status
+window, Enable / Disable switch the network online / offline. Tool
+types: STACKCMD=<command to start the stack> (default C:AmiBSDNet),
+INTERVAL=<seconds between updates>.
 
 Commands
 --------
@@ -211,7 +321,8 @@ AmiBSDNet [CONFIG=<file>] [LOG=<file>] [DEBUG]
     Starts the stack. Configuration defaults to
     ENV:AmiBSDNet/AmiBSDNet.conf, the log to T:AmiBSDNet.log.
 
-NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|...] [TIMEOUT=<s>]
+NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|...]
+        [TIMEOUT=<s>]
     STATUS    interfaces, addresses, traffic counters, name servers
     ONLINE    bring the network up
     OFFLINE   take the network down
@@ -236,21 +347,58 @@ NetCtrl DISABLEOTHERS | REMOVEOTHERS | RESTOREOTHERS | FALLBACK
     Takes other TCP/IP stacks out of the boot (can be undone), removes
     their startup entries and files, or undoes DISABLEOTHERS. FALLBACK
     goes back completely: the other stack comes back, AmiBSDNet is
-    taken out of the boot, and its
-    logs are saved in SYS:Storage/AmiBSDNet-Logs. Reboot afterwards.
+    taken out of the boot, and its logs are saved in
+    SYS:Storage/AmiBSDNet-Logs. Reboot afterwards. DISABLEOTHERS and
+    REMOVEOTHERS change nothing unless AmiBSDNet is started from
+    S:User-Startup, and REMOVEOTHERS also nothing while the switch is
+    still a trial (until AmiBSDNet has connected once).
+
+NetCtrl REENABLE
+    The way back from FALLBACK: the lines of AmiBSDNet's block in
+    S:User-Startup that FALLBACK commented out are active again (the
+    other stack is not taken out of the boot again: use DISABLEOTHERS
+    for that). Reboot afterwards.
+
+NetCtrl PANIC | PANICTHREAD
+    For testing only: makes the kernel stop with a panic, on the
+    stack's own task or on a kernel thread, so that what follows can be
+    tried out. The stack refuses it (NetCtrl says "failed") unless it
+    was started with DEBUG. After it the network is gone until the next
+    reboot.
+
+NetCtrl KEEPCONF FILE=<out> [NOAUTODETECT]
+    For the installer: writes the PaulaNET lines ("paulanet ...",
+    "autodetect ...") of ENVARC:AmiBSDNet/AmiBSDNet.conf to <out>
+    (empty if there are none). NOAUTODETECT leaves out "autodetect".
+
+NetCtrl CHECKSUM FILE=<file>
+    For the installer: prints "<size> <crc32>" of a file (size in
+    decimal, CRC-32 as 8 lowercase hex digits) and sets
+    AmiBSDNet/FileSum to it.
 
 NetCtrl FINDROADSHOW | REMOVEROADSHOW
-    FINDROADSHOW lists everything of Roadshow (also its trial version)
-    on all volumes: drawers and files named Roadshow, its commands and
-    scripts, NetInterfaces, every bsdsocket.library on disk, its files
-    in DEVS:Internet (not hosts), assigns, and the lines that mention
-    Roadshow in the startup scripts and the configuration files in S:,
-    ENVARC:, ENV: and DEVS:. REMOVEROADSHOW deletes all of it for good
-    (no trial, no way back) and then looks again. A volume or drawer
-    called Work is never touched: keep the Roadshow installer there.
-    The installer's "Remove Roadshow completely" choice does this.
+    FINDROADSHOW lists the files of the Roadshow archive that are where
+    its installation puts them on SYS:, and the comments that mention
+    Roadshow in S:Startup-Sequence and S:User-Startup. REMOVEROADSHOW
+    removes Roadshow's startup lines and WBStartup items, deletes its
+    own commands, PPP drivers and catalogs, moves its settings and
+    scripts (S:Network-Startup, the firewall and PPP scripts,
+    DEVS:NetInterfaces, DEVS:Internet but hosts and services,
+    ENVARC:Roadshow) to
+    SYS:Storage/AmiBSDNet-Roadshow - and LIBS:bsdsocket.library and
+    LIBS:usergroup.library too if no other TCP/IP stack is installed -
+    removes those comments (copies: S:*.amibsdnet-rs), and then looks
+    again. There is no trial and no way back except reinstalling
+    Roadshow. Commands with general names (ping, ftp...) and anything
+    in other places are left alone. REMOVEROADSHOW changes nothing
+    unless AmiBSDNet is started from S:User-Startup. The installer's
+    "Remove Roadshow" question does this.
 
-SerialShell [START|STOP|STATUS|AUTO] [BAUD=<n>] [UNIT=<n>] [DEVICE=<name>]
+NetCtrl UNINSTALL
+    Removes AmiBSDNet (see Uninstalling).
+
+SerialShell [START|STOP|STATUS|AUTO] [BAUD=<n>] [UNIT=<n>]
+            [DEVICE=<name>]
     A Shell on the serial port, for a terminal program on another
     computer (null-modem cable): 8 data bits, no parity, 1 stop bit, no
     XON/XOFF and no RTS/CTS, 19200 baud unless BAUD= says otherwise
@@ -296,14 +444,29 @@ Limitations of this version
 ---------------------------
 - The stack cannot be unloaded once started (NetCtrl OFFLINE takes the
   network down); a reboot removes it.
-- IPv6 is built in but not yet configured automatically.
-- Not yet implemented bsdsocket.library calls fail with ENOSYS: the
-  packet filter (bpf_*), mbuf and monitoring APIs, and Roadshow's
-  interface and route configuration calls.
+- IPv6 is built in, but it is not configured automatically.
+- The packet filter has no channels: the bpf_* calls fail with ENXIO.
+  ChangeRouteTagList and the IP filter calls (ipf_*) fail with ENOSYS.
+  AddInterfaceTagList takes only IFA_LimitMTU, and IFA_IPType and
+  IFA_ARPType with their defaults (2048, 2054); other tags fail with
+  EINVAL.
+- gethostname returns the configured host name ("hostname" in
+  AmiBSDNet.conf, "amiga" when there is none); it does not look the
+  interface address up in the hosts file or DNS, or read the HOSTNAME
+  variable, as the Roadshow autodoc describes (bsdsocket.doc,
+  gethostname, NOTES).
+- genet.device does not report a cable being pulled or plugged in, so
+  AmiBSDNet cannot see it either; and genet waits 6 seconds for a link
+  when it is set up: without a cable plugged in at boot it is not used
+  until the next boot.
+- PaulaNET.device, when installed, looks for its adapter on the floppy
+  ports at every start (that is how the driver works).
 
 Licence
 -------
 AmiBSDNet's own code: PolyForm Noncommercial License 1.0.0 (free for
-noncommercial use; not to be sold or bundled into commercial products).
-The NetBSD code it contains remains under NetBSD's BSD-style licence.
+noncommercial use; not to be sold or bundled into commercial products),
+in LICENSE.txt. The NetBSD code it contains remains under NetBSD's
+BSD-style licences: their copyright notices, conditions and disclaimers
+are in NetBSD.txt. WirelessManager: see ThirdParty.txt.
 Source: https://github.com/zombu4/AmiBSDNet

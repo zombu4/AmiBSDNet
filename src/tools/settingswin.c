@@ -4,9 +4,23 @@
  * network (Wireless.prefs), then has the running stack apply it at once.
  *
  * Ethernet and Wi-Fi are separate interfaces that work at the same time,
- * each with its own address; the default route uses Ethernet while it is
- * connected and Wi-Fi otherwise.  A fixed address applies to Ethernet if
- * there is an Ethernet adapter, else to Wi-Fi; the other one uses DHCP.
+ * each with its own address; the default route goes through the first
+ * usable interface with a router, in the order of the configuration
+ * (src/stack/config.c, stack_update_route()), so merge() puts a new
+ * Ethernet line before the Wi-Fi line.  A fixed address stays on the
+ * interface that had it (fixed_target()); a new one goes to Ethernet if
+ * there is an Ethernet adapter, else to Wi-Fi.
+ *
+ * write_conf() merges, it does not write the file anew: only the lines
+ * this window edits change (hostname, the first Ethernet and the first
+ * Wi-Fi interface line, with a fixed address also the gateway and the
+ * first nameserver line, autodetect and the PaulaNET verify/CRC lines);
+ * every other line (domain, more name servers, more interfaces, words
+ * such as "optional", comments) stays as it is.  The syntax is the
+ * stack's: src/stack/config.c, parse_line(), parse_interface() and
+ * tokenize().
+ *
+ * The passphrase field shows '*' (psk_edit()).
  */
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -17,6 +31,8 @@
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
 #include <utility/tagitem.h>
+#include <utility/hooks.h>
+#include <intuition/sghooks.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -39,17 +55,18 @@ struct settings {
 	char	wifi[64];
 	LONG	wifiunit;
 	int	fixed;			/* fixed address instead of DHCP */
+	int	fixedon;		/* the line that had it: 1 Ethernet,
+					   2 Wi-Fi, 0 none */
 	char	addr[24];		/* a.b.c.d/prefix */
 	char	gateway[16];
 	char	dns[16];
 	char	hostname[64];
 	char	ssid[34];
-	char	psk[64];
+	char	psk[65];		/* a passphrase, or 64 hex digits */
 	int	paulanet;		/* use the PaulaNET adapter (autodetect) */
 	int	verify;			/* check its driver (default off) */
 	char	crcs[40];		/* accepted driver CRCs, hex, spaces */
-	char	paulaline[200];		/* a hand-written PaulaNET interface */
-	int	paulafixed;		/* ... with a fixed address */
+	int	paulaline;		/* a hand-written PaulaNET interface */
 	int	sershell;		/* Shell on the serial port */
 	int	serbaud;		/* index into bauds[] */
 };
@@ -146,9 +163,11 @@ valid_ip(const char *s, int prefix_ok)
 	int part, dots = 0, digits;
 
 	for (;;) {
+		/* (more than 3 digits is too big: no overflow) */
 		for (part = 0, digits = 0; *s >= '0' && *s <= '9'; s++, digits++)
-			part = part * 10 + (*s - '0');
-		if (!digits || part > 255)
+			if (digits < 3)
+				part = part * 10 + (*s - '0');
+		if (!digits || digits > 3 || part > 255)
 			return 0;
 		if (*s == '.' && dots < 3) {
 			dots++;
@@ -162,8 +181,9 @@ valid_ip(const char *s, int prefix_ok)
 	if (*s == '/' && prefix_ok) {
 		for (s++, part = 0, digits = 0; *s >= '0' && *s <= '9'; s++,
 		    digits++)
-			part = part * 10 + (*s - '0');
-		return digits && part <= 32 && !*s;
+			if (digits < 2)
+				part = part * 10 + (*s - '0');
+		return digits && digits <= 2 && part <= 32 && !*s;
 	}
 	return !*s;
 }
@@ -179,7 +199,8 @@ mask_prefix(const char *s)
 		if (*s < '0' || *s > '9')
 			return -1;
 		for (part = 0; *s >= '0' && *s <= '9'; s++)
-			part = part * 10 + (*s - '0');
+			if (part <= 255)
+				part = part * 10 + (*s - '0');
 		if (part > 255 || (i < 3 && *s++ != '.'))
 			return -1;
 		m = (m << 8) | part;
@@ -217,12 +238,35 @@ tokens(char *line, char **tok, int max)
 	return n;
 }
 
+/* an "interface <name> <device> <unit> ..." line (config.c: at least 4
+   words): which of them the window edits */
+#define	IF_NONE		0
+#define	IF_ETH		1
+#define	IF_WIFI		2
+#define	IF_PAULA	3
+
+static int
+iface_kind(char **tok, int n)
+{
+	int i, wifi;
+
+	if (n < 4 || !seq_nocase(tok[0], "interface"))
+		return IF_NONE;
+	if (amibsdnet_is_paulanet(tok[2]))
+		return IF_PAULA;
+	wifi = looks_wireless(tok[2]);
+	for (i = 4; i < n; i++)
+		if (seq_nocase(tok[i], "wifi"))
+			wifi = 1;
+	return wifi ? IF_WIFI : IF_ETH;
+}
+
 static void
 load(struct settings *s)
 {
 	char line[256], *tok[12];
 	BPTR fh;
-	int n, i;
+	int n, i, k;
 
 	memset(s, 0, sizeof(*s));
 	scpy(s->hostname, "amiga", sizeof(s->hostname));
@@ -230,7 +274,9 @@ load(struct settings *s)
 	if ((fh = Open((CONST_STRPTR)CONF_ENV, MODE_OLDFILE)) == 0)
 		fh = Open((CONST_STRPTR)CONF_ENVARC, MODE_OLDFILE);
 	if (fh) {
-		while (FGets(fh, (STRPTR)line, sizeof(line))) {
+		/* (the size less one for dos V36/V37, which copy one byte
+		   more: dos.doc:2146-2150, FGets BUGS) */
+		while (FGets(fh, (STRPTR)line, sizeof(line) - 1)) {
 			if ((n = tokens(line, tok, 12)) < 2)
 				continue;
 			if (seq_nocase(tok[0], "autodetect"))
@@ -249,51 +295,40 @@ load(struct settings *s)
 						*p++ = ' ';
 					drv_fmt_crc(p, v);
 				}
-			} else if (seq_nocase(tok[0], "interface") && n >= 4 &&
-			    amibsdnet_is_paulanet(tok[2])) {
-				/* written by hand: kept as it is, except for the
-				   interface name (write_conf() picks a free one) */
-				char *p = s->paulaline;
-
-				for (i = 2; i < n && p - s->paulaline <
-				    (int)sizeof(s->paulaline) - 4; i++) {
-					if (i > 2)
-						*p++ = ' ';
-					scpy(p, tok[i], sizeof(s->paulaline) - 2 -
-					    (p - s->paulaline));
-					p += slen(p);
-					/* a fixed address: its gateway and name
-					   server lines must be written again */
-					if (seq_nocase(tok[i], "address"))
-						s->paulafixed = 1;
-				}
+			} else if (iface_kind(tok, n) == IF_PAULA) {
+				/* written by hand: merge() keeps the line as
+				   it is */
+				s->paulaline = 1;
 			} else if (seq_nocase(tok[0], "hostname"))
 				scpy(s->hostname, tok[1], sizeof(s->hostname));
 			else if (seq_nocase(tok[0], "gateway"))
 				scpy(s->gateway, tok[1], sizeof(s->gateway));
 			else if (seq_nocase(tok[0], "nameserver") && !s->dns[0])
 				scpy(s->dns, tok[1], sizeof(s->dns));
-			else if (seq_nocase(tok[0], "interface") && n >= 4) {
-				int wifi = looks_wireless(tok[2]);
+			else if ((k = iface_kind(tok, n)) == IF_ETH ||
+			    k == IF_WIFI) {
 				LONG unit = 0;
 				const char *p;
 
-				for (i = 4; i < n; i++)
-					if (seq_nocase(tok[i], "wifi"))
-						wifi = 1;
-				for (p = tok[3]; *p >= '0' && *p <= '9'; p++)
+				for (p = tok[3]; *p >= '0' && *p <= '9' &&
+				    unit < 100000; p++)
 					unit = unit * 10 + (*p - '0');
-				if (wifi && !s->wifi[0]) {
+				if (k == IF_WIFI && !s->wifi[0]) {
 					scpy(s->wifi, tok[2], sizeof(s->wifi));
 					s->wifiunit = unit;
-				} else if (!wifi && !s->eth[0]) {
+				} else if (k == IF_ETH && !s->eth[0]) {
 					scpy(s->eth, tok[2], sizeof(s->eth));
 					s->ethunit = unit;
 				} else
 					continue;
+				/* the fixed address the window edits: the
+				   first one, and the line it is on */
+				if (s->fixed)
+					continue;
 				for (i = 4; i + 1 < n; i++)
 					if (seq_nocase(tok[i], "address")) {
 						s->fixed = 1;
+						s->fixedon = k;
 						scpy(s->addr, tok[i + 1],
 						    sizeof(s->addr));
 					}
@@ -317,118 +352,441 @@ load(struct settings *s)
 		}
 		Close(fh);
 	}
-	/* a hand-written PaulaNET line is used whatever "autodetect" says */
-	if (s->paulaline[0])
+	/* a hand-written PaulaNET line is used whatever "autodetect" says
+	   (src/stack/config.c: "autodetect" only stops add_detected()) */
+	if (s->paulaline)
 		s->paulanet = 1;
 	wm_get_network(s->ssid, sizeof(s->ssid), s->psk, sizeof(s->psk));
 }
 
-static void
-put_iface(BPTR fh, const char *name, const char *dev, LONG unit, int fixed,
-    const char *addr, int wifi)
-{
-	char line[200], *p = line;
+/* the new text of the configuration, built in memory */
+struct obuf {
+	char	*p;
+	LONG	len, size;
+	int	err;
+};
 
-	scpy(p, "interface  ", 12);
-	p += slen(p);
-	scpy(p, name, 8);
-	p += slen(p);
-	*p++ = ' ';
-	scpy(p, dev, 64);
-	p += slen(p);
-	*p++ = ' ';
-	put_num(&p, (ULONG)unit);
-	if (fixed) {
-		scpy(p, " address ", 10);
-		p += slen(p);
-		scpy(p, addr, 24);
-		p += slen(p);
-		if (!has_word(addr, "/")) {
-			scpy(p, "/24", 4);
-			p += 3;
+static void
+ob_put(struct obuf *o, const char *s, LONG n)
+{
+	char *np;
+	LONG ns;
+
+	if (o->err || n <= 0)
+		return;
+	if (o->len + n + 1 > o->size) {
+		ns = (o->len + n + 1) * 2 + 256;
+		if ((np = AllocVec(ns, MEMF_ANY)) == NULL) {
+			o->err = 1;
+			return;
 		}
-	} else {
-		scpy(p, " dhcp", 6);
-		p += 5;
+		if (o->p) {
+			CopyMem(o->p, np, o->len);
+			FreeVec(o->p);
+		}
+		o->p = np;
+		o->size = ns;
 	}
-	if (wifi) {
-		scpy(p, " wifi", 6);
-		p += 5;
-	}
-	*p++ = '\n';
-	*p = '\0';
-	FPuts(fh, (CONST_STRPTR)line);
+	CopyMem((APTR)s, o->p + o->len, n);
+	o->len += n;
+	o->p[o->len] = '\0';
 }
 
+static void
+ob_str(struct obuf *o, const char *s)
+{
+
+	ob_put(o, s, slen(s));
+}
+
+static void
+ob_num(struct obuf *o, ULONG v)
+{
+	char b[12], *p = b;
+
+	put_num(&p, v);
+	ob_put(o, b, p - b);
+}
+
+/* a whole file; NULL and *err 0 if there is none, NULL and *err 1 if it
+   is there but cannot be read completely (never merged from a part) */
+static char *
+read_text(const char *name, LONG *lenp, int *err)
+{
+	BPTR fh = Open((CONST_STRPTR)name, MODE_OLDFILE);
+	char *buf;
+	LONG size, len = 0, n;
+
+	*err = 0;
+	*lenp = 0;
+	if (fh == 0) {
+		*err = IoErr() != ERROR_OBJECT_NOT_FOUND;
+		return NULL;
+	}
+	if (Seek(fh, 0, OFFSET_END) < 0 ||
+	    (size = Seek(fh, 0, OFFSET_BEGINNING)) < 0 || size > 256 * 1024 ||
+	    (buf = AllocVec(size + 1, MEMF_ANY)) == NULL) {
+		Close(fh);
+		*err = 1;
+		return NULL;
+	}
+	while (len < size && (n = Read(fh, buf + len, size - len)) > 0)
+		len += n;
+	Close(fh);
+	if (len != size) {
+		FreeVec(buf);
+		*err = 1;
+		return NULL;
+	}
+	buf[len] = '\0';
+	*lenp = len;
+	return buf;
+}
+
+/* where the fixed address goes: the interface that had it, else Ethernet
+   if there is one, else Wi-Fi; IF_NONE in DHCP mode */
 static int
-write_conf(const char *path, const struct settings *s)
+fixed_target(const struct settings *s)
+{
+
+	if (!s->fixed)
+		return IF_NONE;
+	if (s->fixedon == IF_ETH && s->eth[0])
+		return IF_ETH;
+	if (s->fixedon == IF_WIFI && s->wifi[0])
+		return IF_WIFI;
+	return s->eth[0] ? IF_ETH : IF_WIFI;
+}
+
+/*
+ * An interface line: "interface <name> <device> <unit>", then the
+ * address words, then every other word of the old line (old, nold; e.g.
+ * "optional").  how: 0 the old line's address words as they were, 1
+ * "dhcp", 2 "address <a.b.c.d/prefix>".
+ */
+static void
+put_iface(struct obuf *o, const char *name, const char *dev, LONG unit,
+    int how, const char *addr, int wifi, char **old, int nold)
+{
+	int i;
+
+	ob_str(o, "interface  ");
+	ob_str(o, name);
+	ob_str(o, " ");
+	ob_str(o, dev);
+	ob_str(o, " ");
+	ob_num(o, (ULONG)unit);
+	if (how == 2) {
+		ob_str(o, " address ");
+		ob_str(o, addr);
+		if (!has_word(addr, "/"))
+			ob_str(o, "/24");
+	} else if (how == 1)
+		ob_str(o, " dhcp");
+	for (i = 4; i < nold; i++) {
+		if (seq_nocase(old[i], "wifi"))
+			continue;		/* (written below) */
+		if (how != 0 && seq_nocase(old[i], "dhcp"))
+			continue;
+		if (how != 0 && (seq_nocase(old[i], "address") ||
+		    seq_nocase(old[i], "netmask"))) {
+			i++;			/* and its value */
+			continue;
+		}
+		ob_str(o, " ");
+		ob_str(o, old[i]);
+	}
+	/* ("wifi" marks a driver whose name does not say so, for load();
+	   the stack skips the word, config.c parse_interface()) */
+	if (wifi && !looks_wireless(dev))
+		ob_str(o, " wifi");
+	ob_str(o, "\n");
+}
+
+/* how an Ethernet or Wi-Fi line gets its address (see put_iface()) */
+static int
+iface_how(const struct settings *s, int kind, int hasold)
+{
+
+	if (kind == fixed_target(s))
+		return 2;
+	if (kind == s->fixedon)
+		return 1;		/* had the fixed address: DHCP now */
+	return hasold ? 0 : 1;
+}
+
+static void
+put_paulanet_prefs(struct obuf *o, const struct settings *s)
+{
+	const char *p = s->crcs;
+	char one[12];
+	int i;
+
+	if (s->verify)
+		ob_str(o, "paulanet   verify on\n");
+	while (*p) {
+		while (*p == ' ')
+			p++;
+		for (i = 0; *p && *p != ' ' && i < 11; i++)
+			one[i] = *p++;
+		one[i] = '\0';
+		if (i) {
+			ob_str(o, "paulanet   crc ");
+			ob_str(o, one);
+			ob_str(o, "\n");
+		}
+	}
+}
+
+#define	MAXTOK		32
+#define	MAXNAMES	16
+
+/* one line of base from p: its end (after the line feed) in *ep, its
+   first 255 bytes in line (the stack reads lines into 256 bytes and
+   ignores longer ones, config.c read_config()), split into words */
+static int
+line_tokens(const char *p, const char *end, const char **ep, char *line,
+    char **tok)
+{
+	const char *e;
+	LONG ll;
+
+	for (e = p; e < end && *e != '\n'; e++)
+		;
+	if (e < end)
+		e++;
+	*ep = e;
+	for (ll = 0; ll < e - p && ll < 255; ll++)
+		line[ll] = p[ll];
+	line[ll] = '\0';
+	return tokens(line, tok, MAXTOK);
+}
+
+/*
+ * The settings merged into the configuration text base: the lines the
+ * window edits are replaced (the first of their kind; later ones that
+ * would override it are left out), all others stay as they are, and what
+ * is missing is added.
+ */
+static void
+merge(const char *base, LONG blen, const struct settings *s, struct obuf *o)
+{
+	const char *p, *e, *end = base + blen;
+	char line[256], *tok[MAXTOK], names[MAXNAMES][16], ethname[16],
+	    wifiname[16];
+	int n, kind, nn = 0, k, i, haswifi = 0;
+	int did_host = 0, seen_eth = 0, seen_wifi = 0, did_eth = 0,
+	    did_wifi = 0, did_gw = 0, did_dns = 0, did_auto = 0, did_pn = 0;
+
+	/* the interface names in use, and is there a Wi-Fi line */
+	for (p = base; p < end; p = e) {
+		n = line_tokens(p, end, &e, line, tok);
+		if ((kind = iface_kind(tok, n)) == IF_NONE)
+			continue;
+		if (kind == IF_WIFI)
+			haswifi = 1;
+		if (nn < MAXNAMES)
+			scpy(names[nn++], tok[1], sizeof(names[0]));
+	}
+	/* free names for new lines ("sana0" ... "sana9", as the stack picks
+	   one for PaulaNET, config.c add_detected()) */
+	ethname[0] = wifiname[0] = '\0';
+	for (k = 0; k < 10 && (!ethname[0] || !wifiname[0]); k++) {
+		char nm[8];
+
+		scpy(nm, "sana0", sizeof(nm));
+		nm[4] = '0' + k;
+		for (i = 0; i < nn && !seq_nocase(names[i], nm); i++)
+			;
+		if (i < nn)
+			continue;
+		if (!ethname[0])
+			scpy(ethname, nm, sizeof(ethname));
+		else
+			scpy(wifiname, nm, sizeof(wifiname));
+	}
+
+	for (p = base; p < end; p = e) {
+		n = line_tokens(p, end, &e, line, tok);
+		kind = iface_kind(tok, n);
+		if (n >= 2 && seq_nocase(tok[0], "hostname")) {
+			if (!did_host) {
+				ob_str(o, "hostname   ");
+				ob_str(o, s->hostname[0] ? s->hostname : "amiga");
+				ob_str(o, "\n");
+				did_host = 1;
+			}
+			continue;
+		}
+		if (kind == IF_ETH && !seen_eth) {
+			seen_eth = 1;
+			if (s->eth[0]) {
+				put_iface(o, tok[1], s->eth, s->ethunit,
+				    iface_how(s, IF_ETH, 1), s->addr, 0, tok, n);
+				did_eth = 1;
+			}
+			/* a new Wi-Fi line right after Ethernet */
+			if (!haswifi && s->wifi[0] && !did_wifi && wifiname[0]) {
+				put_iface(o, wifiname, s->wifi, s->wifiunit,
+				    iface_how(s, IF_WIFI, 0), s->addr, 1, NULL,
+				    0);
+				did_wifi = 1;
+			}
+			continue;
+		}
+		if (kind == IF_WIFI && !seen_wifi) {
+			seen_wifi = 1;
+			/* a new Ethernet line goes before Wi-Fi (the route) */
+			if (s->eth[0] && !did_eth && ethname[0]) {
+				put_iface(o, ethname, s->eth, s->ethunit,
+				    iface_how(s, IF_ETH, 0), s->addr, 0, NULL,
+				    0);
+				did_eth = 1;
+			}
+			if (s->wifi[0]) {
+				put_iface(o, tok[1], s->wifi, s->wifiunit,
+				    iface_how(s, IF_WIFI, 1), s->addr, 1, tok, n);
+				did_wifi = 1;
+			}
+			continue;
+		}
+		if (kind == IF_PAULA && !s->paulanet)
+			continue;	/* the PaulaNET box is off */
+		/* the gateway and the first name server are the window's
+		   fixed-address fields: with DHCP they go (the stack uses
+		   configured name servers after the DHCP ones,
+		   src/stack/config.c stack_update_dns(), so one left from a
+		   fixed address would stay in use) */
+		if (n >= 2 && seq_nocase(tok[0], "gateway")) {
+			/* (one gateway: a later line would override it,
+			   config.c parse_line()) */
+			if (s->fixed && !did_gw && s->gateway[0]) {
+				ob_str(o, "gateway    ");
+				ob_str(o, s->gateway);
+				ob_str(o, "\n");
+			}
+			did_gw = 1;
+			continue;
+		}
+		if (n >= 2 && !did_dns && seq_nocase(tok[0], "nameserver")) {
+			/* the first one is the window's; more stay */
+			if (s->fixed && s->dns[0]) {
+				ob_str(o, "nameserver ");
+				ob_str(o, s->dns);
+				ob_str(o, "\n");
+			}
+			did_dns = 1;
+			continue;
+		}
+		if (n >= 2 && seq_nocase(tok[0], "autodetect")) {
+			if (!did_auto)
+				ob_str(o, s->paulanet ? "autodetect on\n" :
+				    "autodetect off\n");
+			did_auto = 1;
+			continue;
+		}
+		if (n >= 3 && seq_nocase(tok[0], "paulanet") &&
+		    (seq_nocase(tok[1], "verify") || seq_nocase(tok[1], "crc"))) {
+			if (!did_pn)
+				put_paulanet_prefs(o, s);
+			did_pn = 1;
+			continue;
+		}
+		/* not the window's: as it is */
+		ob_put(o, p, e - p);
+		if (e[-1] != '\n')
+			ob_str(o, "\n");
+	}
+	if (!did_host) {
+		ob_str(o, "hostname   ");
+		ob_str(o, s->hostname[0] ? s->hostname : "amiga");
+		ob_str(o, "\n");
+	}
+	if (s->eth[0] && !did_eth) {
+		if (!ethname[0])
+			o->err = 1;	/* no free interface name */
+		else
+			put_iface(o, ethname, s->eth, s->ethunit,
+			    iface_how(s, IF_ETH, 0), s->addr, 0, NULL, 0);
+	}
+	if (s->wifi[0] && !did_wifi) {
+		if (!wifiname[0])
+			o->err = 1;
+		else
+			put_iface(o, wifiname, s->wifi, s->wifiunit,
+			    iface_how(s, IF_WIFI, 0), s->addr, 1, NULL, 0);
+	}
+	if (s->fixed && !did_gw && s->gateway[0]) {
+		ob_str(o, "gateway    ");
+		ob_str(o, s->gateway);
+		ob_str(o, "\n");
+	}
+	if (s->fixed && !did_dns && s->dns[0]) {
+		ob_str(o, "nameserver ");
+		ob_str(o, s->dns);
+		ob_str(o, "\n");
+	}
+	if (!did_auto && !s->paulanet)
+		ob_str(o, "autodetect off\n");
+	if (!did_pn)
+		put_paulanet_prefs(o, s);
+}
+
+/* a file that is not there yet: written, every write checked; Close()
+   "might fail depending on buffering and whatever IO must be done to
+   close a file being written to" (dos.doc Close) */
+static int
+new_file(const char *path, const char *data, LONG len)
 {
 	BPTR fh = Open((CONST_STRPTR)path, MODE_NEWFILE);
-	int n = 0, fixed_eth = s->fixed && s->eth[0], fixed;
-	char name[8];
+	int ok;
 
 	if (fh == 0)
 		return -1;
-	FPuts(fh, (CONST_STRPTR)"# AmiBSDNet configuration (AmiBSDNet "
-	    "settings window; see the AmiBSDNet documentation)\n");
-	FPuts(fh, (CONST_STRPTR)"hostname   ");
-	FPuts(fh, (CONST_STRPTR)(s->hostname[0] ? s->hostname : "amiga"));
-	FPuts(fh, (CONST_STRPTR)"\n");
-	scpy(name, "sana0", sizeof(name));
-	if (s->eth[0]) {
-		put_iface(fh, name, s->eth, s->ethunit, fixed_eth, s->addr, 0);
-		name[4]++;
-		n++;
+	ok = Write(fh, (APTR)data, len) == len;
+	if (!Close(fh))
+		ok = 0;
+	if (!ok) {
+		DeleteFile((CONST_STRPTR)path);
+		return -1;
 	}
-	if (s->wifi[0]) {
-		put_iface(fh, name, s->wifi, s->wifiunit,
-		    s->fixed && !fixed_eth, s->addr, 1);
-		name[4]++;
-		n++;
-	}
-	fixed = s->fixed || (s->paulafixed && s->paulaline[0] && s->paulanet);
-	if (fixed && s->gateway[0]) {
-		FPuts(fh, (CONST_STRPTR)"gateway    ");
-		FPuts(fh, (CONST_STRPTR)s->gateway);
-		FPuts(fh, (CONST_STRPTR)"\n");
-	}
-	if (fixed && s->dns[0]) {
-		FPuts(fh, (CONST_STRPTR)"nameserver ");
-		FPuts(fh, (CONST_STRPTR)s->dns);
-		FPuts(fh, (CONST_STRPTR)"\n");
-	}
-	/* PaulaNET (floppy-port Wi-Fi): found by the stack by itself */
-	if (s->paulaline[0] && s->paulanet) {
-		FPuts(fh, (CONST_STRPTR)"interface  ");
-		FPuts(fh, (CONST_STRPTR)name);
-		FPuts(fh, (CONST_STRPTR)" ");
-		FPuts(fh, (CONST_STRPTR)s->paulaline);
-		FPuts(fh, (CONST_STRPTR)"\n");
-	}
-	if (!s->paulanet)
-		FPuts(fh, (CONST_STRPTR)"autodetect off\n");
-	if (s->verify)
-		FPuts(fh, (CONST_STRPTR)"paulanet   verify on\n");
-	{
-		const char *p = s->crcs;
-		char one[12];
-		int i;
-
-		while (*p) {
-			while (*p == ' ')
-				p++;
-			for (i = 0; *p && *p != ' ' && i < 11; i++)
-				one[i] = *p++;
-			one[i] = '\0';
-			if (i) {
-				FPuts(fh, (CONST_STRPTR)"paulanet   crc ");
-				FPuts(fh, (CONST_STRPTR)one);
-				FPuts(fh, (CONST_STRPTR)"\n");
-			}
-		}
-	}
-	Close(fh);
 	return 0;
+}
+
+/* the settings merged into path (or, if path is not there yet, into the
+   other copy of the configuration); 0 on success, -1 with path as it
+   was */
+static int
+write_conf(const char *path, const struct settings *s)
+{
+	const char *other = seq(path, CONF_ENV) ? CONF_ENVARC : CONF_ENV;
+	struct obuf o;
+	char *base;
+	LONG blen;
+	int err, exists, r;
+
+	if ((base = read_text(path, &blen, &err)) == NULL && err)
+		return -1;
+	exists = base != NULL;
+	if (base == NULL && (base = read_text(other, &blen, &err)) == NULL &&
+	    err)
+		return -1;
+	memset(&o, 0, sizeof(o));
+	if (base == NULL)
+		ob_str(&o, "# AmiBSDNet configuration (AmiBSDNet settings "
+		    "window; see the AmiBSDNet documentation)\n");
+	merge(base ? base : "", base ? blen : 0, s, &o);
+	if (base)
+		FreeVec(base);
+	if (o.err || o.p == NULL) {
+		if (o.p)
+			FreeVec(o.p);
+		return -1;
+	}
+	r = exists ? amibsdnet_replace_file(path, o.p, o.len) :
+	    new_file(path, o.p, o.len);
+	FreeVec(o.p);
+	return r;
 }
 
 /* the CRC field: hex numbers separated by spaces; 0 if all are good */
@@ -478,13 +836,22 @@ enum {
 static struct Gadget *gad[NGADS];
 static struct Window *win;
 
+static void busy(int);
+static void serviced_delay(LONG);
+
 static const char *modes[] = { "Automatic (DHCP)", "Fixed address", NULL };
 
 /* the serial Shell's speeds (8N1, no handshaking) */
-static const ULONG bauds[] = { 9600, 19200, 38400, 57600, 115200 };
+static ULONG bauds[] = { 9600, 19200, 38400, 57600, 115200, 0 };
 static const char *baudlabels[] = { "9600 baud", "19200 baud", "38400 baud",
-    "57600 baud", "115200 baud", NULL };
+    "57600 baud", "115200 baud", NULL, NULL };
 #define	NBAUDS		5
+/* a stored speed that is none of these (SerialShell takes 110 to
+   1000000, src/tools/serialshell.c:1016, "if (baud < 110 || baud >
+   1000000)"): shown as a sixth choice, bauds[NBAUDS], so that it stays
+   as it is unless another one is chosen */
+static char baudother[20];
+static int nbauds = NBAUDS;
 #define	BAUD_DEFAULT	1	/* 19200 */
 #define	SERVAR		"AmiBSDNet/SerialShell"
 
@@ -504,9 +871,21 @@ load_serial(struct settings *s)
 	s->sershell = 1;
 	for (i = 0; v[i] >= '0' && v[i] <= '9'; i++)
 		b = b * 10 + (v[i] - '0');
-	for (i = 0; i < NBAUDS; i++)
-		if (bauds[i] == b)
+	for (i = 0; i < nbauds; i++)
+		if (bauds[i] == b) {
 			s->serbaud = i;
+			return;
+		}
+	if (b >= 110 && b <= 1000000 && nbauds == NBAUDS) {
+		char *p = baudother;
+
+		bauds[NBAUDS] = b;
+		put_num(&p, b);
+		scpy(p, " baud", sizeof(baudother) - (p - baudother));
+		baudlabels[NBAUDS] = baudother;
+		nbauds = NBAUDS + 1;
+		s->serbaud = NBAUDS;
+	}
 }
 
 static int
@@ -542,19 +921,25 @@ apply_serial(int save)
 	    cur.serbaud == orig.serbaud))
 		return 0;
 	/* off, or another speed: the running one goes first */
-	if (orig.sershell) {
+	if (orig.sershell && serialshell_running()) {
+		/* asynchronous (STOP itself waits up to 5 s), the window
+		   kept up meanwhile */
 		in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
 		out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
-		SystemTags((CONST_STRPTR)"C:SerialShell STOP", SYS_Input, in,
-		    SYS_Output, out, TAG_DONE);
-		if (in)
-			Close(in);
-		if (out)
-			Close(out);
+		if (SystemTags((CONST_STRPTR)"C:SerialShell STOP", SYS_Input, in,
+		    SYS_Output, out, SYS_Asynch, TRUE, TAG_DONE) != 0) {
+			if (in)
+				Close(in);
+			if (out)
+				Close(out);
+			return -2;
+		}
 		/* gone only once its Shell has ended (a command that ignores
 		   Ctrl-C keeps it): a new one could not start before */
-		for (i = 0; i < 25 && serialshell_running(); i++)
-			Delay(10);
+		busy(1);
+		for (i = 0; i < 60 && serialshell_running(); i++)
+			serviced_delay(10);
+		busy(0);
 		if (serialshell_running())
 			return -2;
 	}
@@ -583,12 +968,158 @@ apply_serial(int save)
 	return 0;
 }
 
+/* the Preferences busy pointer while the window waits (intuition.doc
+   SetWindowPointerA, WA_BusyPointer, V39) */
+static void
+busy(int on)
+{
+	struct TagItem t[] = { { WA_BusyPointer, on }, { WA_PointerDelay, on },
+	    { TAG_DONE, 0 } };
+
+	if (win)
+		SetWindowPointerA(win, t);
+}
+
+/*
+ * Waiting with the window kept up to date: ticks (1/50 s) in steps of
+ * 5, redrawing it when asked.  Input meanwhile is dropped (the busy
+ * pointer shows that it is not taken).
+ */
+static void
+serviced_delay(LONG ticks)
+{
+	struct IntuiMessage *im;
+
+	for (; ticks > 0; ticks -= 5) {
+		Delay(5);
+		if (win == NULL)
+			continue;
+		while ((im = GT_GetIMsg(win->UserPort)) != NULL) {
+			ULONG cls = im->Class;
+
+			GT_ReplyIMsg(im);
+			if (cls == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			}
+		}
+	}
+}
+
+/*
+ * The passphrase field shows a '*' for each character: a GadTools string
+ * gadget with an edit hook of its own (gadtools.doc, GTST_EditHook).  The
+ * hook gets every key after Intuition has planned its edit in
+ * SGWork.WorkBuffer; it keeps the real text in psk_real, following the
+ * edit by SGWork.EditOp, and puts '*' into the planned buffer instead
+ * of the typed character (intuition/sghooks.h: "Intuition will use the
+ * values found in SGWork fields WorkBuffer, NumChars, BufferPos, and
+ * LongInt"; "If you clear SGA_USE, the string gadget will be
+ * unchanged").  An edit it cannot follow (undo, a paste of several
+ * characters) is refused with a beep, so psk_real and the field always
+ * agree.
+ */
+static char psk_real[65];
+static struct Hook psk_hook;
+
+ULONG psk_edit(struct Hook *, struct SGWork *, ULONG *)
+    __attribute__((used));
+
+ULONG
+psk_edit(struct Hook *h, struct SGWork *sgw, ULONG *msg)
+{
+	LONG oldn = sgw->StringInfo->NumChars, newn = sgw->NumChars;
+	LONG pos = sgw->StringInfo->BufferPos, cnt, at, i;
+	UWORD c = sgw->Code;
+	char *real = h->h_Data;
+
+	if (*msg != SGH_KEY)
+		return 0;		/* (SGH_CLICK: Intuition's own) */
+	switch (sgw->EditOp) {
+	case EO_NOOP:
+	case EO_MOVECURSOR:
+	case EO_ENTER:
+		return 1;
+	case EO_INSERTCHAR:		/* one character at the cursor */
+		if (newn != oldn + 1 || newn > 64 || pos < 0 || pos > oldn ||
+		    c < 0x20 || c > 0x7e)
+			break;
+		for (i = oldn; i > pos; i--)
+			real[i] = real[i - 1];
+		real[pos] = c;
+		real[newn] = '\0';
+		sgw->WorkBuffer[pos] = '*';
+		return 1;
+	case EO_REPLACECHAR:		/* the one under the cursor */
+		if (pos < 0 || pos > oldn || newn > 64 || c < 0x20 || c > 0x7e)
+			break;
+		real[pos] = c;
+		real[newn] = '\0';
+		sgw->WorkBuffer[pos] = '*';
+		return 1;
+	case EO_DELBACKWARD:		/* before the cursor */
+	case EO_DELFORWARD:		/* under and after it */
+		cnt = oldn - newn;
+		at = sgw->EditOp == EO_DELBACKWARD ? pos - cnt : pos;
+		if (cnt < 0 || at < 0 || at + cnt > oldn)
+			break;
+		for (i = at; i + cnt <= oldn; i++)
+			real[i] = real[i + cnt];
+		return 1;
+	case EO_CLEAR:
+		real[0] = '\0';
+		return 1;
+	}
+	sgw->Actions = (sgw->Actions & ~SGA_USE) | SGA_BEEP;
+	return 1;
+}
+
+/* the hook's entry: the C calling code utility/hooks.h shows as
+   "_hookEntry" (A0 hook, A2 object, A1 message onto the stack) */
+void psk_hook_entry(void);
+__asm__(
+"	.text\n"
+"	.globl	psk_hook_entry\n"
+"psk_hook_entry:\n"
+"	move.l	%a1,-(%sp)\n"
+"	move.l	%a2,-(%sp)\n"
+"	move.l	%a0,-(%sp)\n"
+"	jsr	psk_edit\n"
+"	lea	12(%sp),%sp\n"
+"	rts\n");
+
+/* a hook for a string gadget that shows '*': real (65 bytes) gets the
+   text (also for the Wi-Fi window, wifiwin.c) */
+void
+secret_hook_init(struct Hook *h, char *real)
+{
+
+	real[0] = '\0';
+	h->h_Entry = (ULONG (*)())psk_hook_entry;
+	h->h_SubEntry = (ULONG (*)())psk_edit;
+	h->h_Data = real;
+}
+
 static void
 set_attr(int id, ULONG tag, ULONG val)
 {
 	struct TagItem t[] = { { tag, val }, { TAG_DONE, 0 } };
 
 	GT_SetGadgetAttrsA(gad[id], win, NULL, t);
+}
+
+/* the passphrase into the field: psk_real, and one '*' per character */
+static void
+set_psk(const char *s)
+{
+	static char stars[65];
+	int i;
+
+	scpy(psk_real, s, sizeof(psk_real));
+	for (i = 0; psk_real[i]; i++)
+		stars[i] = '*';
+	stars[i] = '\0';
+	set_attr(GID_PSK, GTST_String, (ULONG)stars);
 }
 
 static void
@@ -716,7 +1247,7 @@ show(void)
 	set_attr(GID_MODE, GTCY_Active, cur.fixed);
 	set_attr(GID_HOST, GTST_String, (ULONG)cur.hostname);
 	set_attr(GID_SSID, GTST_String, (ULONG)cur.ssid);
-	set_attr(GID_PSK, GTST_String, (ULONG)cur.psk);
+	set_psk(cur.psk);
 	set_attr(GID_PAULA, GTCB_Checked, cur.paulanet);
 	set_attr(GID_VERIFY, GTCB_Checked, cur.verify);
 	set_attr(GID_CRC, GTST_String, (ULONG)cur.crcs);
@@ -743,7 +1274,8 @@ collect(void)
 	}
 	scpy(cur.hostname, gstr(GID_HOST), sizeof(cur.hostname));
 	scpy(cur.ssid, gstr(GID_SSID), sizeof(cur.ssid));
-	scpy(cur.psk, gstr(GID_PSK), sizeof(cur.psk));
+	/* (the field shows '*': the text is psk_real, psk_edit()) */
+	scpy(cur.psk, psk_real, sizeof(cur.psk));
 	cur.paulanet = checked(GID_PAULA);
 	cur.verify = checked(GID_VERIFY);
 	cur.sershell = checked(GID_SERIAL);
@@ -782,7 +1314,9 @@ check_driver(void)
 		return;
 	}
 	status("Checking the PaulaNET driver...");
+	busy(1);
 	r = drv_check_paulanet(path, &p, &ver, &crc);
+	busy(0);
 	drv_fmt_crc(hex, crc);
 	if (r == DRV_OK) {
 		scpy(msg, "PaulaNET.device ", sizeof(msg));
@@ -824,8 +1358,11 @@ detect(void)
 
 	status("Looking for network adapters...");
 	collect();
+	busy(1);
 	n = probe_adapters(a, PROBE_MAX);
-	cur.eth[0] = cur.wifi[0] = '\0';
+	busy(0);
+	/* a field changes only if an adapter of its kind was found: what
+	   was typed in the other one stays */
 	for (i = 0; i < n; i++)
 		if (a[i].wireless && !nw++) {
 			scpy(cur.wifi, a[i].device, sizeof(cur.wifi));
@@ -855,6 +1392,19 @@ detect(void)
 	}
 }
 
+/* empty, or one word the stack's tokenize() keeps whole */
+static int
+one_word(const char *s)
+{
+
+	if (*s == '#' || *s == ';')
+		return 0;
+	for (; *s; s++)
+		if (*s == ' ' || *s == '\t')
+			return 0;
+	return 1;
+}
+
 /* returns 0 if the fields can be used, else shows why */
 static int
 check(void)
@@ -862,12 +1412,31 @@ check(void)
 
 	/* PaulaNET alone is fine: the stack adds it by itself */
 	if (!cur.eth[0] && !cur.wifi[0] &&
-	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline[0]))) {
+	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline))) {
 		status("Enter a network driver, or press Detect");
 		return -1;
 	}
 	if (amibsdnet_is_paulanet(cur.eth) || amibsdnet_is_paulanet(cur.wifi)) {
 		status("PaulaNET is added by itself: use the PaulaNET box");
+		return -1;
+	}
+	/* one word each: the stack splits a line at blanks, and a word
+	   starting with '#' or ';' starts a comment (config.c tokenize()) */
+	if (!one_word(cur.eth) || !one_word(cur.wifi)) {
+		status("Driver: a name without blanks, e.g. wifipi.device");
+		ActivateGadget(gad[one_word(cur.eth) ? GID_WIFI : GID_ETH], win,
+		    NULL);
+		return -1;
+	}
+	if (!one_word(cur.hostname)) {
+		status("Host name: one word, without blanks");
+		ActivateGadget(gad[GID_HOST], win, NULL);
+		return -1;
+	}
+	/* (config.c parse_ulong(): digits only) */
+	if ((cur.eth[0] && cur.ethunit < 0) ||
+	    (cur.wifi[0] && cur.wifiunit < 0)) {
+		status("Unit: 0 or more");
 		return -1;
 	}
 	if (cur.fixed && !cur.eth[0] && !cur.wifi[0]) {
@@ -889,9 +1458,10 @@ check(void)
 		ActivateGadget(gad[GID_DNS], win, NULL);
 		return -1;
 	}
-	if (cur.ssid[0] && cur.psk[0] && (slen(cur.psk) < 8 ||
-	    slen(cur.psk) > 63)) {
-		status("Passphrase: 8 to 63 characters (empty if open)");
+	/* the rule wm.c writes Wireless.prefs by (wm_passphrase_ok()) */
+	if (cur.ssid[0] && cur.psk[0] && !wm_passphrase_ok(cur.psk)) {
+		status("Passphrase: 8 to 63 characters or 64 hex digits "
+		    "(empty if open)");
 		ActivateGadget(gad[GID_PSK], win, NULL);
 		return -1;
 	}
@@ -907,25 +1477,39 @@ check(void)
 static int
 apply(int save)
 {
-	int wifi_changed, i;
+	int wifi_changed, i, archfail = 0;
 
 	collect();
 	if (check() != 0)
 		return -1;
 	mkdirs(save);
-	if (write_conf(CONF_ENV, &cur) != 0 ||
-	    (save && write_conf(CONF_ENVARC, &cur) != 0)) {
-		status("Cannot write the configuration");
+	if (write_conf(CONF_ENV, &cur) != 0) {
+		status("Cannot write " CONF_ENV " (it is as it was)");
 		return -1;
 	}
+	/* (the rest is still done, as for Use, and the failure is said at
+	   the end, "Used, but cannot write ...") */
+	if (save && write_conf(CONF_ENVARC, &cur) != 0)
+		archfail = 1;
+	/* the fixed address is on that line now */
+	cur.fixedon = fixed_target(&cur);
 	wifi_changed = !seq(cur.ssid, orig.ssid) || !seq(cur.psk, orig.psk) ||
 	    !seq(cur.wifi, orig.wifi) || cur.wifiunit != orig.wifiunit;
+	/* a network changed here: its entry written anew.  Unchanged, Save
+	   still stores it: after a Use it is in ENV: only (wm_set_network()),
+	   and the window shows ENV:'s (load(), wm_get_network()).  That is
+	   ENV:'s file copied as it is (wm_save_env()), not an entry built
+	   from the name and passphrase here, which would lose the lines a
+	   WEP or 802.1X entry has instead of a passphrase */
 	if (cur.ssid[0] && (!seq(cur.ssid, orig.ssid) ||
 	    !seq(cur.psk, orig.psk))) {
-		if (wm_set_network(cur.ssid, cur.psk) != 0) {
+		if (wm_set_network(cur.ssid, cur.psk, save) != 0) {
 			status("Cannot write Wireless.prefs");
 			return -1;
 		}
+	} else if (save && wm_save_env() != 0) {
+		status("Cannot write ENVARC:Sys/Wireless.prefs");
+		return -1;
 	}
 	if ((i = apply_serial(save)) != 0) {
 		status(i == -2 ? "Serial Shell busy: end its command, then "
@@ -937,24 +1521,47 @@ apply(int save)
 	orig.sershell = cur.sershell;
 	orig.serbaud = cur.serbaud;
 	status("Applying...");
-	/* the stack starts WirelessManager again with the new network */
-	if (wifi_changed && wm_running() && wm_stop() != 0) {
-		status("Saved, but WirelessManager does not stop; try again");
-		return -1;
+	/* the stack starts WirelessManager again with the new network
+	   (src/stack/wireless.c wm_starter(), for each Wi-Fi interface it
+	   brings up) */
+	if (wifi_changed && wm_running()) {
+		/* (up to 15 s, as long as wm_stop() waits, with the window
+		   kept up to date) */
+		wm_signal_stop();
+		for (i = 0; i < 75 && wm_running(); i++)
+			serviced_delay(10);
+		if (wm_running()) {
+			status("Saved, but WirelessManager does not stop; "
+			    "try again");
+			return -1;
+		}
 	}
 	if ((i = stack_cmd(NETCTRL_RECONFIG)) == -2) {
 		status("Saved, but AmiBSDNet does not answer (see "
 		    "T:AmiBSDNet.log); reboot");
 		return -1;
 	}
-	if (i != 0)
-		return 1;		/* not running: the caller starts it */
+	if (i != 0) {
+		/* not running: the caller starts it and closes the window, so
+		   a failure to save is said here, with the window kept (Use
+		   then starts it without saving) */
+		if (archfail) {
+			status("Cannot write " CONF_ENVARC "; Use starts "
+			    "AmiBSDNet without saving");
+			return -1;
+		}
+		return 1;
+	}
 	if (status_msg()->result != 0) {
 		status("Saved, but the stack could not apply it (see "
 		    "T:AmiBSDNet.log); try again");
 		return -1;
 	}
 	CopyMem(&cur, &orig, sizeof(orig));
+	if (archfail) {
+		status("Used, but cannot write " CONF_ENVARC);
+		return -1;
+	}
 	return 0;
 }
 
@@ -962,6 +1569,7 @@ static void
 scan(void)
 {
 	struct NetCtrlIface ifc;
+	char before_ssid[34], before_psk[65], ssid[34], psk[65];
 
 	collect();
 	if (!cur.wifi[0]) {
@@ -972,12 +1580,19 @@ scan(void)
 	scpy(ifc.device, cur.wifi, sizeof(ifc.device));
 	ifc.unit = cur.wifiunit;
 	ifc.flags = NETIF_WIRELESS;
+	wm_get_network(before_ssid, sizeof(before_ssid), before_psk,
+	    sizeof(before_psk));
 	wifi_window(&ifc);
-	/* the Wi-Fi window stores the chosen network itself */
-	wm_get_network(cur.ssid, sizeof(cur.ssid), cur.psk, sizeof(cur.psk));
-	orig.ssid[0] = '\0';
-	scpy(orig.ssid, cur.ssid, sizeof(orig.ssid));
-	scpy(orig.psk, cur.psk, sizeof(orig.psk));
+	/* the Wi-Fi window stores a chosen network in Wireless.prefs
+	   itself: taken over only if it did (else what was typed here
+	   stays) */
+	wm_get_network(ssid, sizeof(ssid), psk, sizeof(psk));
+	if (!seq(ssid, before_ssid) || !seq(psk, before_psk)) {
+		scpy(cur.ssid, ssid, sizeof(cur.ssid));
+		scpy(cur.psk, psk, sizeof(cur.psk));
+		scpy(orig.ssid, ssid, sizeof(orig.ssid));
+		scpy(orig.psk, psk, sizeof(orig.psk));
+	}
 	show();
 	status("");
 }
@@ -1016,7 +1631,6 @@ settings_window(void)
 	load(&cur);
 	load_serial(&cur);
 	CopyMem(&cur, &orig, sizeof(orig));
-	get_live();
 	if (!drv_paulanet_path(probe_paulanet, sizeof(probe_paulanet)))
 		probe_paulanet[0] = '\0';
 
@@ -1088,7 +1702,10 @@ settings_window(void)
 	ng.ng_TopEdge += row;
 	ng.ng_LeftEdge = lx;
 	ng.ng_Width = w - lx - 10;
-	STR(GID_PSK, "_Passphrase", 63);
+	/* (64: a raw key of 64 hex digits fits too; shown as '*') */
+	secret_hook_init(&psk_hook, psk_real);
+	g = mk(STRING_KIND, g, &ng, GID_PSK, "_Passphrase", PLACETEXT_LEFT,
+	    GTST_MaxChars, 64, GTST_EditHook, (ULONG)&psk_hook);
 
 	/* PaulaNET (Wi-Fi through the floppy port), all on one row */
 	ng.ng_TopEdge += row + gap;
@@ -1161,9 +1778,16 @@ settings_window(void)
 			goto freegads;
 	}
 	GT_RefreshWindow(win, NULL);
+	/* what DHCP gave, asked with the window up (stack_cmd() waits for
+	   the stack's answer, status.c) */
+	status("Asking the stack...");
+	busy(1);
+	get_live();
+	busy(0);
+	status("");
 	show();
 	if (!cur.eth[0] && !cur.wifi[0] &&
-	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline[0])))
+	    !(cur.paulanet && (probe_paulanet[0] || cur.paulaline)))
 		detect();
 	else
 		status("Ethernet and Wi-Fi can be used at the same time");
@@ -1251,7 +1875,8 @@ settings_window(void)
 				set_attr(GID_BAUD, GA_Disabled, !cur.sershell);
 				break;
 			case GID_BAUD:
-				cur.serbaud = code < NBAUDS ? code : BAUD_DEFAULT;
+				cur.serbaud = (int)code < nbauds ? (int)code :
+				    BAUD_DEFAULT;
 				break;
 			case GID_CHECK:
 				check_driver();

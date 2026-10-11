@@ -22,5 +22,7 @@ struct probe_adapter {
    "" if nowhere. */
 int	probe_adapters(struct probe_adapter *, int max);
 extern char probe_paulanet[64];
+/* drivers left out because their hardware is not there: "name: why" lines */
+extern char probe_unusable[300];
 
 #endif /* AMIBSDNET_PROBE_H */

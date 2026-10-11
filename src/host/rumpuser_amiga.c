@@ -4,15 +4,18 @@
  * Model: lib/librumpuser/rumpuser_pth.c, with pthreads replaced by Exec.
  *
  *  - rump threads are DOS processes; per-thread state hangs off
- *    tc_UserData (struct amthread).  RUMP_CURLWP_HYPERCALL means curlwp
- *    is fetched through rumpuser_curlwp(), so no TLS is needed.
+ *    tc_UserData (struct amthread), which the new process sets itself
+ *    from a startup message (see thread_entry()).  RUMP_CURLWP_HYPERCALL
+ *    means curlwp is fetched through rumpuser_curlwp(), so no TLS is
+ *    needed.
  *  - mutexes and rwlocks are SignalSemaphores plus the owner/reader
  *    bookkeeping rump expects.
  *  - condition variables are waiter lists manipulated under Forbid(),
  *    woken with a per-thread signal bit.  Waiting inside Forbid() is the
  *    standard Exec idiom: Wait() breaks the Forbid while asleep, so the
  *    "release mutex, sleep" step cannot lose a wakeup.
- *  - timeouts and sleeps use a per-thread timer.device request.
+ *  - timeouts and sleeps use a per-thread timer.device request, opened
+ *    when the thread is set up (so a timed wait can never be without it).
  *
  * Every blocking host operation is bracketed by KLOCK_WRAP(), which gives
  * the rump virtual CPU back while the host thread sleeps.
@@ -23,6 +26,7 @@
 #include <exec/semaphores.h>
 #include <exec/lists.h>
 #include <exec/nodes.h>
+#include <exec/ports.h>
 #include <exec/execbase.h>
 #include <exec/tasks.h>
 #include <devices/timer.h>
@@ -35,6 +39,7 @@
 #include <proto/timer.h>
 
 #include "rumpuser_amiga.h"
+#include "entropy.h"
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
@@ -45,7 +50,18 @@ struct Device *TimerBase;
 
 #define	THREAD_STACK		(32 * 1024)	/* NetBSD/m68k uses 16 KB */
 
+/*
+ * Memory shared between tasks must be MEMF_PUBLIC ("ALL MEMORY THAT IS
+ * REFERENCED VIA INTERRUPTS AND/OR BY OTHER TASKS MUST BE EITHER PUBLIC
+ * OR LOCKED INTO MEMORY", exec.doc AllocMem).  No MEMF_FAST: with no
+ * memory type requested "the fast memory pool is searched first", and
+ * MEMF_FAST would make the allocation fail where only Chip RAM is left
+ * (same autodoc).
+ */
+#define	MEMF_SHARED		MEMF_PUBLIC
+
 struct Task *amiga_rump_notifytask;
+void (*amiga_rump_exitfn)(void);
 int amiga_rump_debug;
 volatile int amiga_rump_exitcode;
 volatile int amiga_rump_exited;
@@ -61,9 +77,13 @@ do {									\
 #define	TRACE0()	TRACE("\n")
 
 static struct Task *hosttask;
+static int hostinited;
 static BPTR logfh;
 static struct SignalSemaphore logsem;
+static volatile int loginited;
 static ULONG eclock_freq;
+
+static void fatal(const char *, int) __attribute__((__noreturn__));
 
 /* ------------------------------------------------------------------------
  * per-thread state
@@ -76,19 +96,27 @@ struct amthread {
 	BYTE cvsig;			/* -1 until allocated */
 	ULONG cvmask;
 
-	struct MsgPort *tport;		/* lazily opened timer */
+	struct MsgPort *tport;		/* timer, opened at set-up */
 	struct timerequest *treq;
 
 	/* creation / join */
 	void *(*func)(void *);
 	void *arg;
-	int joinable;
+	int joinable;			/* Forbid() protects */
 	volatile int done;
 	struct Task *joiner;
 	ULONG joinmask;
+	int crashtrap;			/* crash_install() was called */
 
 	APTR saved_userdata;		/* for adopted (non-rump) tasks */
 	void *jmpbuf[5];		/* __builtin_setjmp buffer */
+};
+
+/* sent by the creator to the new process (see thread_entry()) */
+struct startmsg {
+	struct Message msg;
+	struct amthread *t;
+	int err;			/* set by the new process */
 };
 
 static struct amthread *
@@ -103,22 +131,10 @@ thread_alloc(void)
 {
 	struct amthread *t;
 
-	t = AllocVec(sizeof(*t), MEMF_FAST | MEMF_CLEAR);
+	t = AllocVec(sizeof(*t), MEMF_SHARED | MEMF_CLEAR);
 	if (t)
 		t->cvsig = -1;
 	return t;
-}
-
-/* called on the thread itself: signal bits belong to the calling task */
-static int
-thread_setup_self(struct amthread *t)
-{
-
-	t->cvsig = AllocSignal(-1);
-	if (t->cvsig == -1)
-		return RUMPUSER_EAGAIN;
-	t->cvmask = 1UL << t->cvsig;
-	return 0;
 }
 
 static void
@@ -140,27 +156,32 @@ thread_teardown_self(struct amthread *t)
 	}
 }
 
-static struct timerequest *
-thread_timer(struct amthread *t)
+/* called on the thread itself: signal bits and the timer's reply port
+   belong to the calling task */
+static int
+thread_setup_self(struct amthread *t)
 {
 
-	if (t->treq)
-		return t->treq;
+	t->cvsig = AllocSignal(-1);
+	if (t->cvsig == -1)
+		return RUMPUSER_EAGAIN;
+	t->cvmask = 1UL << t->cvsig;
 	if ((t->tport = CreateMsgPort()) == NULL)
-		return NULL;
+		goto fail;
 	t->treq = (struct timerequest *)CreateIORequest(t->tport,
 	    sizeof(struct timerequest));
-	if (t->treq == NULL ||
-	    OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ,
+	if (t->treq == NULL)
+		goto fail;
+	if (OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ,
 	    (struct IORequest *)t->treq, 0) != 0) {
-		if (t->treq)
-			DeleteIORequest((struct IORequest *)t->treq);
+		DeleteIORequest((struct IORequest *)t->treq);
 		t->treq = NULL;
-		DeleteMsgPort(t->tport);
-		t->tport = NULL;
-		return NULL;
+		goto fail;
 	}
-	return t->treq;
+	return 0;
+fail:
+	thread_teardown_self(t);
+	return RUMPUSER_EAGAIN;
 }
 
 /* ------------------------------------------------------------------------
@@ -238,6 +259,32 @@ static char logbuf[256];
 static size_t loglen;
 static void (*logtee)(const char *, long);	/* also shown here */
 
+/*
+ * The semaphore is set up on first use, whoever logs first (also before
+ * amiga_rump_loginit()); Forbid() makes that one-time set-up atomic.
+ */
+static void
+log_lock(void)
+{
+
+	if (!loginited) {
+		Forbid();
+		if (!loginited) {
+			InitSemaphore(&logsem);
+			loginited = 1;
+		}
+		Permit();
+	}
+	ObtainSemaphore(&logsem);
+}
+
+static void
+log_unlock(void)
+{
+
+	ReleaseSemaphore(&logsem);
+}
+
 static void
 log_flush_locked(void)
 {
@@ -255,9 +302,9 @@ void
 amiga_rump_logtee(void (*fn)(const char *, long))
 {
 
-	ObtainSemaphore(&logsem);
+	log_lock();
 	logtee = fn;
-	ReleaseSemaphore(&logsem);
+	log_unlock();
 }
 
 static void
@@ -273,106 +320,33 @@ void
 rumpuser_putchar(int c)
 {
 
-	ObtainSemaphore(&logsem);
+	log_lock();
 	log_putc_locked(c);
-	ReleaseSemaphore(&logsem);
-}
-
-static void
-fmt_num(unsigned long long v, int base, int neg, int width, char pad)
-{
-	char tmp[24];
-	int i = 0;
-
-	do {
-		tmp[i++] = "0123456789abcdef"[v % base];
-		v /= base;
-	} while (v);
-	if (neg)
-		tmp[i++] = '-';
-	while (i < width--)
-		log_putc_locked(pad);
-	while (i)
-		log_putc_locked(tmp[--i]);
-}
-
-/* %s %c %d %i %u %x %p %% with l/ll/z modifiers, '0' and width */
-void
-amiga_rump_vprintf(const char *fmt, va_list ap)
-{
-	ObtainSemaphore(&logsem);
-	for (; *fmt; fmt++) {
-		int lng = 0, width = 0;
-		char pad = ' ';
-		unsigned long long u;
-		long long s;
-		const char *str;
-
-		if (*fmt != '%') {
-			log_putc_locked(*fmt);
-			continue;
-		}
-		fmt++;
-		if (*fmt == '0')
-			pad = '0', fmt++;
-		while (*fmt >= '0' && *fmt <= '9')
-			width = width * 10 + (*fmt++ - '0');
-		while (*fmt == 'l' || *fmt == 'z')
-			lng += (*fmt++ == 'l') ? 1 : 1;
-		switch (*fmt) {
-		case 'd':
-		case 'i':
-			s = lng >= 2 ? va_arg(ap, long long) :
-			    lng ? va_arg(ap, long) : va_arg(ap, int);
-			fmt_num(s < 0 ? -(unsigned long long)s : s, 10, s < 0,
-			    width, pad);
-			break;
-		case 'u':
-		case 'x':
-			u = lng >= 2 ? va_arg(ap, unsigned long long) :
-			    lng ? va_arg(ap, unsigned long) :
-			    va_arg(ap, unsigned int);
-			fmt_num(u, *fmt == 'u' ? 10 : 16, 0, width, pad);
-			break;
-		case 'p':
-			log_putc_locked('0');
-			log_putc_locked('x');
-			fmt_num((unsigned long)va_arg(ap, void *), 16, 0, 8, '0');
-			break;
-		case 'c':
-			log_putc_locked(va_arg(ap, int));
-			break;
-		case 's':
-			str = va_arg(ap, const char *);
-			if (str == NULL)
-				str = "(null)";
-			while (*str)
-				log_putc_locked(*str++);
-			break;
-		case '%':
-			log_putc_locked('%');
-			break;
-		default:
-			log_putc_locked('%');
-			if (*fmt)
-				log_putc_locked(*fmt);
-			else
-				fmt--;
-			break;
-		}
-	}
-	ReleaseSemaphore(&logsem);
+	log_unlock();
 }
 
 /*
- * Format with Amiga-style arguments: a packed array of LONGs (vsyslog()
- * convention).  %s %c %d %i %u %x %X %o %p %%, with the flags - 0 + space
- * #, a width and a precision (also '*') and the h/l/ll/z modifiers, so
- * that every conversion takes exactly its arguments: a format the
- * formatter did not understand must not shift the later ones (a %s would
- * then read an integer as a pointer).
+ * printf-style formatting, shared by the C (va_list) and the Amiga
+ * (packed LONG array) entry points: %d %i %u %o %x %X %p %c %s %%, the
+ * flags - 0 + space #, a width and a precision (both also '*'), and the
+ * length modifiers hh h l ll z j t.  A conversion the formatter does not
+ * know is printed as it is and, like any conversion, takes one argument,
+ * so that the later ones stay in place.
  */
-#define	NEXTARG()	(args ? *args++ : 0)
+
+enum { LEN_HH, LEN_H, LEN_INT, LEN_L, LEN_LL, LEN_Z };
+
+struct fmtspec {
+	int	left, zero, plus, space, alt;
+	int	width, prec;		/* prec -1: none */
+	int	len;
+	char	conv;
+};
+
+struct fmtargs {
+	va_list	*ap;			/* C arguments, or */
+	const LONG *longs;		/* one LONG per argument (NULL ok) */
+};
 
 static void
 pad_out(int n, char c)
@@ -382,114 +356,227 @@ pad_out(int n, char c)
 		log_putc_locked(c);
 }
 
-void
-amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
+static long long
+arg_signed(struct fmtargs *a, int len)
 {
-	ObtainSemaphore(&logsem);
-	for (; *fmt; fmt++) {
-		const char *str;
-		char tmp[16];
-		int left = 0, zero = 0, width = 0, prec = -1, len, i;
-		ULONG u;
-		LONG v;
+	long long v;
 
+	if (a->ap == NULL)
+		v = a->longs ? *a->longs++ : 0;
+	else if (len == LEN_LL)
+		v = va_arg(*a->ap, long long);
+	else if (len == LEN_L)
+		v = va_arg(*a->ap, long);
+	else if (len == LEN_Z)
+		v = (long long)va_arg(*a->ap, size_t);
+	else
+		v = va_arg(*a->ap, int);
+	if (len == LEN_H)
+		v = (short)v;
+	else if (len == LEN_HH)
+		v = (signed char)v;
+	return v;
+}
+
+static unsigned long long
+arg_unsigned(struct fmtargs *a, int len)
+{
+	unsigned long long v;
+
+	if (a->ap == NULL)
+		v = a->longs ? (ULONG)*a->longs++ : 0;
+	else if (len == LEN_LL)
+		v = va_arg(*a->ap, unsigned long long);
+	else if (len == LEN_L)
+		v = va_arg(*a->ap, unsigned long);
+	else if (len == LEN_Z)
+		v = va_arg(*a->ap, size_t);
+	else
+		v = va_arg(*a->ap, unsigned int);
+	if (len == LEN_H)
+		v = (unsigned short)v;
+	else if (len == LEN_HH)
+		v = (unsigned char)v;
+	return v;
+}
+
+static int
+arg_int(struct fmtargs *a)
+{
+
+	if (a->ap == NULL)
+		return a->longs ? (int)*a->longs++ : 0;
+	return va_arg(*a->ap, int);
+}
+
+static const void *
+arg_ptr(struct fmtargs *a)
+{
+
+	if (a->ap == NULL)
+		return a->longs ? (const void *)*a->longs++ : NULL;
+	return va_arg(*a->ap, const void *);
+}
+
+static void
+emit_num(const struct fmtspec *f, unsigned long long u, int neg)
+{
+	char digits[24], pfx[3];
+	const char *set = f->conv == 'X' ? "0123456789ABCDEF" :
+	    "0123456789abcdef";
+	int base, nd = 0, np = 0, zeros = 0, total, i;
+	unsigned long long v = u;
+
+	base = f->conv == 'o' ? 8 :
+	    (f->conv == 'x' || f->conv == 'X' || f->conv == 'p') ? 16 : 10;
+	/* C: precision 0 and value 0 give no digits */
+	if (!(v == 0 && f->prec == 0))
+		do {
+			digits[nd++] = set[v % base];
+			v /= base;
+		} while (v);
+	if (neg)
+		pfx[np++] = '-';
+	else if ((f->conv == 'd' || f->conv == 'i') && f->plus)
+		pfx[np++] = '+';
+	else if ((f->conv == 'd' || f->conv == 'i') && f->space)
+		pfx[np++] = ' ';
+	else if (f->conv == 'p' || ((f->conv == 'x' || f->conv == 'X') &&
+	    f->alt && u != 0)) {
+		pfx[np++] = '0';
+		pfx[np++] = f->conv == 'X' ? 'X' : 'x';
+	}
+	if (f->prec > nd)
+		zeros = f->prec - nd;
+	if (f->conv == 'o' && f->alt && zeros == 0 &&
+	    (nd == 0 || digits[nd - 1] != '0'))
+		zeros = 1;
+	total = np + zeros + nd;
+	if (!f->left && f->zero && f->prec < 0 && f->width > total) {
+		zeros += f->width - total;
+		total = f->width;
+	}
+	if (!f->left)
+		pad_out(f->width - total, ' ');
+	for (i = 0; i < np; i++)
+		log_putc_locked(pfx[i]);
+	pad_out(zeros, '0');
+	while (nd)
+		log_putc_locked(digits[--nd]);
+	if (f->left)
+		pad_out(f->width - total, ' ');
+}
+
+static void
+emit_str(const struct fmtspec *f, const char *s, int n)
+{
+	int i;
+
+	if (!f->left)
+		pad_out(f->width - n, ' ');
+	for (i = 0; i < n; i++)
+		log_putc_locked(s[i]);
+	if (f->left)
+		pad_out(f->width - n, ' ');
+}
+
+static void
+format_locked(const char *fmt, struct fmtargs *a)
+{
+	struct fmtspec f;
+	const char *str;
+	long long s;
+	char c;
+	int n;
+
+	for (; *fmt; fmt++) {
 		if (*fmt != '%') {
 			log_putc_locked(*fmt);
 			continue;
 		}
 		fmt++;
+		f.left = f.zero = f.plus = f.space = f.alt = 0;
+		f.width = 0;
+		f.prec = -1;
 		for (;; fmt++) {
 			if (*fmt == '-')
-				left = 1;
+				f.left = 1;
 			else if (*fmt == '0')
-				zero = 1;
-			else if (*fmt != '+' && *fmt != ' ' && *fmt != '#')
+				f.zero = 1;
+			else if (*fmt == '+')
+				f.plus = 1;
+			else if (*fmt == ' ')
+				f.space = 1;
+			else if (*fmt == '#')
+				f.alt = 1;
+			else
 				break;
 		}
 		if (*fmt == '*') {
-			width = (int)NEXTARG();
-			if (width < 0)
-				left = 1, width = -width;
+			f.width = arg_int(a);
+			if (f.width < 0)
+				f.left = 1, f.width = -f.width;
 			fmt++;
 		} else
 			while (*fmt >= '0' && *fmt <= '9')
-				width = width * 10 + (*fmt++ - '0');
+				f.width = f.width * 10 + (*fmt++ - '0');
 		if (*fmt == '.') {
 			fmt++;
-			prec = 0;
+			f.prec = 0;
 			if (*fmt == '*') {
-				prec = (int)NEXTARG();
+				f.prec = arg_int(a);
+				if (f.prec < 0)
+					f.prec = -1;	/* as if omitted */
 				fmt++;
 			} else
 				while (*fmt >= '0' && *fmt <= '9')
-					prec = prec * 10 + (*fmt++ - '0');
+					f.prec = f.prec * 10 + (*fmt++ - '0');
 		}
-		while (*fmt == 'l' || *fmt == 'h' || *fmt == 'z')
-			fmt++;
-		if (width > 200)
-			width = 200;
-		switch (*fmt) {
+		f.len = LEN_INT;
+		if (fmt[0] == 'h' && fmt[1] == 'h')
+			f.len = LEN_HH, fmt += 2;
+		else if (fmt[0] == 'h')
+			f.len = LEN_H, fmt++;
+		else if (fmt[0] == 'l' && fmt[1] == 'l')
+			f.len = LEN_LL, fmt += 2;
+		else if (fmt[0] == 'l')
+			f.len = LEN_L, fmt++;
+		else if (fmt[0] == 'j')
+			f.len = LEN_LL, fmt++;	/* intmax_t: long long */
+		else if (fmt[0] == 'z' || fmt[0] == 't')
+			f.len = LEN_Z, fmt++;	/* 32 bits, as size_t */
+		/* (width bound: a garbage width must not flood the log) */
+		if (f.width > 200)
+			f.width = 200;
+		f.conv = *fmt;
+		switch (f.conv) {
 		case 'd':
 		case 'i':
+			s = arg_signed(a, f.len);
+			emit_num(&f, s < 0 ? -(unsigned long long)s :
+			    (unsigned long long)s, s < 0);
+			break;
 		case 'u':
+		case 'o':
 		case 'x':
 		case 'X':
-		case 'o':
+			emit_num(&f, arg_unsigned(a, f.len), 0);
+			break;
 		case 'p':
-			v = NEXTARG();
-			if ((*fmt == 'd' || *fmt == 'i') && v < 0) {
-				u = -(ULONG)v;
-				tmp[0] = '-';
-				len = 1;
-			} else {
-				u = (ULONG)v;
-				len = 0;
-			}
-			{
-				int base = *fmt == 'o' ? 8 : (*fmt == 'x' ||
-				    *fmt == 'X' || *fmt == 'p') ? 16 : 10;
-				char digits[12];
-				int nd = 0;
-
-				do {
-					digits[nd++] = "0123456789abcdef"[u % base];
-					u /= base;
-				} while (u);
-				while (nd)
-					tmp[len++] = digits[--nd];
-			}
-			if (!left && !zero)
-				pad_out(width - len, ' ');
-			i = 0;
-			if (!left && zero) {
-				if (tmp[0] == '-')
-					log_putc_locked(tmp[i++]);
-				pad_out(width - len, '0');
-			}
-			for (; i < len; i++)
-				log_putc_locked(tmp[i]);
-			if (left)
-				pad_out(width - len, ' ');
+			f.prec = 8;
+			emit_num(&f, (unsigned long)arg_ptr(a), 0);
 			break;
 		case 'c':
-			if (!left)
-				pad_out(width - 1, ' ');
-			log_putc_locked((int)NEXTARG());
-			if (left)
-				pad_out(width - 1, ' ');
+			c = (char)arg_int(a);
+			emit_str(&f, &c, 1);
 			break;
 		case 's':
-			str = (const char *)NEXTARG();
+			str = arg_ptr(a);
 			if (str == NULL)
 				str = "(null)";
-			for (len = 0; str[len] && (prec < 0 || len < prec); len++)
+			for (n = 0; str[n] && (f.prec < 0 || n < f.prec); n++)
 				;
-			if (!left)
-				pad_out(width - len, ' ');
-			for (i = 0; i < len; i++)
-				log_putc_locked(str[i]);
-			if (left)
-				pad_out(width - len, ' ');
+			emit_str(&f, str, n);
 			break;
 		case '%':
 			log_putc_locked('%');
@@ -498,17 +585,44 @@ amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
 			fmt--;
 			break;
 		default:
-			/* unknown: printed, and like any conversion it takes
-			   one argument */
 			log_putc_locked('%');
-			log_putc_locked(*fmt);
-			(void)NEXTARG();
+			log_putc_locked(f.conv);
+			(void)arg_unsigned(a, f.len);
 			break;
 		}
 	}
-	ReleaseSemaphore(&logsem);
 }
-#undef	NEXTARG
+
+void
+amiga_rump_vprintf(const char *fmt, va_list ap)
+{
+	struct fmtargs a;
+	va_list cp;
+
+	va_copy(cp, ap);
+	a.ap = &cp;
+	a.longs = NULL;
+	log_lock();
+	format_locked(fmt, &a);
+	log_unlock();
+	va_end(cp);
+}
+
+/*
+ * Format with Amiga-style arguments: a packed array of LONGs (vsyslog()
+ * convention), one LONG for every conversion, '*' width and precision.
+ */
+void
+amiga_rump_vprintf_longs(const char *fmt, const LONG *args)
+{
+	struct fmtargs a;
+
+	a.ap = NULL;
+	a.longs = args;
+	log_lock();
+	format_locked(fmt, &a);
+	log_unlock();
+}
 
 void
 amiga_rump_printf(const char *fmt, ...)
@@ -530,21 +644,45 @@ rumpuser_dprintf(const char *fmt, ...)
 	va_end(ap);
 }
 
+/* librumpuser's NOFAIL_ERRNO() (rumpuser_int.h:87-95): report, then end
+   the rump kernel as a panic */
+static void
+fatal(const char *what, int error)
+{
+
+	amiga_rump_printf("panic: rumpuser fatal failure %d (%s)\n", error,
+	    what);
+	rumpuser_exit(RUMPUSER_PANIC);
+}
+
 /* ------------------------------------------------------------------------
  * init
  */
 
-static int loginited;
+/*
+ * Log to the DOS file handle 'log' from now on (0: nothing more to a
+ * file); what is buffered goes to the old one first.  Returns the old
+ * handle, which nothing writes to any more once this returns (every
+ * Write() happens under logsem), so the caller may Close() it.
+ */
+long
+amiga_rump_logswitch(long log)
+{
+	BPTR old;
+
+	log_lock();
+	log_flush_locked();
+	old = logfh;
+	logfh = (BPTR)log;
+	log_unlock();
+	return (long)old;
+}
 
 void
 amiga_rump_loginit(long log)
 {
 
-	if (!loginited) {
-		InitSemaphore(&logsem);
-		loginited = 1;
-	}
-	logfh = (BPTR)log;
+	(void)amiga_rump_logswitch(log);
 }
 
 int
@@ -552,20 +690,42 @@ amiga_rump_hostinit(long log)
 {
 	struct amthread *t;
 	struct EClockVal ev;
+	int rv;
 
 	if (log)
 		amiga_rump_loginit(log);
-	hosttask = SysBase->ThisTask;
-
+	if (hostinited)
+		return SysBase->ThisTask == hosttask ? 0 : RUMPUSER_EBUSY;
 	if ((t = thread_alloc()) == NULL)
 		return RUMPUSER_ENOMEM;
+	if ((rv = thread_setup_self(t)) != 0) {
+		FreeVec(t);
+		return rv;
+	}
+	hosttask = SysBase->ThisTask;
 	t->saved_userdata = hosttask->tc_UserData;
 	hosttask->tc_UserData = t;
-	if (thread_setup_self(t) != 0 || thread_timer(t) == NULL)
-		return RUMPUSER_EAGAIN;
 	TimerBase = t->treq->tr_node.io_Device;
 	eclock_freq = ReadEClock(&ev);
+	amiga_entropy_init();
+	hostinited = 1;
 	return 0;
+}
+
+void
+amiga_rump_hostfini(void)
+{
+	struct amthread *t;
+
+	if (!hostinited || SysBase->ThisTask != hosttask)
+		return;
+	t = self();
+	/* (TimerBase stays: rump threads may still read the clock, and
+	   timer.device stays open for as long as they have it open) */
+	hosttask->tc_UserData = t->saved_userdata;
+	thread_teardown_self(t);
+	FreeVec(t);
+	hostinited = 0;
 }
 
 int
@@ -585,7 +745,7 @@ rumpuser_init(int version, const struct rumpuser_hyperup *hyperup)
 		    "(this host implements %d)\n", version, RUMPUSER_VERSION);
 		return 1;
 	}
-	if (TimerBase == NULL) {
+	if (!hostinited) {
 		amiga_rump_printf("rumpuser: amiga_rump_hostinit() not called\n");
 		return 1;
 	}
@@ -598,33 +758,32 @@ rumpuser_init(int version, const struct rumpuser_hyperup *hyperup)
 /* ------------------------------------------------------------------------
  * memory
  *
- * All stack memory comes from Fast RAM (MEMF_FAST); Chip RAM is left to
- * the custom chips.
- *
- * Blocks come straight from AllocMem() and go back with FreeMem() using
- * the length rump passes to rumpuser_free() (always the allocation
- * length).  Aligned requests (the kernel asks for whole 8 KB pages) use
- * the classic Amiga technique: allocate size + alignment, then FreeMem()
- * the unused head and tail, so no memory is wasted on alignment.
+ * Blocks come straight from AllocMem() (MEMF_SHARED, see above) and go
+ * back with FreeMem() using the length rump passes to rumpuser_free()
+ * (always the allocation length).  AllocMem() blocks are aligned to
+ * MEM_BLOCKSIZE, 8 bytes (exec/memory.h).  Larger alignments (the kernel
+ * asks for whole 8 KB pages) allocate size + alignment, then FreeMem()
+ * the unused head and tail, both multiples of MEM_BLOCKSIZE.
  */
 
-#define	MEM_ROUND(n)	(((n) + 7) & ~(size_t)7)	/* MEM_BLOCKSIZE */
+#define	MEM_ROUND(n)	(((n) + MEM_BLOCKMASK) & ~(size_t)MEM_BLOCKMASK)
 
-int
-rumpuser_malloc(size_t len, int alignment, void **memp)
+static int
+host_alloc(size_t len, int alignment, ULONG flags, void **memp)
 {
 	size_t size = MEM_ROUND(len ? len : 1), total, head, tail;
 	UBYTE *raw, *a;
 
-	TRACE0();
-	if (alignment <= 8) {
-		if ((raw = AllocMem(size, MEMF_FAST)) == NULL)
+	if (alignment <= MEM_BLOCKSIZE) {
+		if ((raw = AllocMem(size, MEMF_SHARED | flags)) == NULL)
 			return RUMPUSER_ENOMEM;
 		*memp = raw;
 		return 0;
 	}
+	if ((alignment & (alignment - 1)) != 0)
+		return RUMPUSER_EINVAL;
 	total = size + alignment;
-	if ((raw = AllocMem(total, MEMF_FAST)) == NULL)
+	if ((raw = AllocMem(total, MEMF_SHARED | flags)) == NULL)
 		return RUMPUSER_ENOMEM;
 	a = (UBYTE *)(((uintptr_t)raw + alignment - 1) &
 	    ~(uintptr_t)(alignment - 1));
@@ -638,6 +797,14 @@ rumpuser_malloc(size_t len, int alignment, void **memp)
 	return 0;
 }
 
+int
+rumpuser_malloc(size_t len, int alignment, void **memp)
+{
+
+	TRACE0();
+	return host_alloc(len, alignment, 0, memp);
+}
+
 void
 rumpuser_free(void *mem, size_t len)
 {
@@ -647,13 +814,14 @@ rumpuser_free(void *mem, size_t len)
 		FreeMem(mem, MEM_ROUND(len ? len : 1));
 }
 
+/* anonymous memory, like mmap(MAP_ANON) in librumpuser: zero-filled */
 int
 rumpuser_anonmmap(void *prefaddr, size_t size, int alignbit, int exec,
     void **memp)
 {
 
 	TRACE0();
-	return rumpuser_malloc(size, 1 << alignbit, memp);
+	return host_alloc(size, 1 << alignbit, MEMF_CLEAR, memp);
 }
 
 void
@@ -751,6 +919,37 @@ clock_mono(int64_t *sec, long *nsec)
 	*nsec = (long)((ticks % eclock_freq) * 1000000000ULL / eclock_freq);
 }
 
+/*
+ * A relative interval as a timeval: "The microseconds must always be
+ * normalized e.g. the longword must be between 0 and one million"
+ * (timer.doc, TIMEVAL).  Returns 0 for an interval that is over already.
+ */
+static int
+make_timeval(int64_t sec, int64_t nsec, struct timeval *tv)
+{
+
+	if (nsec >= 1000000000 || nsec <= -1000000000) {
+		sec += nsec / 1000000000;
+		nsec %= 1000000000;
+	}
+	if (nsec < 0) {
+		nsec += 1000000000;
+		sec--;
+	}
+	if (sec < 0 || (sec == 0 && nsec == 0))
+		return 0;
+	if (sec > 0xffffffffLL) {
+		tv->tv_secs = 0xffffffffUL;
+		tv->tv_micro = 999999;
+		return 1;
+	}
+	tv->tv_secs = (ULONG)sec;
+	tv->tv_micro = (ULONG)(nsec / 1000);
+	if (tv->tv_secs == 0 && tv->tv_micro == 0)
+		tv->tv_micro = 1;	/* under 1 us: still a wait */
+	return 1;
+}
+
 int
 rumpuser_clock_gettime(int enum_rumpclock, int64_t *sec, long *nsec)
 {
@@ -771,22 +970,52 @@ rumpuser_clock_gettime(int enum_rumpclock, int64_t *sec, long *nsec)
 	}
 }
 
-/* sleep the calling host thread for a relative interval */
+/*
+ * Sleep the calling host task for a relative interval.  Rump threads and
+ * the host task have their timer from set-up; any other task gets one for
+ * the call, and if even that cannot be had, a DOS process sleeps with
+ * Delay() (dos.doc: "ticks (50 per second)"), rounded up.
+ */
 static void
 host_sleep(int64_t sec, long nsec)
 {
+	struct amthread *t = self();
 	struct timerequest *tr;
+	struct MsgPort *port = NULL;
+	struct timeval tv;
+	struct Task *me = SysBase->ThisTask;
 
-	if (sec < 0 || (sec == 0 && nsec <= 0))
+	if (!make_timeval(sec, nsec, &tv))
 		return;
-	if ((tr = thread_timer(self())) == NULL)
-		return;
+	if (t != NULL && t->treq != NULL)
+		tr = t->treq;
+	else {
+		tr = NULL;
+		if ((port = CreateMsgPort()) != NULL &&
+		    (tr = (struct timerequest *)CreateIORequest(port,
+		    sizeof(*tr))) != NULL &&
+		    OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ,
+		    (struct IORequest *)tr, 0) != 0) {
+			DeleteIORequest((struct IORequest *)tr);
+			tr = NULL;
+		}
+		if (tr == NULL) {
+			if (port)
+				DeleteMsgPort(port);
+			if (me->tc_Node.ln_Type != NT_PROCESS)
+				fatal("no timer for a sleep", RUMPUSER_EAGAIN);
+			Delay(tv.tv_secs * 50 + (tv.tv_micro + 19999) / 20000);
+			return;
+		}
+	}
 	tr->tr_node.io_Command = TR_ADDREQUEST;
-	tr->tr_time.tv_secs = (ULONG)sec;
-	tr->tr_time.tv_micro = (ULONG)(nsec / 1000);
-	if (sec == 0 && tr->tr_time.tv_micro == 0)
-		tr->tr_time.tv_micro = 1;
+	tr->tr_time = tv;
 	DoIO((struct IORequest *)tr);
+	if (port) {
+		CloseDevice((struct IORequest *)tr);
+		DeleteIORequest((struct IORequest *)tr);
+		DeleteMsgPort(port);
+	}
 }
 
 int
@@ -802,11 +1031,7 @@ rumpuser_clock_sleep(int enum_rumpclock, int64_t sec, long nsec)
 	case RUMPUSER_CLOCK_ABSMONO:
 		clock_mono(&nowsec, &nownsec);
 		sec -= nowsec;
-		nsec -= nownsec;
-		if (nsec < 0) {
-			nsec += 1000000000;
-			sec--;
-		}
+		nsec -= nownsec;	/* (make_timeval() normalises) */
 		break;
 	default:
 		return RUMPUSER_EINVAL;
@@ -816,9 +1041,15 @@ rumpuser_clock_sleep(int enum_rumpclock, int64_t sec, long nsec)
 }
 
 /* ------------------------------------------------------------------------
- * parameters: built-ins, otherwise DOS environment variables, so e.g.
- * "SetEnv RUMP_VERBOSE 1" works.
+ * parameters, as librumpuser's rumpuser_getparam() (rumpuser.c:186-221):
+ * the mandatory "_" names are built in, every other "_" name is EINVAL,
+ * the rest are DOS variables (GetVar), so e.g. "SetEnv RUMP_VERBOSE 1"
+ * works.  librumpuser returns getenv_r()'s errno; librumpuser's own
+ * getenv_r() (rumpuser_port.h:159-174) gives ERANGE when the value does
+ * not fit (strlen >= buflen) and ENOENT when there is no such variable.
  */
+
+#define	RUMPUSER_ERANGE		34
 
 /* GetVar() with DOS requesters suppressed (ENV: may not be assigned) */
 static LONG
@@ -838,58 +1069,76 @@ int
 rumpuser_getparam(const char *name, void *buf, size_t blen)
 {
 	const char *val = NULL;
+	char *tmp;
+	LONG got;
 	size_t l;
 
 	TRACE0();
 	if (host_strcmp(name, RUMPUSER_PARAM_NCPU) == 0)
 		val = "1";
-	else if (amiga_rump_debug && host_strcmp(name, "RUMP_VERBOSE") == 0)
-		val = "1";
 	else if (host_strcmp(name, RUMPUSER_PARAM_HOSTNAME) == 0)
 		val = "amiga";
+	else if (*name == '_')
+		return RUMPUSER_EINVAL;
+	else if (amiga_rump_debug && host_strcmp(name, "RUMP_VERBOSE") == 0)
+		val = "1";
 
 	if (val) {
 		l = host_strlen(val);
 		if (l + 1 > blen)
-			return RUMPUSER_EINVAL;
+			return RUMPUSER_ERANGE;
 		memcpy(buf, val, l + 1);
 		return 0;
 	}
-	if (env_lookup(name, buf, blen) < 0)
+	if (blen == 0)
+		return RUMPUSER_ERANGE;
+	/*
+	 * GetVar() truncates a value that does not fit and returns "the
+	 * number of characters put in the buffer" (dos.doc GetVar).  One
+	 * byte more of room tells a value that just fits from one that was
+	 * cut.
+	 */
+	if ((tmp = AllocVec(blen + 1, MEMF_ANY)) == NULL)
+		return RUMPUSER_ENOMEM;
+	got = env_lookup(name, tmp, blen + 1);
+	if (got < 0) {
+		FreeVec(tmp);
 		return RUMPUSER_ENOENT;
+	}
+	if ((size_t)got + 1 > blen) {
+		FreeVec(tmp);
+		return RUMPUSER_ERANGE;
+	}
+	memcpy(buf, tmp, (size_t)got + 1);
+	FreeVec(tmp);
 	return 0;
 }
 
 /* ------------------------------------------------------------------------
- * random: no hardware entropy source on a classic Amiga.  This mixes the
- * EClock and wall clock; good enough for TCP ISNs in a test setup only.
- * TODO: feed real entropy (input timing, SANA-II packet arrival jitter).
+ * random: see entropy.c.  The kernel's caller, hyperentropy.c:41-60,
+ * loops while the call returns 0 and stops at the first error, so HARD
+ * with NOWAIT returns RUMPUSER_EAGAIN when no credited entropy is there,
+ * never 0 with nothing written (that would make it loop for ever).
  */
-
-static unsigned long long rnd_state;
 
 int
 rumpuser_getrandom(void *buf, size_t buflen, int flags, size_t *retp)
 {
-	unsigned char *p = buf;
-	struct EClockVal ev;
-	struct timeval tv;
-	size_t i;
+	int hard = (flags & RUMPUSER_RANDOM_HARD) != 0;
+	size_t n;
 
 	TRACE0();
-	ReadEClock(&ev);
-	GetSysTime(&tv);
-	rnd_state ^= ((unsigned long long)ev.ev_hi << 32 | ev.ev_lo) ^
-	    ((unsigned long long)tv.tv_micro << 20) ^ tv.tv_secs;
-	if (rnd_state == 0)
-		rnd_state = 0x9e3779b97f4a7c15ULL;
-	for (i = 0; i < buflen; i++) {
-		rnd_state ^= rnd_state >> 12;
-		rnd_state ^= rnd_state << 25;
-		rnd_state ^= rnd_state >> 27;
-		p[i] = (unsigned char)((rnd_state * 0x2545f4914f6cdd1dULL) >> 56);
+	*retp = 0;
+	if (buflen == 0)
+		return 0;
+	/* when the kernel asks is timing too (never credited) */
+	amiga_entropy_event(ENT_SRC_HOST, 0, NULL, 0);
+	while ((n = amiga_entropy_extract(buf, buflen, hard)) == 0) {
+		if (flags & RUMPUSER_RANDOM_NOWAIT)
+			return RUMPUSER_EAGAIN;
+		KLOCK_WRAP(amiga_entropy_wait(self()->cvmask));
 	}
-	*retp = buflen;
+	*retp = n;
 	return 0;
 }
 
@@ -905,11 +1154,15 @@ rumpuser_exit(int rv)
 		amiga_rump_printf("rumpuser: rump kernel panic\n");
 	else
 		amiga_rump_printf("rumpuser: exit %d\n", rv);
-	ObtainSemaphore(&logsem);
+	log_lock();
 	log_flush_locked();
-	ReleaseSemaphore(&logsem);
+	log_unlock();
 	amiga_rump_exitcode = rv;
 	amiga_rump_exited = 1;
+	/* the task to tell is this one: a signal would never be seen */
+	if (amiga_rump_exitfn && SysBase->ThisTask == (amiga_rump_notifytask ?
+	    amiga_rump_notifytask : hosttask))
+		amiga_rump_exitfn();
 	if (amiga_rump_notifytask)
 		Signal(amiga_rump_notifytask, SIGBREAKF_CTRL_C);
 	else if (hosttask)
@@ -919,13 +1172,20 @@ rumpuser_exit(int rv)
 		Wait(SIGBREAKF_CTRL_F);
 }
 
+/*
+ * rumpuser.3: "advises the hypercall implementation to raise a signal
+ * for the process containing the rump kernel ... In case there is no
+ * mapping between sig and native signals (if any), the behavior is
+ * implementation-defined", and "A rump kernel will ignore the return
+ * value".  AmigaOS has no POSIX signals for a process, so there is
+ * nothing to raise: the kernel's default model (RUMP_SIGMODEL_RAISE,
+ * signals.c:89-97) calls this for every signal it posts to a process.
+ */
 int
 rumpuser_kill(int64_t pid, int sig)
 {
 
-	TRACE0();
-	if (pid == RUMPUSER_PID_SELF)
-		rumpuser_exit(RUMPUSER_PANIC);
+	TRACE("pid %ld sig %d\n", (long)pid, sig);
 	return 0;
 }
 
@@ -944,33 +1204,80 @@ rumpuser_amiga_errno(void)
 	return self()->err;
 }
 
+/*
+ * For src/kern/atomic_m68k.c: a section no other task and no interrupt
+ * can enter (Disable(), exec.doc), for atomic operations on misaligned
+ * words.
+ */
+void
+rumpuser_amiga_atomic_begin(void)
+{
+
+	Disable();
+}
+
+void
+rumpuser_amiga_atomic_end(void)
+{
+
+	Enable();
+}
+
 /* ------------------------------------------------------------------------
  * threads
  */
 
+/*
+ * A new process learns its amthread from a startup message, the way
+ * Workbench starts a program (a struct WBStartup, a struct Message
+ * first, received on the process's pr_MsgPort: workbench/startup.h).
+ * CreateNewProc() (dos.doc) has no tag that hands the process a pointer
+ * (dos/dostags.h has no NP_UserData), and the initial tc_UserData of a
+ * new process is not documented.  The creator puts the message on
+ * &proc->pr_MsgPort; AmiBSDNet sends nothing else there, and the new
+ * process takes it before it makes any DOS call.  It answers with the
+ * result of its set-up; the message lives on the creator's stack, and
+ * the creator waits for that answer.
+ */
 static void
 thread_entry(void)
 {
-	struct Task *me = SysBase->ThisTask;
+	struct Process *me = (struct Process *)SysBase->ThisTask;
+	struct startmsg *sm;
 	struct amthread *t;
+	int err;
 
-	/* wait until the creator has published our state */
-	while ((t = me->tc_UserData) == NULL)
-		Wait(SIGBREAKF_CTRL_F);
+	WaitPort(&me->pr_MsgPort);
+	sm = (struct startmsg *)GetMsg(&me->pr_MsgPort);
+	t = sm->t;
+	me->pr_Task.tc_UserData = t;
 
 	/* a network stack must never put up DOS requesters */
-	((struct Process *)me)->pr_WindowPtr = (APTR)-1;
-	if (amiga_rump_debug)
+	me->pr_WindowPtr = (APTR)-1;
+	if (amiga_rump_debug) {
 		crash_install();
-
-	if (thread_setup_self(t) == 0) {
-		if (__builtin_setjmp(t->jmpbuf) == 0)
-			t->func(t->arg);
+		t->crashtrap = 1;
 	}
+	err = thread_setup_self(t);
+	if (err != 0) {
+		if (t->crashtrap)
+			crash_remove();
+		me->pr_Task.tc_UserData = NULL;
+		sm->err = err;
+		ReplyMsg(&sm->msg);	/* the creator frees t */
+		return;
+	}
+	sm->err = 0;
+	ReplyMsg(&sm->msg);		/* (sm is not touched again) */
+
+	if (__builtin_setjmp(t->jmpbuf) == 0)
+		t->func(t->arg);
 	thread_teardown_self(t);
+	if (t->crashtrap)
+		crash_remove();
 
 	Forbid();		/* broken only when this process is gone */
-	me->tc_UserData = NULL;
+	me->pr_Task.tc_UserData = NULL;
 	t->done = 1;
 	if (t->joinable) {
 		if (t->joiner)
@@ -986,6 +1293,8 @@ rumpuser_thread_create(void *(*f)(void *), void *arg, const char *thrname,
 {
 	struct amthread *t;
 	struct Process *proc;
+	struct MsgPort *reply;
+	struct startmsg sm;
 
 	TRACE0();
 	if ((t = thread_alloc()) == NULL)
@@ -993,6 +1302,10 @@ rumpuser_thread_create(void *(*f)(void *), void *arg, const char *thrname,
 	t->func = f;
 	t->arg = arg;
 	t->joinable = joinable;
+	if ((reply = CreateMsgPort()) == NULL) {
+		FreeVec(t);
+		return RUMPUSER_EAGAIN;
+	}
 
 	if (amiga_rump_debug)
 		amiga_rump_printf("rumpuser: thread_create \"%s\" join=%d\n",
@@ -1004,12 +1317,24 @@ rumpuser_thread_create(void *(*f)(void *), void *arg, const char *thrname,
 	    NP_Priority, 0,
 	    TAG_DONE);
 	if (proc == NULL) {
+		DeleteMsgPort(reply);
 		FreeVec(t);
 		return RUMPUSER_EAGAIN;
 	}
-	proc->pr_Task.tc_UserData = t;
-	Signal(&proc->pr_Task, SIGBREAKF_CTRL_F);
-
+	memset(&sm, 0, sizeof(sm));
+	sm.msg.mn_Node.ln_Type = NT_MESSAGE;
+	sm.msg.mn_ReplyPort = reply;
+	sm.msg.mn_Length = sizeof(sm);
+	sm.t = t;
+	PutMsg(&proc->pr_MsgPort, &sm.msg);
+	/* (the set-up waited for needs no rump CPU) */
+	WaitPort(reply);
+	GetMsg(reply);
+	DeleteMsgPort(reply);
+	if (sm.err != 0) {
+		FreeVec(t);
+		return sm.err;
+	}
 	if (joinable)
 		*tptr = t;
 	return 0;
@@ -1064,8 +1389,22 @@ amiga_host_thread_join(void *ptcookie)
 	FreeVec(t);
 }
 
-/* whether a joinable thread has ended (also without running its
-   function, if its setup failed) */
+/* nobody will join a joinable thread after all (as pthread_detach()):
+   its state is freed when it ends, or now if it has */
+void
+amiga_host_thread_detach(void *ptcookie)
+{
+	struct amthread *t = ptcookie;
+
+	Forbid();
+	if (t->done)
+		FreeVec(t);
+	else
+		t->joinable = 0;
+	Permit();
+}
+
+/* whether a joinable thread has ended */
 int
 amiga_host_thread_done(void *ptcookie)
 {
@@ -1102,7 +1441,14 @@ rumpuser_curlwp(void)
 
 /* ------------------------------------------------------------------------
  * mutexes
+ *
+ * librumpuser makes them PTHREAD_MUTEX_ERRORCHECK (rumpuser_pth.c:151)
+ * and ends the kernel on any error (NOFAIL_ERRNO).  Exec semaphores nest
+ * instead, so re-entering one or releasing another task's is checked
+ * here and is fatal in the same way (EDEADLK, EPERM).
  */
+
+#define	RUMPUSER_EDEADLK	11
 
 struct rumpuser_mtx {
 	struct SignalSemaphore sem;
@@ -1116,8 +1462,8 @@ rumpuser_mutex_init(struct rumpuser_mtx **mtxp, int flags)
 	struct rumpuser_mtx *mtx;
 
 	TRACE0();
-	if ((mtx = AllocVec(sizeof(*mtx), MEMF_FAST | MEMF_CLEAR)) == NULL)
-		rumpuser_exit(RUMPUSER_PANIC);
+	if ((mtx = AllocVec(sizeof(*mtx), MEMF_SHARED | MEMF_CLEAR)) == NULL)
+		fatal("mutex_init", RUMPUSER_ENOMEM);
 	InitSemaphore(&mtx->sem);
 	mtx->flags = flags;
 	*mtxp = mtx;
@@ -1147,11 +1493,20 @@ mtxexit(struct rumpuser_mtx *mtx)
 		mtx->owner = NULL;
 }
 
+static void
+mtx_not_mine(struct rumpuser_mtx *mtx)
+{
+
+	if (mtx->sem.ss_Owner == SysBase->ThisTask)
+		fatal("mutex_enter: already held", RUMPUSER_EDEADLK);
+}
+
 void
 rumpuser_mutex_enter_nowrap(struct rumpuser_mtx *mtx)
 {
 
 	TRACE0();
+	mtx_not_mine(mtx);
 	ObtainSemaphore(&mtx->sem);
 	mtxenter(mtx);
 }
@@ -1165,6 +1520,7 @@ rumpuser_mutex_enter(struct rumpuser_mtx *mtx)
 		rumpuser_mutex_enter_nowrap(mtx);
 		return;
 	}
+	mtx_not_mine(mtx);
 	if (!AttemptSemaphore(&mtx->sem))
 		KLOCK_WRAP(ObtainSemaphore(&mtx->sem));
 	mtxenter(mtx);
@@ -1175,7 +1531,7 @@ rumpuser_mutex_tryenter(struct rumpuser_mtx *mtx)
 {
 
 	TRACE0();
-	/* Exec semaphores nest; a pthread errorcheck mutex would not */
+	/* (an errorcheck mutex held by the caller: EBUSY, not nested) */
 	if (mtx->sem.ss_Owner == SysBase->ThisTask)
 		return RUMPUSER_EBUSY;
 	if (!AttemptSemaphore(&mtx->sem))
@@ -1189,6 +1545,8 @@ rumpuser_mutex_exit(struct rumpuser_mtx *mtx)
 {
 
 	TRACE0();
+	if (mtx->sem.ss_Owner != SysBase->ThisTask)
+		fatal("mutex_exit: not held", RUMPUSER_EPERM);
 	mtxexit(mtx);
 	ReleaseSemaphore(&mtx->sem);
 }
@@ -1213,12 +1571,26 @@ rumpuser_mutex_owner(struct rumpuser_mtx *mtx, struct lwp **lp)
  * rwlocks (see the comment in rumpuser_pth.c about downgrade)
  */
 
+/*
+ * readers is changed with __atomic builtins, which are CAS on m68k: it
+ * must be longword aligned.  On a 68060, CAS with a misaligned effective
+ * address is one of the instructions the CPU traps to Motorola's
+ * software package (68060SP isp.doc,
+ * downloads/sources/linux-m68k/isp.doc:46,174), and Emu68 translates a
+ * CAS.L whose address has its low two bits set to a sequence that is not
+ * atomic (Emu68 src/M68k_LINE0.c:2752-2808, CAS_UNSAFE()).  So it comes
+ * first, in a block AllocVec() gives "long word aligned" (exec.doc
+ * AllocMem RESULT).
+ */
 struct rumpuser_rw {
+	volatile unsigned int readers __attribute__((__aligned__(4)));
+	/* (unsigned)-1 while write-held */
 	struct SignalSemaphore sem;
-	volatile unsigned int readers;	/* (unsigned)-1 while write-held */
 	struct lwp *writer;
 	volatile int downgrade;
 };
+_Static_assert(__builtin_offsetof(struct rumpuser_rw, readers) == 0,
+    "rumpuser_rw.readers must be first (longword aligned)");
 
 static int
 rw_amwriter(struct rumpuser_rw *rw)
@@ -1264,8 +1636,8 @@ rumpuser_rw_init(struct rumpuser_rw **rwp)
 	struct rumpuser_rw *rw;
 
 	TRACE0();
-	if ((rw = AllocVec(sizeof(*rw), MEMF_FAST | MEMF_CLEAR)) == NULL)
-		rumpuser_exit(RUMPUSER_PANIC);
+	if ((rw = AllocVec(sizeof(*rw), MEMF_SHARED | MEMF_CLEAR)) == NULL)
+		fatal("rw_init", RUMPUSER_ENOMEM);
 	InitSemaphore(&rw->sem);
 	*rwp = rw;
 }
@@ -1388,8 +1760,8 @@ rumpuser_cv_init(struct rumpuser_cv **cvp)
 	struct rumpuser_cv *cv;
 
 	TRACE0();
-	if ((cv = AllocVec(sizeof(*cv), MEMF_FAST | MEMF_CLEAR)) == NULL)
-		rumpuser_exit(RUMPUSER_PANIC);
+	if ((cv = AllocVec(sizeof(*cv), MEMF_SHARED | MEMF_CLEAR)) == NULL)
+		fatal("cv_init", RUMPUSER_ENOMEM);
 	/* NewList() lives in amiga.lib, which is not linked */
 	cv->waiters.mlh_Head = (struct MinNode *)&cv->waiters.mlh_Tail;
 	cv->waiters.mlh_Tail = NULL;
@@ -1447,7 +1819,10 @@ cv_sleep(struct rumpuser_cv *cv, struct rumpuser_mtx *mtx,
 	w.mask = t->cvmask;
 	w.woken = 0;
 
-	if (tmo && (tr = thread_timer(t)) != NULL) {
+	if (tmo) {
+		/* every rump thread has its timer from set-up */
+		if ((tr = t->treq) == NULL)
+			fatal("cv_timedwait: no timer", RUMPUSER_EINVAL);
 		tmask = 1UL << t->tport->mp_SigBit;
 		tr->tr_node.io_Command = TR_ADDREQUEST;
 		tr->tr_time = *tmo;
@@ -1514,12 +1889,11 @@ rumpuser_cv_timedwait(struct rumpuser_cv *cv, struct rumpuser_mtx *mtx,
 	int nlocks, rv;
 
 	TRACE0();
-	if (sec < 0)
-		sec = 0, nsec = 0;
-	tv.tv_secs = (ULONG)sec;
-	tv.tv_micro = (ULONG)(nsec / 1000);
-	if (tv.tv_secs == 0 && tv.tv_micro == 0)
+	if (!make_timeval(sec, nsec, &tv)) {
+		/* over already: the shortest wait, then ETIMEDOUT */
+		tv.tv_secs = 0;
 		tv.tv_micro = 1;
+	}
 
 	cv_unschedule(mtx, &nlocks);
 	rv = cv_sleep(cv, mtx, &tv);

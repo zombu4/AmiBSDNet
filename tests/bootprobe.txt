@@ -1,0 +1,31 @@
+bootprobe: start
+SYS: -> Test:
+C: -> Test:
+S: -> Test:S
+ENV: -> no lock
+ENVARC: -> no lock
+T: -> no lock
+DEVS: -> Test:
+LIBS: -> Test:
+SYS:S -> Test:S
+ENV:Sys -> no lock
+ENVARC:Sys -> no lock
+DH0: -> Test:
+SYS:Storage -> no lock
+SYS:Devs/Internet -> no lock
+dos entry: RAM Disk (volume)
+dos entry: RAM (device)
+dos entry: CON (device)
+dos entry: RAW (device)
+dos entry: DF1 (device)
+dos entry: ENVARC
+dos entry: FONTS (assign dir)
+dos entry: S (assign dir)
+dos entry: L (assign dir)
+dos entry: DEVS (assign dir)
+dos entry: LIBS (assign dir)
+dos entry: C (assign dir)
+dos entry: SYS (assign dir)
+dos entry: Test (volume)
+dos entry: DH0 (device)
+bootprobe: PASS

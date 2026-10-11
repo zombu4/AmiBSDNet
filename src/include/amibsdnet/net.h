@@ -39,11 +39,13 @@ struct hostent {
 	LONG h_length;
 	char **h_addr_list;
 };
+/* (field order as the Roadshow SDK's netinclude/netdb.h:202-211: ai_addr
+   before ai_canonname) */
 struct addrinfo {
 	LONG ai_flags, ai_family, ai_socktype, ai_protocol;
 	socklen_t ai_addrlen;
-	char *ai_canonname;
 	struct sockaddr *ai_addr;
+	char *ai_canonname;
 	struct addrinfo *ai_next;
 };
 struct msghdr;

@@ -21,14 +21,24 @@ int	otherstacks_atboot(char *names, int size);
 extern const char *otherstacks_only;
 /* returns 0, or -1 if something could not be changed */
 int	otherstacks_apply(int mode);
-/* removes AmiBSDNet: what S:AmiBSDNet-Install.log lists, its own files,
-   its S:User-Startup block (another stack it had switched from comes
-   back first); msg gets a text for the user */
+/* removes AmiBSDNet: what S:AmiBSDNet-Install.log lists ("FILE <path>",
+   or "FILE <path> <size> <crc32>": then only while the file is still
+   so; never anything in S: or a startup script), its own files, its
+   S:User-Startup block (another stack it had switched from comes back
+   first); msg gets a text for the user */
 int	otherstacks_uninstall(char *msg, int size);
 /* S:User-Startup starts AmiBSDNet */
 int	otherstacks_self_atboot(void);
-/* back to the previous stack and Wi-Fi driver, AmiBSDNet out of the
-   boot, logs kept; msg gets a text for the user */
+/* back to the previous stack (the Wi-Fi driver is not touched), AmiBSDNet
+   out of the boot, logs kept; msg gets a text for the user */
 int	otherstacks_fallback(char *msg, int size);
+/* the way back from otherstacks_fallback(): the lines of AmiBSDNet's own
+   S:User-Startup block that it commented out are active again; 0 when
+   done (or nothing to do), -1 if S:User-Startup could not be changed */
+int	otherstacks_self_on(void);
+
+/* size and CRC-32 (the zlib/PNG one, as drvcheck.c computes it for
+   PaulaNET.device) of a file; 0 if it could be read (drvcheck.c) */
+int	drv_file_sum(const char *path, unsigned long *size, unsigned long *crc);
 
 #endif

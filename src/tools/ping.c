@@ -21,8 +21,9 @@ struct DosLibrary *DOSBase;
 struct Library *SocketBase;
 struct Device *TimerBase;
 
+#include "amibsdnet_version.h"	/* build/gen, from tools/version.py */
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: Ping 0.8.2 (10.10.2026)";
+    AMIBSDNET_VERSTAG("Ping");
 
 #define	SOCK_RAW	3
 #define	IPPROTO_ICMP	1
@@ -63,8 +64,10 @@ cksum(const UBYTE *p, int len)
 }
 
 /*
- * EClock ticks (low 32 bits; wraps after an hour or more, plenty for ping)
- * and conversion of tick differences without 64-bit arithmetic.
+ * EClock ticks (the low 32 bits: they wrap after 2^32 ticks, at the rate
+ * ReadEClock() returns, "The count rate of the E-Clock (tics/sec)",
+ * timer.doc; only differences of a few seconds are used) and conversion
+ * of tick differences without 64-bit arithmetic.
  */
 static ULONG
 now_ticks(void)
@@ -80,10 +83,16 @@ static ULONG
 ticks_to_tenth_ms(ULONG d, ULONG freq)
 {
 
-	ULONG r = d % freq, ms, rem;
+	ULONG r, ms, rem;
 
-	/* exact, without 64-bit arithmetic: r * 1000 fits (freq < 4 MHz),
-	   and so does the remainder * 10 */
+	/* without 64-bit arithmetic: r * 1000 must fit in 32 bits, so a
+	   rate above 4 MHz is halved, with the difference, until it is
+	   not (a guard: ReadEClock() returns whatever rate the timer has) */
+	while (freq > 4000000) {
+		freq >>= 1;
+		d >>= 1;
+	}
+	r = d % freq;
 	ms = r * 1000 / freq;
 	rem = r * 1000 % freq;
 	return (d / freq) * 10000 + ms * 10 + rem * 10 / freq;

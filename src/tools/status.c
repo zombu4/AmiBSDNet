@@ -53,8 +53,9 @@ struct Library *WorkbenchBase;
 struct Library *IconBase;
 struct Library *CxBase;
 
+#include "amibsdnet_version.h"	/* build/gen, from tools/version.py */
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: AmiBSDNetStatus 0.8.2 (10.10.2026)";
+    AMIBSDNET_VERSTAG("AmiBSDNetStatus");
 
 #define	ICON_W	32
 #define	ICON_H	22
@@ -74,7 +75,9 @@ static struct AppMenuItem *appmenu, *appmenu2;
 #define	MENU_SETTINGS	1
 static int shown_state = -1;	/* -1 none, 0 offline, 1 online, 2 no stack,
 				   3 no link, 4 connecting */
-static char label[32];
+static char labels[2][32];	/* the icon's text and the next one */
+static int curlabel;
+static struct DiskObject *shown_dobj;
 
 /* ------------------------------------------------------------------------
  * talking to the stack
@@ -105,6 +108,22 @@ status_msg(void)
 {
 
 	return ctl;
+}
+
+/* the program file, for the Wi-Fi scan process (wifiwin.c); 0 while it
+   is not known */
+static BPTR progdir;
+static char progname[108];
+
+int
+status_program(BPTR *dir, const char **name)
+{
+
+	if (progdir == 0 || progname[0] == '\0')
+		return 0;
+	*dir = progdir;
+	*name = progname;
+	return 1;
 }
 
 void *
@@ -327,25 +346,57 @@ update_icon(struct MsgPort *appport)
 			}
 		}
 	}
-	char newlabel[sizeof(label)];
+	/*
+	 * wb.doc has no call that changes an AppIcon's text: a new one
+	 * replaces it.  Its text is documented only as "text - name of
+	 * icon (char *)" (AddAppIconA), not as copied: each icon keeps its
+	 * own buffer of labels[] while it exists, the new one is added
+	 * before the old one goes.  With WBAPPICONA_PropagatePosition (V44)
+	 * Workbench stores the icon's position in its DiskObject (wb.doc
+	 * AddAppIconA, TAGS), and the next icon starts there.  (Older
+	 * workbench.library versions do not get the tag: wb.doc gives it as
+	 * V44, and says nothing of what earlier ones do with it.)
+	 */
+	{
+		int nb = !curlabel;
+		struct DiskObject *d = &dobj[state == 1 ? 1 : 0];
+		struct AppIcon *ai;
+		struct TagItem tags[] = {
+			{ WBAPPICONA_PropagatePosition, TRUE },
+			{ TAG_DONE, 0 }
+		};
 
-	/* "Net: " so the icon is recognisable as the network status */
-	copy(newlabel, "Net: ", sizeof(newlabel));
-	if (state == 1)
-		fmt_ip(newlabel + 5, ctl->address);
-	else
-		copy(newlabel + 5, text, sizeof(newlabel) - 5);
-	if (state == shown_state && appicon &&
-	    !strcmp_(newlabel, label))
-		return;
-	copy(label, newlabel, sizeof(label));
-	if (appicon)
-		RemoveAppIcon(appicon);
-	step("adding the icon");
-	appicon = AddAppIconA(0, 0, (UBYTE *)label, appport, 0,
-	    &dobj[state == 1 ? 1 : 0], NULL);
-	/* if Workbench was not ready, try again at the next update */
-	shown_state = appicon ? state : -1;
+		/* "Net: " so the icon is recognisable as the network
+		   status */
+		copy(labels[nb], "Net: ", sizeof(labels[nb]));
+		if (state == 1)
+			fmt_ip(labels[nb] + 5, ctl->address);
+		else
+			copy(labels[nb] + 5, text, sizeof(labels[nb]) - 5);
+		if (state == shown_state && appicon &&
+		    !strcmp_(labels[nb], labels[curlabel]))
+			return;
+		if (appicon && shown_dobj && shown_dobj != d) {
+			d->do_CurrentX = shown_dobj->do_CurrentX;
+			d->do_CurrentY = shown_dobj->do_CurrentY;
+		}
+		step("adding the icon");
+		ai = AddAppIconA(0, 0, (UBYTE *)labels[nb], appport, 0, d,
+		    WorkbenchBase->lib_Version >= 44 ? tags : NULL);
+		/* if Workbench was not ready, try again at the next update
+		   (the old icon, if any, stays meanwhile) */
+		if (ai == NULL) {
+			if (appicon == NULL)
+				shown_state = -1;
+			return;
+		}
+		if (appicon)
+			RemoveAppIcon(appicon);
+		appicon = ai;
+		curlabel = nb;
+		shown_dobj = d;
+		shown_state = state;
+	}
 }
 
 /* ------------------------------------------------------------------------
@@ -392,7 +443,8 @@ show_status(struct MsgPort *appport)
 	if ((r = stack_cmd(NETCTRL_STATUS)) == -2) {
 		es.es_GadgetFormat = (UBYTE *)"OK";
 		EasyRequest(NULL, &es, NULL, (ULONG)
-		    "AmiBSDNet does not answer (it seems to hang).\n\n"
+		    "AmiBSDNet does not answer its control port\n"
+		    "(no reply within 10 seconds).\n\n"
 		    "Its log is T:AmiBSDNet.log. Reboot to start it again.");
 		return;
 	}
@@ -538,6 +590,7 @@ run(void)
 	ULONG sigs, appmask, cxmask = 0, tmask;
 	struct DateStamp t0, now;
 	int quit = 0, rc = RETURN_FAIL;
+	LONG cxerr = CBERR_OK;
 
 	if ((ctl = AllocVec(sizeof(*ctl), MEMF_PUBLIC | MEMF_CLEAR)) == NULL ||
 	    make_image(0) != 0 || make_image(1) != 0 ||
@@ -558,21 +611,28 @@ run(void)
 		nb.nb_Version = NB_VERSION;
 		nb.nb_Name = (STRPTR)"AmiBSDNet";
 		nb.nb_Title = (STRPTR)"AmiBSDNet network status";
-		nb.nb_Descr = (STRPTR)"Show / Enable = online / Disable = offline";
+		/* (title and description within CBD_TITLELEN and
+		   CBD_DESCRLEN, 40, libraries/commodities.h) */
+		nb.nb_Descr = (STRPTR)"Show; Enable: online; Disable: offline";
 		nb.nb_Unique = NBU_UNIQUE | NBU_NOTIFY;
 		nb.nb_Flags = COF_SHOW_HIDE;
 		nb.nb_Pri = 0;
 		nb.nb_Port = cxport;
 		nb.nb_ReservedChannel = 0;
-		if ((broker = CxBroker(&nb, NULL)) == NULL) {
-			/* already running: that instance shows its window */
+		if ((broker = CxBroker(&nb, &cxerr)) == NULL) {
 			DeleteMsgPort(cxport);
 			cxport = NULL;
-			rc = RETURN_OK;
-			goto out;
+			/* CBERR_DUP, "uniqueness violation": running already,
+			   and that one (NBU_NOTIFY) shows its window */
+			if (cxerr == CBERR_DUP) {
+				rc = RETURN_OK;
+				goto out;
+			}
+			/* any other failure: on without the commodity */
+		} else {
+			ActivateCxObj(broker, TRUE);
+			cxmask = 1UL << cxport->mp_SigBit;
 		}
-		ActivateCxObj(broker, TRUE);
-		cxmask = 1UL << cxport->mp_SigBit;
 	}
 
 	/*
@@ -745,10 +805,10 @@ out:
 	/* (not while the stack may still answer into it) */
 	if (ctl && (!ctl_left || amibsdnet_ctl_reclaim(ctl_left)))
 		FreeVec(ctl);
-	/* a Wi-Fi scan process still runs this program's code: unloading
-	   now would crash it, so wait until the driver has answered */
-	while (wifi_scan_busy())
-		Delay(50);
+	/* a Wi-Fi scan still out runs its own copy of the program and frees
+	   its job itself (wifiwin.c wifi_scan_release()): nothing to wait
+	   for */
+	wifi_scan_release();
 	return rc;
 }
 
@@ -761,11 +821,66 @@ _start(void)
 
 	SysBase = *(struct ExecBase **)4;
 	me = (struct Process *)SysBase->ThisTask;
+	/*
+	 * A Wi-Fi scan process (wifiwin.c start_scan()): its own copy of
+	 * this program, named "AmiBSDNet scan", with "SCANJOB=<address>" as
+	 * its arguments, which ReadArgs() reads: CreateNewProc() with
+	 * NP_Arguments "needs to modify the input filehandle to make
+	 * ReadArgs() work properly." (downloads/sources/NDK3.2/Autodocs/
+	 * dos.doc line 879).
+	 */
+	if (me->pr_CLI == 0 && me->pr_CIS != 0 &&
+	    me->pr_Task.tc_Node.ln_Name &&
+	    !strcmp_(me->pr_Task.tc_Node.ln_Name, "AmiBSDNet scan") &&
+	    (DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37))
+	    != NULL) {
+		LONG arg[1] = { 0 };
+		struct RDArgs *rda = ReadArgs((CONST_STRPTR)"SCANJOB/K", arg,
+		    NULL);
+		int was = 0;
+
+		if (rda) {
+			if (arg[0])
+				was = wifi_scan_child((const char *)arg[0]);
+			FreeArgs(rda);
+		}
+		CloseLibrary((struct Library *)DOSBase);
+		DOSBase = NULL;
+		/* (this program names only the process wifiwin.c:538
+		   start_scan() makes so, and passes it SCANJOB; without its
+		   job, ReadArgs() having failed, it ends here too instead of
+		   waiting for a Workbench start message below) */
+		(void)was;
+		return 0;
+	}
 	if (me->pr_CLI == 0) {
 		WaitPort(&me->pr_MsgPort);
 		wbmsg = (struct WBStartup *)GetMsg(&me->pr_MsgPort);
 	}
 	DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37);
+	/* the program file: GetProgramDir() "Returns a shared lock on the
+	   directory the program was loaded from." and "You should NOT unlock
+	   the lock." (dos.doc GetProgramDir); the name from the Shell
+	   (GetProgramName()) or from the first WBArg, the program's own
+	   icon, the one read_options() reads the tool types of */
+	if (DOSBase) {
+		const char *n = NULL;
+		char buf[108];
+		int i;
+
+		progdir = GetProgramDir();
+		if (wbmsg && wbmsg->sm_NumArgs >= 1)
+			n = (const char *)wbmsg->sm_ArgList[0].wa_Name;
+		else if (wbmsg == NULL && GetProgramName((STRPTR)buf,
+		    sizeof(buf)))
+			n = buf;
+		if (n) {
+			n = (const char *)FilePart((CONST_STRPTR)n);
+			for (i = 0; n[i] && i < (int)sizeof(progname) - 1; i++)
+				progname[i] = n[i];
+			progname[i] = '\0';
+		}
+	}
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
 	WorkbenchBase = OpenLibrary("workbench.library", 37);
 	IconBase = OpenLibrary("icon.library", 37);

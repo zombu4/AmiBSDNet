@@ -17,6 +17,11 @@
 #define	NETCTRL_OFFLINE		4
 #define	NETCTRL_RECONFIG	5	/* re-read the configuration file */
 #define	NETCTRL_IFLIST		6	/* fill ifaces[] */
+/* a kernel panic, for tests; only when the stack runs with DEBUG (else
+   result -1): on the stack's own task (answered first), or on a kernel
+   thread (src/stack/control.c control_handle()) */
+#define	NETCTRL_PANIC		7
+#define	NETCTRL_PANICTHREAD	8
 
 #define	NETCTRL_TEXTSIZE	2048
 #define	NETCTRL_MAXIFACES	4

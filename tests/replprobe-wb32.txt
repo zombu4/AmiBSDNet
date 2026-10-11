@@ -1,0 +1,77 @@
+# src/test/replprobe.c on Workbench 3.2 (emu/wb32.uae; its Startup-Sequence
+# has "MakeLink RAM:ENV to ENVARC: FORCE" and "Assign ENV: RAM:ENV", and
+# its S:User-Startup executes Test:check.script).  Before the boot,
+# ENVARC:AmiBSDNet/AmiBSDNet.conf was put on the Workbench volume
+# (emu/wb32sys/Prefs/Env-Archive/AmiBSDNet/AmiBSDNet.conf) with the text
+# "interface wlan0 uaenet.device 0 wifi".  The RAM-Disk mirrors ENVARC:
+# into ENV: (NDK3.2/ReleaseNotes/ram-handler-RelNotes:39-48).
+#
+# (That file was deleted again after the run.)
+#
+# Shown in the output: first run (ENV:), after the original is renamed
+# away the name can be locked again and Rename() onto it fails;
+# amibsdnet_replace_file() returns 0 and ENV:AmiBSDNet/AmiBSDNet.conf then
+# holds its text "# replprobe", while ENVARC: keeps its own.  Second run
+# (RAM:x.conf, an existing file outside ENV:): the name is gone after the
+# rename and Rename() onto it works.  In the second run the probe's own
+# calls already leave RAM:x.conf with the text "# replprobe", so that run
+# shows nothing about amibsdnet_replace_file() beyond its return value;
+# in the first they do not (their Rename() failed), so the text there is
+# the function's.  Neither run shows which of its branches ran.
+# IoErr 203 is ERROR_OBJECT_EXISTS and 205 ERROR_OBJECT_NOT_FOUND
+# (NDK3.2/Include_H/dos/dos.h:199,201).
+#
+# The script (Test:check.script):
+#   FailAt 21
+#   Wait 3
+#   Version >Test:probe.txt
+#   Copy Test:conf.txt ENV:AmiBSDNet/AmiBSDNet.conf
+#   Copy Test:conf.txt RAM:x.conf
+#   Test:replprobe FILE=ENV:AmiBSDNet/AmiBSDNet.conf >>Test:probe.txt
+#   Test:replprobe FILE=RAM:x.conf >>Test:probe.txt
+#   List >>Test:probe.txt ENV:AmiBSDNet RAM:#?.conf#?
+#   Echo >>Test:probe.txt "--- Type ENV:AmiBSDNet/AmiBSDNet.conf:"
+#   Type >>Test:probe.txt ENV:AmiBSDNet/AmiBSDNet.conf
+#   Echo >>Test:probe.txt "--- Type RAM:x.conf:"
+#   Type >>Test:probe.txt RAM:x.conf
+#   Echo >>Test:probe.txt "--- Type ENVARC:AmiBSDNet/AmiBSDNet.conf:"
+#   Type >>Test:probe.txt ENVARC:AmiBSDNet/AmiBSDNet.conf
+#   Echo >Test:end.txt "end"
+#
+# Its output (Test:probe.txt) as it was:
+Kickstart 47.111, Workbench 47.2
+replprobe: start
+  Lock(file): ok
+  Open(file.amibsdnet-new, MODE_NEWFILE): ok
+  Write(): ok
+  Close(): ok
+  Rename(file, file.amibsdnet-old): ok
+  Lock(file) after that (is the name there again?): ok
+  Rename(file.amibsdnet-new, file): failed, IoErr 203
+  DeleteFile(file.amibsdnet-old): ok
+  amibsdnet_replace_file(): 0
+replprobe: PASS
+replprobe: start
+  Lock(file): ok
+  Open(file.amibsdnet-new, MODE_NEWFILE): ok
+  Write(): ok
+  Close(): ok
+  Rename(file, file.amibsdnet-old): ok
+  Lock(file) after that (is the name there again?): failed, IoErr 205
+  Rename(file.amibsdnet-new, file): ok
+  DeleteFile(file.amibsdnet-old): ok
+  amibsdnet_replace_file(): 0
+replprobe: PASS
+Directory "ENV:AmiBSDNet" on Sunday 01-Jan-78
+AmiBSDNet.conf                   12 ----rwed Today     00:00:14
+1 file - 12 bytes - 2 blocks used
+
+Directory "RAM:" on Sunday 01-Jan-78
+x.conf                           12 ----rwed Today     00:00:14
+1 file - 12 bytes - 2 blocks used
+--- Type ENV:AmiBSDNet/AmiBSDNet.conf:
+# replprobe
+--- Type RAM:x.conf:
+# replprobe
+--- Type ENVARC:AmiBSDNet/AmiBSDNet.conf:
+interface wlan0 uaenet.device 0 wifi

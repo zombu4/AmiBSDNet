@@ -2,7 +2,18 @@
  * NetCtrl: control the AmiBSDNet stack from the Shell.
  *
  *   NetCtrl [STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|
- *           DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS] [TIMEOUT=<seconds>]
+ *           DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK|
+ *           CHECKDRIVER|KEEPCONF|FINDROADSHOW|REMOVEROADSHOW|UNINSTALL|
+ *           CHECKSUM|REENABLE|PANIC|PANICTHREAD] [TIMEOUT=<seconds>]
+ *           [FILE=<file>] [NOAUTODETECT]
+ *
+ * PANIC and PANICTHREAD make the kernel panic, on the stack's own task or
+ * on a kernel thread, for tests of what follows; the stack refuses them
+ * unless it runs with DEBUG (src/stack/control.c).
+ *
+ * STATUS (the default) prints the stack's status; ONLINE and OFFLINE
+ * bring the network up or down; RECONFIG has the stack read its
+ * configuration file again (amibsdnet/control.h NETCTRL_RECONFIG).
  *
  * WAIT returns when the network is up (or fails after TIMEOUT seconds,
  * default 30), for scripts that need the network.
@@ -22,6 +33,17 @@
  * CHECKDRIVER [FILE=<driver>] checks a PaulaNET.device file
  * (src/common/drvcheck.c); KEEPCONF FILE=<out> copies the PaulaNET
  * lines of the saved configuration (for the installer).
+ *
+ * FALLBACK goes back to the TCP/IP stack AmiBSDNet was switched from and
+ * takes AmiBSDNet out of the boot; REENABLE is the way back from that
+ * (otherstacks_self_on(), otherstacks.h).
+ *
+ * FINDROADSHOW and REMOVEROADSHOW list or remove Roadshow
+ * (src/tools/roadshow.c); UNINSTALL removes AmiBSDNet (what
+ * S:AmiBSDNet-Install.log lists); CHECKSUM FILE=<file> prints the size
+ * and CRC-32 of a file (for the installer's log).
+ *
+ * Ctrl-C stops REMOVEROADSHOW and FINDROADSHOW between two files.
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -47,8 +69,9 @@
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
+#include "amibsdnet_version.h"	/* build/gen, from tools/version.py */
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: NetCtrl 0.8.2 (10.10.2026)";
+    AMIBSDNET_VERSTAG("NetCtrl");
 
 static int
 streq(const char *a, const char *b)
@@ -106,6 +129,12 @@ probe(void)
 	}
 	if (n == 0 && !probe_paulanet[0])
 		PutStr((CONST_STRPTR)"no network adapters found\n");
+	/* drivers whose hardware is not there (said, and for the installer) */
+	if (probe_unusable[0]) {
+		PutStr((CONST_STRPTR)"not usable here:\n");
+		PutStr((CONST_STRPTR)probe_unusable);
+	}
+	setvar("AmiBSDNet/Unusable", probe_unusable[0] ? probe_unusable : NULL);
 	setvar("AmiBSDNet/Ethernet", eth);
 	setvar("AmiBSDNet/WiFi", wifi);
 	setvar("AmiBSDNet/PaulaNET", probe_paulanet[0] ? probe_paulanet : NULL);
@@ -190,6 +219,7 @@ keepconf(const char *out, int noauto)
 	char line[200];
 	BPTR in, fh;
 	int i, j;
+	LONG werr = 0;
 
 	if ((fh = Open((CONST_STRPTR)out, MODE_NEWFILE)) == 0) {
 		PrintFault(IoErr(), (CONST_STRPTR)"NetCtrl");
@@ -222,11 +252,59 @@ keepconf(const char *out, int noauto)
 				line[j++] = '\n';
 				line[j] = '\0';
 			}
-			FPuts(fh, (CONST_STRPTR)(line + i));
+			/* (FPuts(): "0 normally, otherwise -1", dos.doc
+			   FPuts) */
+			if (FPuts(fh, (CONST_STRPTR)(line + i)) != 0)
+				werr = IoErr();
 		}
 		Close(in);
 	}
-	Close(fh);
+	if (!Close(fh) && werr == 0)
+		werr = IoErr();
+	/* (only a part of the lines: none, and the error) */
+	if (werr != 0) {
+		PrintFault(werr, (CONST_STRPTR)"NetCtrl");
+		DeleteFile((CONST_STRPTR)out);
+		return RETURN_ERROR;
+	}
+	return RETURN_OK;
+}
+
+/*
+ * CHECKSUM FILE=<path>: "<size> <crc32>" of a file (size in decimal, the
+ * CRC-32 drvcheck.c computes, as 8 lowercase hex digits), printed and in
+ * AmiBSDNet/FileSum, for the installer's "FILE <path> <size> <crc32>"
+ * lines in S:AmiBSDNet-Install.log.
+ */
+static int
+checksum(const char *file)
+{
+	char out[24], t[12];
+	unsigned long size, crc;
+	int n = 0, k = 0, i;
+
+	if (!file[0]) {
+		PutStr((CONST_STRPTR)"NetCtrl: CHECKSUM needs FILE=\n");
+		return RETURN_ERROR;
+	}
+	if (drv_file_sum(file, &size, &crc) != 0) {
+		PrintFault(IoErr(), (CONST_STRPTR)file);
+		setvar("AmiBSDNet/FileSum", NULL);
+		return RETURN_ERROR;
+	}
+	do {
+		t[k++] = '0' + size % 10;
+		size /= 10;
+	} while (size);
+	while (k)
+		out[n++] = t[--k];
+	out[n++] = ' ';
+	for (i = 0; i < 8; i++)
+		out[n++] = "0123456789abcdef"[(crc >> (28 - 4 * i)) & 15];
+	out[n] = '\0';
+	PutStr((CONST_STRPTR)out);
+	PutStr((CONST_STRPTR)"\n");
+	setvar("AmiBSDNet/FileSum", out);
 	return RETURN_OK;
 }
 
@@ -242,28 +320,32 @@ keepconf(const char *out, int noauto)
 #define	CMD_FINDRS	0xffff0009UL
 #define	CMD_REMOVERS	0xffff000aUL
 #define	CMD_UNINSTALL	0xffff000bUL
+#define	CMD_CHECKSUM	0xffff000cUL
+#define	CMD_REENABLE	0xffff000dUL
 
 /*
- * FINDROADSHOW lists everything of Roadshow (roadshow.c), REMOVEROADSHOW
- * deletes it - its startup lines, files, drawers, libraries and the lines
- * mentioning it in configuration files; a volume or drawer called Work
- * (the Roadshow installer) is left alone.  Afterwards it looks again and
- * says what is left.  Sets AmiBSDNet/RoadshowCount (what is left, or was
- * found) and AmiBSDNet/RoadshowList (the first of them).
+ * FINDROADSHOW lists the files of Roadshow (roadshow.c: the files of its
+ * archive where its installation puts them), REMOVEROADSHOW takes them
+ * out - its startup lines (otherstacks.c), its commands and drivers
+ * (deleted), its settings and scripts (moved to SYS:Storage/AmiBSDNet-
+ * Roadshow); nothing else on any volume is touched.  Afterwards it looks
+ * again and says what is left and what failed.  Sets
+ * AmiBSDNet/RoadshowCount (what is left, or was found) and
+ * AmiBSDNet/RoadshowList (the first of them).
  */
 static int report_atboot(void);
 static int roadshow(int remove);
 
 /*
  * The commands NetCtrl does itself run in a process of their own with a
- * big stack: NetCtrl may have been started with 4 KB (the installer's
- * "run"), and PROBE opens drivers - their OpenDevice runs on our stack -
- * and the Roadshow walk through every drawer goes deep.
+ * 64 KB stack, whatever stack NetCtrl itself was started with: PROBE
+ * opens drivers, and the others go through drawers.
  */
 static ULONG bs_cmd;
 static char bs_file[256];
 static int bs_noauto, bs_rc;
 static struct Task *bs_parent;
+static struct Process *bs_child;
 static APTR bs_window;
 static volatile int bs_done;
 
@@ -276,7 +358,9 @@ static void
 bs_entry(void)
 {
 
-	/* (requesters like the Shell's: a new process has its own) */
+	/* (requesters where NetCtrl's would go: set here as well, though
+	   dos/dostags.h NP_WindowPtr says "window ptr - default is same as
+	   parent") */
 	((struct Process *)SysBase->ThisTask)->pr_WindowPtr = bs_window;
 	bs_rc = local_cmd(bs_cmd, bs_file, bs_noauto);
 	Forbid();		/* lasts until this process is gone */
@@ -298,16 +382,31 @@ bigstack(ULONG cmd, const char *file, int noauto)
 	bs_parent = SysBase->ThisTask;
 	bs_window = ((struct Process *)bs_parent)->pr_WindowPtr;
 	SetSignal(0, SIGBREAKF_CTRL_F);
-	if (CreateNewProcTags(NP_Entry, (ULONG)bs_entry,
+	bs_child = CreateNewProcTags(NP_Entry, (ULONG)bs_entry,
 	    NP_Name, (ULONG)"NetCtrl", NP_StackSize, 65536,
 	    NP_Input, Input(), NP_CloseInput, FALSE,
-	    NP_Output, Output(), NP_CloseOutput, FALSE, TAG_DONE) == NULL) {
+	    NP_Output, Output(), NP_CloseOutput, FALSE, TAG_DONE);
+	if (bs_child == NULL) {
 		/* (not here instead: the stack may be too small) */
 		PutStr((CONST_STRPTR)"NetCtrl: not enough memory\n");
 		return RETURN_FAIL;
 	}
-	while (!bs_done)
-		Wait(SIGBREAKF_CTRL_F);
+	while (!bs_done) {
+		ULONG sigs = Wait(SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C);
+
+		/* Ctrl-C may come here or to the working process (a console
+		   signals the task that used the handle last: ACTION_READ and
+		   ACTION_WRITE set breaktask in downloads/sources/AROS/rom/
+		   filesys/console_handler/con_handler.c).  One that comes
+		   here goes on to the working process, only while that runs:
+		   it sets bs_done under a Forbid that lasts until it is gone */
+		if (sigs & SIGBREAKF_CTRL_C) {
+			Forbid();
+			if (!bs_done)
+				Signal(&bs_child->pr_Task, SIGBREAKF_CTRL_C);
+			Permit();
+		}
+	}
 	return bs_rc;
 }
 
@@ -353,6 +452,20 @@ local_cmd(ULONG cmd, const char *file, int noauto)
 	case CMD_REMOVERS:
 		rc = roadshow(cmd == CMD_REMOVERS);
 		return rc;
+	case CMD_CHECKSUM:
+		rc = checksum(file);
+		return rc;
+	case CMD_REENABLE:
+		if (otherstacks_self_on() == 0) {
+			PutStr((CONST_STRPTR)"AmiBSDNet's lines in S:User-Startup "
+			    "are active again\n");
+			rc = RETURN_OK;
+		} else {
+			PutStr((CONST_STRPTR)"NetCtrl: S:User-Startup could not "
+			    "be changed\n");
+			rc = RETURN_WARN;
+		}
+		return rc;
 	case CMD_KEEPCONF:
 		if (!file[0]) {
 			PutStr((CONST_STRPTR)"NetCtrl: KEEPCONF needs FILE=\n");
@@ -368,7 +481,7 @@ static int
 roadshow(int remove)
 {
 	char *list, names[128], num[12], *p;
-	int n, failed = 0, left, i;
+	int n, failed = 0, left, i, bad = 0;
 
 	if ((list = AllocVec(4096, MEMF_ANY | MEMF_CLEAR)) == NULL)
 		return RETURN_FAIL;
@@ -383,19 +496,52 @@ roadshow(int remove)
 		/* the startup lines (also in scripts run with Execute), its
 		   WBStartup items, LIBS:bsdsocket.library */
 		otherstacks_only = "Roadshow";	/* (not Miami etc.) */
-		otherstacks_apply(OTHERS_REMOVE);
+		if (otherstacks_apply(OTHERS_REMOVE) != 0) {
+			PutStr((CONST_STRPTR)"NetCtrl: Roadshow's startup lines or "
+			    "WBStartup items could not all be removed\n");
+			bad = 1;
+		}
 		otherstacks_only = NULL;
-		n = roadshow_find(1, list, 4096, &failed);
+		if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
+			PutStr((CONST_STRPTR)"NetCtrl: stopped (Ctrl-C)\n");
+			FreeVec(list);
+			return RETURN_WARN;
+		}
+		roadshow_find(1, list, 4096, &failed);
 		PutStr((CONST_STRPTR)"removed:\n");
 		PutStr((CONST_STRPTR)list);
+		if (failed) {
+			PutStr((CONST_STRPTR)"NetCtrl: ");
+			{
+				char t[12];
+				int k = 0;
+				ULONG v = failed;
+
+				do {
+					t[k++] = '0' + v % 10;
+					v /= 10;
+				} while (v);
+				p = num;
+				while (k)
+					*p++ = t[--k];
+				*p = '\0';
+			}
+			PutStr((CONST_STRPTR)num);
+			PutStr((CONST_STRPTR)" could not be removed (see above)\n");
+			bad = 1;
+		}
 		/* a switch to AmiBSDNet without a way back: no trial */
 		DeleteVar((CONST_STRPTR)"AmiBSDNet/Trial",
 		    GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 	}
 	/* (also the check after removing) */
 	n = roadshow_find(0, list, 4096, &failed);
+	/* (looking fails only when stopped by Ctrl-C or out of memory) */
+	if (failed)
+		bad = 1;
 	/* (only Roadshow counts here: another stack is not left over; a
-	   bsdsocket.library on disk is found by roadshow_find) */
+	   bsdsocket.library on disk is roadshow_find()'s, which leaves it
+	   alone while another stack is installed) */
 	otherstacks_check(names, sizeof(names));
 	otherstacks_only = "Roadshow";
 	left = n + report_atboot();
@@ -425,10 +571,11 @@ roadshow(int remove)
 	list[i] = '\0';
 	setvar("AmiBSDNet/RoadshowList", list[0] ? list : NULL);
 	if (left == 0)
-		PutStr((CONST_STRPTR)(remove ? "Roadshow is completely gone\n" :
+		PutStr((CONST_STRPTR)(remove ? "none of Roadshow's files or startup lines that "
+		    "REMOVEROADSHOW handles are left\n" :
 		    "nothing of Roadshow found\n"));
 	FreeVec(list);
-	return left ? RETURN_WARN : RETURN_OK;
+	return left || bad ? RETURN_WARN : RETURN_OK;
 }
 
 /*
@@ -617,6 +764,10 @@ _start(void)
 		else if (streq(c, "ONLINE")) cmd = NETCTRL_ONLINE;
 		else if (streq(c, "OFFLINE")) cmd = NETCTRL_OFFLINE;
 		else if (streq(c, "RECONFIG")) cmd = NETCTRL_RECONFIG;
+		/* (for tests, with a stack started with DEBUG only:
+		   amibsdnet/control.h) */
+		else if (streq(c, "PANIC")) cmd = NETCTRL_PANIC;
+		else if (streq(c, "PANICTHREAD")) cmd = NETCTRL_PANICTHREAD;
 		else if (streq(c, "WAIT")) cmd = 0;
 		else if (streq(c, "PROBE")) cmd = CMD_PROBE;
 		else if (streq(c, "CHECK")) cmd = CMD_CHECK;
@@ -629,13 +780,16 @@ _start(void)
 		else if (streq(c, "FINDROADSHOW")) cmd = CMD_FINDRS;
 		else if (streq(c, "REMOVEROADSHOW")) cmd = CMD_REMOVERS;
 		else if (streq(c, "UNINSTALL")) cmd = CMD_UNINSTALL;
+		else if (streq(c, "CHECKSUM")) cmd = CMD_CHECKSUM;
+		else if (streq(c, "REENABLE")) cmd = CMD_REENABLE;
 		else {
 			PutStr((CONST_STRPTR)"usage: NetCtrl "
 			    "[STATUS|ONLINE|OFFLINE|RECONFIG|WAIT|PROBE|CHECK|\n"
 			    "    DISABLEOTHERS|REMOVEOTHERS|RESTOREOTHERS|FALLBACK|\n"
 			    "    CHECKDRIVER|KEEPCONF|FINDROADSHOW|REMOVEROADSHOW|\n"
-			    "    UNINSTALL] [TIMEOUT=<seconds>] [FILE=<file>]\n"
-			    "    [NOAUTODETECT]\n");
+			    "    UNINSTALL|CHECKSUM|REENABLE|PANIC|PANICTHREAD]\n"
+			    "    [TIMEOUT=<seconds>]\n"
+			    "    [FILE=<file>] [NOAUTODETECT]\n");
 			rc = RETURN_ERROR;
 		}
 	}
@@ -654,7 +808,7 @@ _start(void)
 	FreeArgs(rda);
 	if (rc != RETURN_OK)
 		goto out;
-	if (cmd >= CMD_PROBE && cmd <= CMD_UNINSTALL) {
+	if (cmd >= CMD_PROBE && cmd <= CMD_REENABLE) {
 		rc = bigstack(cmd, file, noauto);
 		goto out;
 	}

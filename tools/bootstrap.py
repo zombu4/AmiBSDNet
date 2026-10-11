@@ -52,7 +52,7 @@ NETBSD_COMMIT = "0d0a71cca9c550e6392fc8bc50726e920b55a778"
 NETBSD_PATHS = """
     sys/rump sys/kern sys/net sys/netinet sys/netinet6 sys/sys
     sys/lib/libkern sys/uvm sys/crypto sys/secmodel sys/compat/common
-    sys/compat/net sys/compat/netinet sys/compat/netinet6 sys/compat/sys
+    sys/compat/net sys/compat/netinet6 sys/compat/sys
     sys/arch/m68k/include sys/arch/amiga/include sys/conf sys/dev
     sys/netatalk sys/netipsec sys/altq sys/ufs sys/net80211 sys/netmpls
     common/lib/libc common/lib/libutil common/lib/libprop common/lib/libppath

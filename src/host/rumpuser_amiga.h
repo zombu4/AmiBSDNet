@@ -43,9 +43,15 @@ typedef int pid_t;
  * does so.  log is a DOS file handle (BPTR) for kernel console output.
  */
 int	amiga_rump_hostinit(long log);
+/* undoes amiga_rump_hostinit(), on the same task, after the kernel is
+   gone (rumpuser_exit()) or was never started */
+void	amiga_rump_hostfini(void);
 
 /* set up console logging only (log != 0); safe to call first thing */
 void	amiga_rump_loginit(long log);
+/* switch the log file handle (0: none); returns the old one, which is no
+   longer written to and may be Close()d by the caller */
+long	amiga_rump_logswitch(long log);
 void	amiga_rump_logtee(void (*)(const char *, long));
 
 /* provided by rumpuser_amiga.c for host code (no C library is linked) */
@@ -67,9 +73,12 @@ void	amiga_host_sleep_ms(unsigned long);
 unsigned long	amiga_host_ms(void);
 void	amiga_host_thread_join(void *);	/* when not on a rump CPU */
 int	amiga_host_thread_done(void *);
+/* a joinable thread nobody will join: freed when it ends */
+void	amiga_host_thread_detach(void *);
 
 /* debug: report CPU exceptions of the calling task on the rump console */
 void	crash_install(void);
+void	crash_remove(void);
 
 /* errno of the last failed rump_sys_*() call made by the calling thread */
 int	amiga_rump_errno(void);
@@ -91,5 +100,11 @@ extern volatile int amiga_rump_exitcode;
 /* nonzero: unbuffered console, RUMP_VERBOSE boot, hypercall tracing */
 extern int amiga_rump_debug;
 extern volatile int amiga_rump_exited;
+/*
+ * Called by rumpuser_exit() instead of the signal when the task it would
+ * signal is the one exiting (a panic inside a kernel call made by the
+ * host task itself).  It must not return and must not call the kernel.
+ */
+extern void (*amiga_rump_exitfn)(void);
 
 #endif /* RUMPUSER_AMIGA_H */

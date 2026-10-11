@@ -6,7 +6,13 @@
  * process with its own library base connects to 2324 while the main
  * process is serving, so two bases are active at once.  Every accepted
  * connection gets its data echoed.  Passes when both the host's and the
- * child's connections were echoed correctly.
+ * child's connections were echoed correctly (tools/run_emu.py checks the
+ * host's echo).
+ *
+ *   tools/build_stack.sh
+ *   tools/build_amiga.sh src/test/srvtest.c build/srvtest
+ *   python -I tools/run_emu.py build/srvtest --stack tests/slirp.conf
+ *       --forward 2323
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
@@ -127,18 +133,35 @@ say(const char *s)
 	PutStr((CONST_STRPTR)s);
 }
 
+static void
+done(int fail)
+{
+	BPTR f;
+
+	say(fail ? "srvtest: FAILED\n" : "srvtest: PASS\n");
+	if ((f = Open((CONST_STRPTR)"DH0:done", MODE_NEWFILE))) {
+		Write(f, fail ? "FAIL\n" : "PASS\n", 5);
+		Close(f);
+	}
+}
+
 __attribute__((section(".text.unlikely.0_start"), used)) int
 _start(void)
 {
 	LONG ext, loc, maxfd, n;
-	int host_done = 0, child_done = 0, waits = 0, fail = 0;
-	BPTR f;
+	int host_done = 0, child_done = 0, waits = 0, fail = 0, started = 0;
+	int i;
 
 	SysBase = *(struct ExecBase **)4;
 	DOSBase = (struct DosLibrary *)OpenLibrary("dos.library", 37);
-	if (DOSBase == NULL ||
-	    (SocketBase = OpenLibrary("bsdsocket.library", 4)) == NULL)
+	if (DOSBase == NULL)
 		return RETURN_FAIL;
+	if ((SocketBase = OpenLibrary("bsdsocket.library", 4)) == NULL) {
+		say("FAIL OpenLibrary(\"bsdsocket.library\", 4)\n");
+		done(1);
+		CloseLibrary((struct Library *)DOSBase);
+		return RETURN_FAIL;
+	}
 	mainproc = SysBase->ThisTask;
 
 	ext = listener(SocketBase, 0, 2323);
@@ -151,7 +174,8 @@ _start(void)
 	    (ULONG)"srvtest child", NP_StackSize, 16384, TAG_DONE) == NULL) {
 		say("FAIL child process\n");
 		fail++;
-	}
+	} else
+		started = 1;
 	maxfd = (ext > loc ? ext : loc) + 1;
 
 	while (!fail && (!host_done || !child_done) && waits < 60) {
@@ -191,23 +215,37 @@ _start(void)
 			child_done = 1;
 		}
 	}
-	if (!host_done || !child_done) {
+	if (!fail && (!host_done || !child_done)) {
 		say("FAIL timed out waiting for connections\n");
 		fail++;
 	}
-	Wait(SIGBREAKF_CTRL_F);		/* child finished */
-	say(child_ok == 1 ? "ok   child base got its echo\n" :
-	    "FAIL child base\n");
-	if (child_ok != 1)
-		fail++;
-	CloseSocket(ext);
-	CloseSocket(loc);
-	CloseLibrary(SocketBase);
-	say(fail ? "srvtest: FAILED\n" : "srvtest: PASS\n");
-	if ((f = Open((CONST_STRPTR)"DH0:done", MODE_NEWFILE))) {
-		Write(f, fail ? "FAIL\n" : "PASS\n", 5);
-		Close(f);
+	/* closing the listeners aborts a connection still waiting to be
+	   accepted (netbsd-src/sys/kern/uipc_socket.c soclose(): soabort();
+	   netinet/tcp_subr.c tcp_drop() sends the reset), so a child
+	   waiting for its echo gets an error instead of waiting for ever */
+	if (ext >= 0)
+		CloseSocket(ext);
+	if (loc >= 0)
+		CloseSocket(loc);
+	if (started) {
+		/* the child signals when it ends: up to 10 seconds */
+		for (i = 0; i < 100 && !(SetSignal(0, 0) & SIGBREAKF_CTRL_F);
+		    i++)
+			Delay(5);
+		if (!(SetSignal(0, SIGBREAKF_CTRL_F) & SIGBREAKF_CTRL_F)) {
+			say("FAIL the child process did not end\n");
+			done(1);
+			/* its code is this program's: never unload it */
+			for (;;)
+				Wait(0x80000000UL);
+		}
+		say(child_ok == 1 ? "ok   child base got its echo\n" :
+		    "FAIL child base\n");
+		if (child_ok != 1)
+			fail++;
 	}
+	CloseLibrary(SocketBase);
+	done(fail);
 	CloseLibrary((struct Library *)DOSBase);
 	return fail ? RETURN_ERROR : RETURN_OK;
 }

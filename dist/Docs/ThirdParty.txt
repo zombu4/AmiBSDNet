@@ -14,7 +14,8 @@ C:WirelessManager
 WirelessManager 1.5 (24.2.2025) by Neil Cafferkey: the WPA/WPA2 part of
 Wi-Fi (a port of wpa_supplicant). Taken from the prism2v2 2.9 archive on
 Aminet (driver/net/prism2v2.lha). Its source is in the AROS repository,
-workbench/network/WirelessManager (https://github.com/aros-development-team/AROS).
+workbench/network/WirelessManager
+(https://github.com/aros-development-team/AROS).
 
 WirelessManager is based on wpa_supplicant. It is dual-licensed under the
 GNU General Public License version 2 and the BSD license; it is

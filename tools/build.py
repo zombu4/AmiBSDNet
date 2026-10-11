@@ -185,7 +185,7 @@ def comp_amibsdnet():
     # src/kern/if_virt.c is NetBSD's with a fix and is found first.
     vif = os.path.join(RUMPTOP, "net", "lib", "libvirtif")
     return {
-        "srcs": ["if_virt.c", "netcfg.c", "sockpass.c"],
+        "srcs": ["if_virt.c", "netcfg.c", "sockpass.c", "debugpanic.c"],
         "path": [os.path.join(TOP, "src", "kern"), vif],
         "cppflags": ["-DVIRTIF_BASE=sana", "-DRUMP_VIF_LINKSTR",
                      "-DINET", "-DINET6"],
@@ -273,10 +273,10 @@ VERS_C = """\
 const char copyright[] = "Copyright (c) 1996-2025 The NetBSD Foundation, Inc.\\n";
 const char ostype[] = "NetBSD";
 const char osrelease[] = "11.0";
-const char sccs[] = "@(#)NetBSD 11.0 (RUMP-ROAST-AMIGA)";
-const char version[] = "NetBSD 11.0 (RUMP-ROAST-AMIGA)\\n";
+const char sccs[] = "@(#)NetBSD 11.0 (AMIBSDNET)";
+const char version[] = "NetBSD 11.0 (AMIBSDNET)\\n";
 const char buildinfo[] = "";
-const char kernel_ident[] = "RUMP-ROAST-AMIGA";
+const char kernel_ident[] = "AMIBSDNET";
 """
 
 
@@ -370,7 +370,8 @@ COPTS = {
 def compile_one(src, obj, flags):
     os.makedirs(os.path.dirname(obj), exist_ok=True)
     flags = flags + COPTS.get(os.path.basename(src), [])
-    r = subprocess.run([CC] + flags + ["-c", src, "-o", obj],
+    # -MD: <obj>.d lists the source and every header it read
+    r = subprocess.run([CC] + flags + ["-MD", "-c", src, "-o", obj],
                        capture_output=True, text=True)
     return src, obj, r.returncode, r.stderr
 
@@ -394,7 +395,7 @@ def rename_symbols(obj):
         os.remove(mp)
 
 
-def build(name, jobs, keep_going):
+def build(name, jobs):
     c = COMPONENTS[name]()
     gdir = os.path.join(BUILD, "gen", name)
     odir = os.path.join(BUILD, "obj", name)
@@ -444,11 +445,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("components", nargs="*", default=list(COMPONENTS))
     ap.add_argument("-j", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--keep-going", action="store_true")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="build the remaining components after one failed")
     a = ap.parse_args()
     ok = True
     for n in a.components:
-        ok &= build(n, a.j, a.keep_going)
+        if not build(n, a.j):
+            ok = False
+            if not a.keep_going:
+                print(f"[{n}] failed: stopping (--keep-going builds the "
+                      f"remaining components)")
+                break
     sys.exit(0 if ok else 1)
 
 

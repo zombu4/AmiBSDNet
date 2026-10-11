@@ -1,13 +1,26 @@
 /*	$NetBSD: if_virt.c,v 1.59 2021/06/16 00:21:20 riastradh Exp $	*/
 
 /*
- * AmiBSDNet: NetBSD's sys/rump/net/lib/libvirtif/if_virt.c with one fix:
- * virtif_unclone() freed the softc, which contains the ifnet, before
- * detaching the ifnet, so removing an interface (reconfiguration) used
- * freed memory.  It now frees the softc last.  Also: unclone of an
- * interface whose link string never worked (no backend) no longer calls
- * the backend with NULL, the link string is freed on unclone, and the
- * pointer is cleared when a failed SIOCSLINKSTR frees it.
+ * AmiBSDNet: NetBSD's sys/rump/net/lib/libvirtif/if_virt.c with these
+ * changes (each is marked "AmiBSDNet" below):
+ *  - virtif_unclone() freed the softc, which contains the ifnet, before
+ *    detaching the ifnet; it now frees the softc last.  It also handles an
+ *    interface whose link never worked (no backend, never
+ *    ether_ifattach()ed) and frees the link string.
+ *  - a failed SIOCSLINKSTR clears the freed link string pointer.
+ *  - IFLINKSTR_UNSET (NetBSD: panic) takes the backend away and keeps the
+ *    ifnet attached, as if_shmem.c does (sys/rump/net/lib/libshmif/
+ *    if_shmem.c:520-525: finibackend() only); a later SIOCSLINKSTR links
+ *    it again.  ether_ifdetach() is only called from virtif_unclone(),
+ *    which if_clone_destroy() calls without IFNET_LOCK (net/if.c:
+ *    1617-1629), as ether_ifdetach() requires (IFNET_ASSERT_UNLOCKED,
+ *    net/if_ethersubr.c:1086; if_ioctl runs under IFNET_LOCK,
+ *    net/if.c:3539).
+ *  - SIOCADDMULTI / SIOCDELMULTI program the backend's multicast filter
+ *    (VIFHYPER_MCAST) when ether_ioctl() reports a change (ENETRESET,
+ *    net/if_ethersubr.c:1394-1398, 1448-1452).
+ *  - VIFHYPER_DYING is not used: the SANA-II backend has nothing to
+ *    refuse there.
  */
 
 /*
@@ -43,6 +56,7 @@ __KERNEL_RCSID(0, "$NetBSD: if_virt.c,v 1.59 2021/06/16 00:21:20 riastradh Exp $
 #include <sys/kmem.h>
 #include <sys/cprng.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 
 #include <net/bpf.h>
 #include <net/if.h>
@@ -54,6 +68,13 @@ __KERNEL_RCSID(0, "$NetBSD: if_virt.c,v 1.59 2021/06/16 00:21:20 riastradh Exp $
 
 #include "if_virt.h"
 #include "virtif_user.h"
+
+/*
+ * AmiBSDNet: hypercall: add (1) or remove (0) one Ethernet group address
+ * in the backend's multicast filter; returns an errno.
+ */
+#define VIFHYPER_MCAST VIF_BASENAME3(rumpcomp_,VIRTIF_BASE,_mcast)
+int	VIFHYPER_MCAST(struct virtif_user *, int, const uint8_t *);
 
 /*
  * Virtual interface.  Uses hypercalls to shovel packets back
@@ -73,6 +94,8 @@ struct virtif_sc {
 	int sc_num;
 	char *sc_linkstr;
 	size_t sc_linkstrlen;		/* AmiBSDNet: to free it */
+	bool sc_ethattached;		/* AmiBSDNet: ether_ifattach() done */
+	kmutex_t sc_mcastlock;		/* AmiBSDNet: list and filter agree */
 };
 
 static int  virtif_clone(struct if_clone *, int);
@@ -81,12 +104,72 @@ static int  virtif_unclone(struct ifnet *);
 struct if_clone VIF_CLONER =
     IF_CLONE_INITIALIZER(VIF_NAME, virtif_clone, virtif_unclone);
 
+/*
+ * AmiBSDNet: give the backend every single-address group of the
+ * interface's multicast list (add) or take them away (!add): when a
+ * backend comes and before it goes.  Address ranges are never given to
+ * the backend (see virtif_mcast()).  sc_mcastlock is held, so the list
+ * does not change meanwhile (every change comes through virtif_ioctl()).
+ */
+static void
+virtif_mcast_all(struct virtif_sc *sc, struct virtif_user *viu, int add)
+{
+	struct ethercom *ec = &sc->sc_ec;
+	struct ether_multistep step;
+	struct ether_multi *enm;
+	uint8_t (*list)[ETHER_ADDR_LEN];
+	int max, n = 0, i, error;
+
+	KASSERT(mutex_owned(&sc->sc_mcastlock));
+	if ((max = ec->ec_multicnt) <= 0)
+		return;
+	list = kmem_alloc(max * sizeof(*list), KM_SLEEP);
+	ETHER_LOCK(ec);
+	ETHER_FIRST_MULTI(step, ec, enm);
+	while (enm != NULL && n < max) {
+		if (memcmp(enm->enm_addrlo, enm->enm_addrhi,
+		    ETHER_ADDR_LEN) == 0)
+			memcpy(list[n++], enm->enm_addrlo, ETHER_ADDR_LEN);
+		ETHER_NEXT_MULTI(step, enm);
+	}
+	ETHER_UNLOCK(ec);
+	/* (the hypercall may sleep: not under ETHER_LOCK) */
+	for (i = 0; i < n; i++)
+		if ((error = VIFHYPER_MCAST(viu, add, list[i])) != 0)
+			aprint_error_ifnet(&ec->ec_if, "multicast %s of "
+			    "%s failed: %d\n", add ? "add" : "delete",
+			    ether_sprintf(list[i]), error);
+	kmem_free(list, max * sizeof(*list));
+}
+
+/*
+ * AmiBSDNet: one group joined or left (ENETRESET from ether_ioctl()).
+ * A range (from a join of INADDR_ANY or the unspecified IPv6 address,
+ * net/if_ethersubr.c:1302-1334) is refused: SANA-II drivers expand a
+ * range address by address (wifipi unit.c:1169-1208 builds a list of
+ * every address in it), so the IPv4 range of 2^23 addresses cannot be
+ * handed to them.
+ */
+static int
+virtif_mcast(struct virtif_sc *sc, int add, const uint8_t *lo,
+    const uint8_t *hi)
+{
+
+	if (sc->sc_viu == NULL)
+		return 0;	/* given to the next backend when it comes */
+	if (memcmp(lo, hi, ETHER_ADDR_LEN) != 0)
+		return add ? EOPNOTSUPP : 0;	/* (never given: nothing to
+						   take away) */
+	return VIFHYPER_MCAST(sc->sc_viu, add, lo);
+}
+
 static int
 virtif_create(struct ifnet *ifp)
 {
 	uint8_t enaddr[ETHER_ADDR_LEN] = { 0xb2, 0x0a, 0x00, 0x0b, 0x0e, 0x01 };
 	char enaddrstr[3*ETHER_ADDR_LEN];
 	struct virtif_sc *sc = ifp->if_softc;
+	struct virtif_user *viu;
 	int error;
 
 	if (sc->sc_viu)
@@ -96,18 +179,46 @@ virtif_create(struct ifnet *ifp)
 	enaddr[5] = sc->sc_num & 0xff;
 
 	if ((error = VIFHYPER_CREATE(sc->sc_linkstr,
-	    sc, enaddr, &sc->sc_viu)) != 0) {
+	    sc, enaddr, &viu)) != 0) {
 		printf("VIFHYPER_CREATE failed: %d\n", error);
 		return error;
 	}
 
-	ether_ifattach(ifp, enaddr);
+	if (!sc->sc_ethattached) {
+		ether_ifattach(ifp, enaddr);
+		sc->sc_ethattached = true;
+	} else if (memcmp(enaddr, CLLADDR(ifp->if_sadl),
+	    ETHER_ADDR_LEN) != 0) {
+		/* AmiBSDNet: linked again, to hardware with another address
+		   (as if_tap.c:536 changes the address of an attached ifnet) */
+		if_set_sadl(ifp, enaddr, ETHER_ADDR_LEN, false);
+	}
 	ether_snprintf(enaddrstr, sizeof(enaddrstr), enaddr);
 	aprint_normal_ifnet(ifp, "Ethernet address %s\n", enaddrstr);
+
+	/* AmiBSDNet: groups joined while there was no backend */
+	mutex_enter(&sc->sc_mcastlock);
+	virtif_mcast_all(sc, viu, 1);
+	sc->sc_viu = viu;
+	mutex_exit(&sc->sc_mcastlock);
 
 	IFQ_SET_READY(&ifp->if_snd);
 
 	return 0;
+}
+
+/* AmiBSDNet: the backend goes; the ifnet stays as it is */
+static void
+virtif_unlink(struct virtif_sc *sc)
+{
+	struct virtif_user *viu;
+
+	mutex_enter(&sc->sc_mcastlock);
+	viu = sc->sc_viu;
+	virtif_mcast_all(sc, viu, 0);
+	sc->sc_viu = NULL;
+	mutex_exit(&sc->sc_mcastlock);
+	VIFHYPER_DESTROY(viu);
 }
 
 static int
@@ -119,6 +230,7 @@ virtif_clone(struct if_clone *ifc, int num)
 
 	sc = kmem_zalloc(sizeof(*sc), KM_SLEEP);
 	sc->sc_num = num;
+	mutex_init(&sc->sc_mcastlock, MUTEX_DEFAULT, IPL_NONE);
 	ifp = &sc->sc_ec.ec_if;
 
 	if_initname(ifp, VIF_NAME, num);
@@ -155,6 +267,7 @@ fail:
 		if (sc->sc_linkstr != NULL)
 			kmem_free(sc->sc_linkstr, LINKSTRNUMLEN);
 #undef LINKSTRNUMLEN
+		mutex_destroy(&sc->sc_mcastlock);
 		kmem_free(sc, sizeof(*sc));
 		ifp->if_softc = NULL;
 	}
@@ -167,32 +280,25 @@ static int
 virtif_unclone(struct ifnet *ifp)
 {
 	struct virtif_sc *sc = ifp->if_softc;
-	int rv;
 
 	if (ifp->if_flags & IFF_UP)
 		return EBUSY;
 
-	/* AmiBSDNet: an interface whose link (driver) was never set up has
-	   no backend and was never ether_ifattach()ed */
-	if (sc->sc_viu == NULL) {
-		if_detach(ifp);
-		kmem_free(sc, sizeof(*sc));
-		return 0;
+	if (sc->sc_viu != NULL) {
+		virtif_stop(ifp, 1);
+		if_down(ifp);
+		virtif_unlink(sc);
 	}
 
-	if ((rv = VIFHYPER_DYING(sc->sc_viu)) != 0)
-		return rv;
-
-	virtif_stop(ifp, 1);
-	if_down(ifp);
-
-	VIFHYPER_DESTROY(sc->sc_viu);
-
-	ether_ifdetach(ifp);
+	/* AmiBSDNet: only an ifnet that was ether_ifattach()ed (a link
+	   string that never worked leaves it without) */
+	if (sc->sc_ethattached)
+		ether_ifdetach(ifp);
 	if_detach(ifp);
 
 	if (sc->sc_linkstr != NULL && sc->sc_linkstrlen)
 		kmem_free(sc->sc_linkstr, sc->sc_linkstrlen);
+	mutex_destroy(&sc->sc_mcastlock);
 	kmem_free(sc, sizeof(*sc));	/* the ifnet is part of it */
 
 	return 0;
@@ -256,7 +362,22 @@ virtif_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 		ifd = data;
 
 		if (ifd->ifd_cmd == IFLINKSTR_UNSET) {
-			panic("unset linkstr not implemented");
+			/*
+			 * AmiBSDNet: the backend (the SANA-II driver) goes
+			 * and the ifnet stays attached, as if_shmem.c does
+			 * (see the top of the file); NetBSD's if_virt.c
+			 * panics here, and a bsdsocket program can send this.
+			 */
+			if (sc->sc_viu != NULL) {
+				virtif_stop(ifp, 1);
+				virtif_unlink(sc);
+			}
+			if (sc->sc_linkstr != NULL && sc->sc_linkstrlen)
+				kmem_free(sc->sc_linkstr, sc->sc_linkstrlen);
+			sc->sc_linkstr = NULL;
+			sc->sc_linkstrlen = 0;
+			rv = 0;
+			break;
 		} else if (ifd->ifd_cmd != 0) {
 			rv = ENOTTY;
 			break;
@@ -281,6 +402,7 @@ virtif_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 		if (rv) {
 			kmem_free(sc->sc_linkstr, ifd->ifd_len);
 			sc->sc_linkstr = NULL;	/* AmiBSDNet: no dangling */
+			sc->sc_linkstrlen = 0;
 			break;
 		}
 
@@ -288,9 +410,38 @@ virtif_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 		if (rv) {
 			kmem_free(sc->sc_linkstr, ifd->ifd_len);
 			sc->sc_linkstr = NULL;
+			sc->sc_linkstrlen = 0;
 		}
 		break;
 #endif /* RUMP_VIF_LINKSTR */
+	case SIOCADDMULTI:
+	case SIOCDELMULTI:
+		/*
+		 * AmiBSDNet: the list is ethercom's (it exists from
+		 * ether_ifattach() on, also without a backend); a change is
+		 * given to the backend.  A join the backend refuses is
+		 * taken off the list again, so that list and filter agree.
+		 */
+		if (!sc->sc_ethattached) {
+			rv = ENXIO;
+			break;
+		}
+		mutex_enter(&sc->sc_mcastlock);
+		rv = ether_ioctl(ifp, cmd, data);
+		if (rv == ENETRESET) {
+			const struct sockaddr *sa =
+			    ifreq_getaddr(cmd, (struct ifreq *)data);
+			uint8_t lo[ETHER_ADDR_LEN], hi[ETHER_ADDR_LEN];
+
+			rv = ether_multiaddr(sa, lo, hi);
+			if (rv == 0)
+				rv = virtif_mcast(sc, cmd == SIOCADDMULTI,
+				    lo, hi);
+			if (rv != 0 && cmd == SIOCADDMULTI)
+				(void)ether_delmulti(sa, &sc->sc_ec);
+		}
+		mutex_exit(&sc->sc_mcastlock);
+		break;
 	default:
 		if (!sc->sc_linkstr)
 			rv = ENXIO;
@@ -317,6 +468,12 @@ virtif_start(struct ifnet *ifp)
 	struct mbuf *m, *m0;
 	struct iovec io[LB_SH];
 	int i;
+
+	/* AmiBSDNet: no backend (link string unset): nothing can be sent */
+	if (sc->sc_viu == NULL) {
+		IFQ_PURGE(&ifp->if_snd);
+		return;
+	}
 
 	ifp->if_flags |= IFF_OACTIVE;
 
@@ -352,8 +509,11 @@ static void
 virtif_stop(struct ifnet *ifp, int disable)
 {
 
-	/* XXX: VIFHYPER_STOP() */
-
+	/* AmiBSDNet: the host side needs no call: with IFF_RUNNING clear,
+	   VIF_DELIVERPKT() drops every frame the driver delivers, and
+	   ether_output() refuses to send (ENETDOWN, net/if_ethersubr.c:
+	   "(IFF_UP | IFF_RUNNING) != (IFF_UP | IFF_RUNNING)"); the driver
+	   stays open until VIFHYPER_DESTROY */
 	ifp->if_flags &= ~IFF_RUNNING;
 }
 

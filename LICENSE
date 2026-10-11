@@ -3,9 +3,12 @@ AmiBSDNet
 Required Notice: Copyright (c) 2026 zombu4 (https://github.com/zombu4/AmiBSDNet)
 
 This licence covers the original work in this repository (src/, tools/,
-docs/ and future AmiBSDNet components).  It does not cover NetBSD source
-code, which is fetched separately by tools/bootstrap.py and remains under
-NetBSD's own licence terms (BSD-style), nor other third-party components.
+tests/, dist/ and future AmiBSDNet components).  It does not cover NetBSD
+source code, which is fetched separately by tools/bootstrap.py and remains
+under NetBSD's own licence terms (BSD-style; the notices of the NetBSD code
+in the binary package are in dist/Docs/NetBSD.txt), files here derived from
+NetBSD code, which keep their NetBSD copyright notices (src/kern/if_virt.c),
+nor other third-party components.
 
 # PolyForm Noncommercial License 1.0.0
 

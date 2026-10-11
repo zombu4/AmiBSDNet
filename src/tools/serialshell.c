@@ -17,7 +17,14 @@
  * handler (the Shell gets end-of-file); STATUS says whether it runs.
  *
  * On the terminal: line editing with Backspace/Delete and Ctrl-X (line),
- * Ctrl-C breaks the running command, Ctrl-\ is end-of-file.
+ * Ctrl-C breaks the running command, Ctrl-\ is end-of-file.  A bell
+ * (Ctrl-G) means the key was not taken: the line is full, or (Return)
+ * the finished lines no program has read yet fill the buffer; the line
+ * stays, Return again once the program has read them.
+ *
+ * SECURITY: there is no login and no password.  Whoever is connected to
+ * the serial port gets a Shell with every right of the Amiga's user:
+ * start it only on a cable you control.
  */
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -39,8 +46,9 @@ struct IntuitionBase *IntuitionBase;
 struct GfxBase *GfxBase;
 struct DosLibrary *DOSBase;
 
+#include "amibsdnet_version.h"	/* build/gen, from tools/version.py */
 static const char verstag[] __attribute__((used)) =
-    "\0$VER: SerialShell 0.8.2 (10.10.2026)";
+    AMIBSDNET_VERSTAG("SerialShell");
 
 #define	PORTNAME	"AmiBSDNet.SerialShell"
 #define	DEVNAME		"SERSH"
@@ -103,13 +111,24 @@ static UBYTE rdbyte;
 static int rdpending, trpending;
 
 static volatile int opencount;	/* open SERSH: handles */
-static int raw;			/* SetMode(): raw, no echo, no editing */
+static int raw;			/* SetMode(): raw input, no echo, no editing */
 static volatile int stopping;
-/* who gets Ctrl-C: the port of the process reading (or the one
-   ACTION_CHANGE_SIGNAL named); forgotten when that process closes its
-   handle, so a process that is gone is never signalled */
-static struct MsgPort *breakport;
 static struct Task *handlertask;
+
+/*
+ * Each open SERSH: handle (its fh_Arg1 points to one) has the port to
+ * signal for Ctrl-C.  "Normally the process that opened the file handle
+ * receives the break signal"; ACTION_CHANGE_SIGNAL (ARG1 the fh_Arg1,
+ * ARG2 the MsgPort of the process to signal) changes it
+ * (downloads/sources/AmigaMail_Vol2/node0065.html).  Ctrl-C goes to the
+ * handle the last READ came on; a closed handle is forgotten, and the
+ * port's task is looked up in exec's task lists before it is signalled.
+ */
+struct handle {
+	struct handle *next;
+	struct MsgPort *breakport;
+};
+static struct handle *handles, *breakh;
 
 static char line[LINEMAX];	/* cooked: the line being typed */
 static int linelen;
@@ -147,6 +166,9 @@ ser_write(const char *s, LONG n, int translate)
 			}
 			buf[k++] = c;
 		}
+		/* (no CMD_WRITE of 0 bytes: a chunk of font shifts only) */
+		if (k == 0)
+			continue;
 		wr->IOSer.io_Command = CMD_WRITE;
 		wr->IOSer.io_Data = buf;
 		wr->IOSer.io_Length = k;
@@ -168,13 +190,28 @@ static void
 start_read(void)
 {
 
-	if (rdpending || stopping)
+	/* (raw input with a full buffer: no read; serve_reads() calls this
+	   again once READs have taken some) */
+	if (rdpending || stopping || (raw && rawlen >= RAWMAX))
 		return;
 	rd->IOSer.io_Command = CMD_READ;
 	rd->IOSer.io_Data = &rdbyte;
 	rd->IOSer.io_Length = 1;
 	SendIO((struct IORequest *)rd);
 	rdpending = 1;
+}
+
+/* the rest of a buffer to its start: the regions overlap, and CopyMem()
+   says "Arbitrary overlapping copies are not supported"
+   (downloads/sources/NDK3.2/Autodocs/exec.doc, CAUTION), so byte by
+   byte, upwards */
+static void
+shift_down(char *buf, LONG from, LONG n)
+{
+	LONG i;
+
+	for (i = 0; i < n; i++)
+		buf[i] = buf[from + i];
 }
 
 static int
@@ -200,14 +237,12 @@ serve_reads(void)
 			n = rawlen < want ? rawlen : want;
 			CopyMem(rawbuf, dst, n);
 			rawlen -= n;
-			if (rawlen)
-				CopyMem(rawbuf + n, rawbuf, rawlen);
+			shift_down((char *)rawbuf, n, rawlen);
 		} else if (readylen > 0) {
 			n = readylen < want ? readylen : want;
 			CopyMem(ready, dst, n);
 			readylen -= n;
-			if (readylen)
-				CopyMem(ready + n, ready, readylen);
+			shift_down(ready, n, readylen);
 		} else {
 			eofpending = 0;		/* Ctrl-\: one end-of-file */
 			n = 0;
@@ -227,16 +262,49 @@ serve_reads(void)
 		ReplyPkt(waitpkt, DOSTRUE, 0);
 		waitpkt = NULL;
 	}
+	/* room again in the raw buffer: reading goes on (start_read()) */
+	start_read();
 }
 
 /* Ctrl-C to the reading process (a port that signals a task) */
+static int
+task_in(struct List *l, struct Task *t)
+{
+	struct Node *n;
+
+	for (n = l->lh_Head; n->ln_Succ; n = n->ln_Succ)
+		if (n == &t->tc_Node)
+			return 1;
+	return 0;
+}
+
 static void
 send_break(void)
 {
+	struct MsgPort *mp;
+	struct Task *t;
 
-	if (breakport && (breakport->mp_Flags & PF_ACTION) == PA_SIGNAL &&
-	    breakport->mp_SigTask)
-		Signal((struct Task *)breakport->mp_SigTask, SIGBREAKF_CTRL_C);
+	if (breakh == NULL || (mp = breakh->breakport) == NULL)
+		return;
+	/* only a task that exists now (the ready or the waiting list; this
+	   handler is the one running) */
+	Forbid();
+	if ((mp->mp_Flags & PF_ACTION) == PA_SIGNAL &&
+	    (t = (struct Task *)mp->mp_SigTask) != NULL &&
+	    (task_in(&SysBase->TaskWait, t) || task_in(&SysBase->TaskReady, t)))
+		Signal(t, SIGBREAKF_CTRL_C);
+	Permit();
+}
+
+static struct handle *
+find_handle(LONG arg1)
+{
+	struct handle *h;
+
+	for (h = handles; h; h = h->next)
+		if ((LONG)h == arg1)
+			return h;
+	return NULL;
 }
 
 /* a byte from the terminal */
@@ -253,6 +321,8 @@ got_byte(UBYTE c)
 		return;
 	}
 	if (raw) {
+		/* (start_read() and serial_done() read no more than fits:
+		   the rest waits in the device's buffer) */
 		if (rawlen < RAWMAX)
 			rawbuf[rawlen++] = c;
 		return;
@@ -278,12 +348,16 @@ got_byte(UBYTE c)
 	switch (c) {
 	case '\r':
 	case '\n':
-		ser_puts("\r\n");
-		if (readylen + linelen + 1 <= (int)sizeof(ready)) {
-			CopyMem(line, ready + readylen, linelen);
-			readylen += linelen;
-			ready[readylen++] = '\n';
+		if (readylen + linelen + 1 > (int)sizeof(ready)) {
+			/* no room: the line stays, a bell, Return again
+			   once the program has read the earlier lines */
+			ser_puts("\a");
+			break;
 		}
+		ser_puts("\r\n");
+		CopyMem(line, ready + readylen, linelen);
+		readylen += linelen;
+		ready[readylen++] = '\n';
 		linelen = 0;
 		break;
 	case 8:
@@ -303,9 +377,12 @@ got_byte(UBYTE c)
 		eofpending = 1;
 		break;
 	default:
-		if (c >= 32 && c != 155 && linelen < LINEMAX - 1) {
-			line[linelen++] = c;
-			ser_write((char *)&c, 1, 0);
+		if (c >= 32 && c != 155) {
+			if (linelen < LINEMAX - 1) {
+				line[linelen++] = c;
+				ser_write((char *)&c, 1, 0);
+			} else
+				ser_puts("\a");	/* the line is full */
 		}
 		break;
 	}
@@ -316,12 +393,23 @@ static void
 serial_done(void)
 {
 	UBYTE buf[64];
-	LONG n, i;
+	LONG n, i, err;
+
+	static int rderrs;
 
 	WaitIO((struct IORequest *)rd);
 	rdpending = 0;
-	if (rd->IOSer.io_Error == 0 && rd->IOSer.io_Actual == 1)
+	/* also after an error: "io_Actual may always be non-zero and the
+	   buffer may contain valid data" (serial.doc CMD_READ, RESULTS) */
+	if (rd->IOSer.io_Actual == 1)
 		got_byte(rdbyte);
+	/* a read that keeps failing (a break or framing errors on a line
+	   with nothing connected) must not make this handler spin */
+	if (rd->IOSer.io_Error != 0) {
+		if (++rderrs > 3)
+			Delay(10);
+	} else
+		rderrs = 0;
 	for (;;) {
 		wr->IOSer.io_Command = SDCMD_QUERY;
 		if (DoIO((struct IORequest *)wr) != 0 ||
@@ -329,13 +417,21 @@ serial_done(void)
 			break;
 		if (n > (LONG)sizeof(buf))
 			n = sizeof(buf);
+		/* raw input: no more than the buffer takes, the rest stays
+		   in the device's buffer */
+		if (raw && n > RAWMAX - rawlen)
+			n = RAWMAX - rawlen;
+		if (n <= 0)
+			break;
 		rd->IOSer.io_Command = CMD_READ;
 		rd->IOSer.io_Data = buf;
 		rd->IOSer.io_Length = n;
-		if (DoIO((struct IORequest *)rd) != 0)
-			break;
-		for (i = 0; i < (LONG)rd->IOSer.io_Actual; i++)
+		err = DoIO((struct IORequest *)rd);
+		/* (what it read before an error counts too) */
+		for (i = 0; i < (LONG)rd->IOSer.io_Actual && i < n; i++)
 			got_byte(buf[i]);
+		if (err != 0)
+			break;
 	}
 	start_read();
 	serve_reads();
@@ -346,6 +442,7 @@ packet(struct DosPacket *dp)
 {
 	struct FileHandle *fh;
 	struct pkt *p;
+	struct handle *h;
 
 	switch (dp->dp_Type) {
 	case ACTION_FINDINPUT:
@@ -355,23 +452,47 @@ packet(struct DosPacket *dp)
 			ReplyPkt(dp, DOSFALSE, ERROR_OBJECT_IN_USE);
 			return;
 		}
+		if ((h = AllocVec(sizeof(*h), MEMF_ANY)) == NULL) {
+			ReplyPkt(dp, DOSFALSE, ERROR_NO_FREE_STORE);
+			return;
+		}
+		/* the opener gets Ctrl-C (dp_Port: the port the packet is
+		   replied to, its sender's) */
+		h->breakport = dp->dp_Port;
+		h->next = handles;
+		handles = h;
 		fh = (struct FileHandle *)BADDR(dp->dp_Arg1);
-		fh->fh_Arg1 = 1;
-		fh->fh_Port = (struct MsgPort *)DOSTRUE;	/* interactive */
+		fh->fh_Arg1 = (LONG)h;
+		/* the field at this offset is fh_Interactive in the NDK's
+		   dos/dosextens.i: "Boolean; TRUE if interactive handle" */
+		fh->fh_Port = (struct MsgPort *)DOSTRUE;
 		opencount++;
 		ReplyPkt(dp, DOSTRUE, 0);
 		return;
-	case ACTION_END:
-		if (opencount > 0)
-			opencount--;
-		/* the break target closes: it may be gone soon */
-		if (dp->dp_Port == breakport)
-			breakport = NULL;
+	case ACTION_END: {
+		struct handle **hp;
+
+		/* ARG1 is the fh_Arg1 for ACTION_END, ACTION_READ and
+		   ACTION_WRITE (AmigaMail_Vol2/node005F.html).  The closed
+		   handle is forgotten, and with it its break target */
+		for (hp = &handles; *hp; hp = &(*hp)->next)
+			if ((LONG)*hp == dp->dp_Arg1) {
+				h = *hp;
+				*hp = h->next;
+				if (breakh == h)
+					breakh = NULL;
+				FreeVec(h);
+				if (opencount > 0)
+					opencount--;
+				break;
+			}
 		ReplyPkt(dp, DOSTRUE, 0);
 		return;
+	}
 	case ACTION_READ:
-		if (!breakport)
-			breakport = dp->dp_Port;
+		/* Ctrl-C to the handle read last */
+		if ((h = find_handle(dp->dp_Arg1)) != NULL)
+			breakh = h;
 		if ((p = AllocVec(sizeof(*p), MEMF_ANY)) == NULL) {
 			ReplyPkt(dp, -1, ERROR_NO_FREE_STORE);
 			return;
@@ -384,19 +505,39 @@ packet(struct DosPacket *dp)
 		return;
 	case ACTION_WRITE:
 		/* (the Ctrl-C target comes from READs only: a background job
-		   that writes must not take it from the Shell) */
-		ser_write((const char *)dp->dp_Arg2, dp->dp_Arg3, !raw);
-		ReplyPkt(dp, dp->dp_Arg3, 0);
+		   that writes must not take it from the Shell).  The output
+		   is translated in raw mode too: raw mode is about the input,
+		   "Keyboard console input is not automatically filtered,
+		   buffered, or echoed" (downloads/sources/AmigaOS_wiki/
+		   AmigaDOS_Packets.wiki, the CON: raw mode) */
+		if (dp->dp_Arg3 > 0)
+			ser_write((const char *)dp->dp_Arg2, dp->dp_Arg3, 1);
+		ReplyPkt(dp, dp->dp_Arg3 > 0 ? dp->dp_Arg3 : 0, 0);
 		return;
 	case ACTION_SCREEN_MODE:
+		/* ARG1 one: raw, zero: cooked (AmigaMail_Vol2/node0065.html;
+		   the wiki's example sends DOSTRUE for raw) */
 		raw = dp->dp_Arg1 != 0;
+		/* (a raw buffer that was full may have room again) */
+		start_read();
 		ReplyPkt(dp, DOSTRUE, 0);
 		return;
 	case ACTION_CHANGE_SIGNAL: {
-		/* Res2 is the old one, so a program can put it back */
-		struct MsgPort *old = breakport;
+		/* ARG1 the fh_Arg1, ARG2 the MsgPort to signal
+		   (AmigaMail_Vol2/node0065.html).  Res2 is the old one, and
+		   an ARG2 of 0 keeps it, as the AROS console handler does
+		   (downloads/sources/AROS/console_handler/con_handler.c,
+		   ACTION_CHANGE_SIGNAL; AROS is a reimplementation, the
+		   NDK 3.2 does not document Res2 here) */
+		struct MsgPort *old;
 
-		breakport = (struct MsgPort *)dp->dp_Arg2;
+		if ((h = find_handle(dp->dp_Arg1)) == NULL) {
+			ReplyPkt(dp, DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+			return;
+		}
+		old = h->breakport;
+		if (dp->dp_Arg2)
+			h->breakport = (struct MsgPort *)dp->dp_Arg2;
 		ReplyPkt(dp, DOSTRUE, (LONG)old);
 		return;
 	}
@@ -413,7 +554,10 @@ packet(struct DosPacket *dp)
 		trpending = 1;
 		return;
 	case ACTION_DISK_INFO: {
-		/* (programs that ask a console for its window get none) */
+		/* a console returns its window in id_VolumeNode, "some
+		   consoles can return a NULL Window pointer (for example, an
+		   AUTO CON: or a AUX: console)" (AmigaMail_Vol2/
+		   node0065.html): this one has none */
 		struct InfoData *id = (struct InfoData *)BADDR(dp->dp_Arg1);
 
 		if (id)
@@ -439,8 +583,8 @@ spawner(void)
 	BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 	int i;
 
-	/* as the Workbench Shell icon does: NewShell with SERSH: as its
-	   "window" (it opens SERSH: itself, for input and output) */
+	/* NewShell with SERSH: as its window: the new Shell opens SERSH:
+	   (the handler counts the opens: opencount) */
 	if (SystemTags((CONST_STRPTR)"NewShell " DEVNAME ":", SYS_Input, in,
 	    SYS_Output, out, SYS_Asynch, TRUE, NP_Name,
 	    (ULONG)"SerialShell starter", TAG_DONE) != 0) {
@@ -468,7 +612,7 @@ spawn_shell(void)
 	if (before++)
 		ser_puts("\r\n");	/* after "Process n ending" */
 	spawner_running = 1;
-	breakport = NULL;
+	breakh = NULL;
 	raw = 0;
 	linelen = readylen = rawlen = eofpending = 0;
 	if (CreateNewProcTags(NP_Entry, (ULONG)spawner,
@@ -480,12 +624,37 @@ spawn_shell(void)
 	return 0;
 }
 
+/*
+ * The DOS list, write-locked, from this handler: "you should never call
+ * this function with LDF_WRITE, since it can deadlock you (if someone has
+ * it read-locked and they're trying to send you a packet).  Use
+ * AttemptLockDosList() instead, and effectively busy-wait with delays"
+ * (dos.doc LockDosList); while it fails, "check for messages at your
+ * filesystem port (don't wait!) and try the AttemptLockDosList() again"
+ * (dos.doc AddDosEntry).  "In V36 through V39.23 dos, this would return
+ * NULL or 0x00000001 for failure.  Fixed in V39.24 dos"
+ * (downloads/sources/NDK3.2/Autodocs/dos.doc:569-570, AttemptLockDosList
+ * BUGS): both count as failure, for the dos.library V37 this program
+ * opens (main(), OpenLibrary("dos.library", 37)).
+ */
+static void
+lock_doslist(void)
+{
+	struct Message *m;
+
+	while ((ULONG)AttemptLockDosList(LDF_DEVICES | LDF_WRITE) <= 1) {
+		while ((m = GetMsg(dosport)) != NULL)
+			packet((struct DosPacket *)m->mn_Node.ln_Name);
+		Delay(1);
+	}
+}
+
 static void
 remove_dosentry(void)
 {
 
 	if (dosentry) {
-		LockDosList(LDF_DEVICES | LDF_WRITE);
+		lock_doslist();
 		RemDosEntry(dosentry);
 		UnLockDosList(LDF_DEVICES | LDF_WRITE);
 		FreeDosEntry(dosentry);
@@ -513,6 +682,7 @@ handler(const char *device, ULONG unit, ULONG baud)
 	ULONG dosmask, sermask, timemask, sigs;
 	int rv = RETURN_FAIL, opened = 0, timeropen = 0, gtropen = 0;
 	int gtrpending = 0;
+	LONG i;
 	struct timerequest *gtr = NULL;	/* the end of the start */
 
 	oldwin = me->pr_WindowPtr;
@@ -585,7 +755,11 @@ handler(const char *device, ULONG unit, ULONG baud)
 	    NULL)
 		goto out;
 	dosentry->dol_Task = dosport;
-	if (!AddDosEntry(dosentry)) {
+	/* (locked first, as dos.doc AddDosEntry asks of handlers) */
+	lock_doslist();
+	i = AddDosEntry(dosentry);
+	UnLockDosList(LDF_DEVICES | LDF_WRITE);
+	if (!i) {
 		FreeDosEntry(dosentry);
 		dosentry = NULL;
 		PutStr((CONST_STRPTR)"SerialShell: " DEVNAME ": exists "
@@ -677,6 +851,13 @@ handler(const char *device, ULONG unit, ULONG baud)
 
 out:
 	remove_dosentry();
+	while (handles) {
+		struct handle *h = handles;
+
+		handles = h->next;
+		FreeVec(h);
+	}
+	breakh = NULL;
 	if (rdpending) {
 		AbortIO((struct IORequest *)rd);
 		WaitIO((struct IORequest *)rd);

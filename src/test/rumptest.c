@@ -3,6 +3,9 @@
  * TCP data over lo0 (127.0.0.1).  Output goes to the Shell's Output();
  * DH0:done is written at the end because rump threads keep running, so
  * the program cannot return to the Shell.
+ *
+ *   tools/link_test.sh src/test/rumptest.c build/rumptest
+ *   python -I tools/run_emu.py build/rumptest
  */
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -59,6 +62,17 @@ fail(const char *what)
 }
 
 static int
+same(const void *a, const void *b, long n)
+{
+	const unsigned char *x = a, *y = b;
+
+	while (n-- > 0)
+		if (*x++ != *y++)
+			return 0;
+	return 1;
+}
+
+static int
 tcp_loopback_test(void)
 {
 	static const char msg[] = "hello from NetBSD TCP on AmigaOS";
@@ -66,7 +80,7 @@ tcp_loopback_test(void)
 	char buf[64];
 	unsigned int slen;
 	int ls, cs, as;
-	long n;
+	long n, got;
 
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_len = sizeof(sin);
@@ -96,10 +110,17 @@ tcp_loopback_test(void)
 	if (rump___sysimpl_sendto(cs, msg, sizeof(msg), 0, NULL, 0) !=
 	    (long)sizeof(msg))
 		return fail("send");
-	n = rump___sysimpl_recvfrom(as, buf, sizeof(buf), 0, NULL, NULL);
-	if (n != (long)sizeof(msg))
-		return fail("recv");
-	P("received %ld bytes: \"%s\"\n", n, buf);
+	/* TCP may deliver it in parts */
+	for (got = 0; got < (long)sizeof(msg); got += n)
+		if ((n = rump___sysimpl_recvfrom(as, buf + got,
+		    sizeof(buf) - got, 0, NULL, NULL)) <= 0)
+			return fail("recv");
+	if (got != (long)sizeof(msg) || !same(buf, msg, sizeof(msg))) {
+		P("FAIL: received %ld bytes that differ from what was sent\n",
+		    got);
+		return 10;
+	}
+	P("received %ld bytes: \"%s\"\n", got, buf);
 
 	rump___sysimpl_close(as);
 	rump___sysimpl_close(cs);
@@ -118,7 +139,7 @@ test_proc(void)
 		goto out;
 	}
 	amiga_rump_notifytask = parent;
-	P("amiga-tcpip: starting NetBSD rump kernel\n");
+	P("rumptest: starting NetBSD rump kernel\n");
 	if ((rv = rump_init()) != 0) {
 		P("FAIL: rump_init returned %d\n", rv);
 		result = 20;
@@ -148,7 +169,7 @@ _start(void)
 	amiga_rump_debug = 1;
 	log = Open((CONST_STRPTR)"DH0:rump.log", MODE_NEWFILE);
 	amiga_rump_loginit((long)(log ? log : Output()));
-	amiga_rump_printf("amiga-tcpip: loaded at %p\n", (void *)_start);
+	amiga_rump_printf("rumptest: loaded at %p\n", (void *)_start);
 	crash_install();
 
 	/* RUMP_USE_CTOR: rump components register from constructors */

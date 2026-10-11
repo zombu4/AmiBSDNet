@@ -4,6 +4,7 @@
 set -e
 python -I "$(dirname "$0")/gen/gen_inline.py" >/dev/null
 cd "$(dirname "$0")/.."
+python -I tools/version.py
 T=toolchain/opt/bin
 src=$1
 out=$2

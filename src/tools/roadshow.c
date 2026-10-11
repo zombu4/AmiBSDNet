@@ -1,19 +1,32 @@
 /*
- * Removing Roadshow completely (NetCtrl FINDROADSHOW / REMOVEROADSHOW,
- * the installer's "Remove Roadshow" choice).
+ * Removing Roadshow (NetCtrl FINDROADSHOW / REMOVEROADSHOW, the
+ * installer's "Remove Roadshow" choice).
  *
- * Every mounted volume is searched, every drawer, for what belongs to
- * Roadshow (also its trial version):
- *   - drawers and files whose name contains "Roadshow" (with their icons)
- *   - its commands (AddNetInterface, RoadshowControl, ...) and scripts
- *     (Network-Startup...), the NetInterfaces drawer
- *   - every bsdsocket.library on disk (AmiBSDNet's lives in memory only)
- *   - its files in DEVS:Internet, except the hosts file AmiBSDNet uses
- *   - what an earlier switch parked in SYS:Storage/AmiBSDNet-Disabled
- * Nothing on a volume called Work, or in a drawer called Work, is
- * touched: that is where the Roadshow installer is kept.  Removing
- * deletes for good.  The startup-script lines are removed by
- * otherstacks_apply(OTHERS_REMOVE).
+ * Only the files of the Roadshow 68k archive are looked at, where its
+ * installation puts them.  The list is the one of a Roadshow installer
+ * script that copies the archive's Workbench/ drawer to SYS: and deletes
+ * the same files again: downloads/sources/morphos-roadshow-installer/
+ * Install_Roadshow_MorphOS (labels c:, devs:, libs:, s:, locale:,
+ * firewall:, ppp:; destdir="SYS:").  Nothing else is searched: no other
+ * volume or drawer, so the drawer holding the Roadshow installer (Work,
+ * say) and every user file stay.
+ *
+ *   - Roadshow's own commands, its PPP drivers and catalogs: deleted
+ *   - its settings and scripts (DEVS:NetInterfaces, DEVS:Internet but
+ *     the hosts and services files AmiBSDNet uses, ENVARC:Roadshow, S:Network-Startup,
+ *     the firewall and PPP scripts): moved to SYS:Storage/AmiBSDNet-
+ *     Roadshow, so nothing the user wrote is lost
+ *   - LIBS:bsdsocket.library and LIBS:usergroup.library and their
+ *     catalogs (names other stacks may use too): moved there as well,
+ *     and only when no other TCP/IP stack is installed
+ *   - the commands of that list with general names (ping, ftp, arp,
+ *     traceroute, wget, tcpdump, ipf...) are not touched: AmiBSDNet's own
+ *     C:Ping, or another program, may have the name
+ *   - in S:Startup-Sequence and S:User-Startup, comments that mention
+ *     Roadshow (a copy of the file is kept as <name>.amibsdnet-rs first;
+ *     its command lines are otherstacks_apply(OTHERS_REMOVE)'s)
+ *
+ * Ctrl-C stops it between two files.
  */
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -24,28 +37,60 @@
 #include <proto/dos.h>
 
 #include "roadshow.h"
+#include "otherstacks.h"
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
 
-#define	MAXDEPTH	16
-#define	MAXFOUND	400
 #define	PATHMAX		256
+#define	BACKUP		"SYS:Storage/AmiBSDNet-Roadshow"
 #define	PARKING		"SYS:Storage/AmiBSDNet-Disabled"
 
-/* Roadshow's commands (names only Roadshow uses) */
-static const char *const tools[] = {
-	"AddNetInterface", "AddNetRoute", "ConfigureNetInterface",
-	"DeleteNetRoute", "GetNetStatus", "NetLogViewer", "NetShutdown",
-	"RemoveNetInterface", "RoadshowControl", "ShowNetStatus",
-	"SampleNetSpeed", NULL
+/* deleted: commands with names only Roadshow uses (Install_Roadshow_MorphOS
+   c: delete list), its PPP drivers (ppp:), its own catalogs (locale:) */
+static const char *const del_files[] = {
+	"SYS:C/AddNetInterface", "SYS:C/AddNetRoute",
+	"SYS:C/ConfigureNetInterface", "SYS:C/DeleteNetRoute",
+	"SYS:C/GetNetStatus", "SYS:C/NetLogViewer", "SYS:C/NetShutdown",
+	"SYS:C/RemoveNetInterface", "SYS:C/RoadshowControl",
+	"SYS:C/SampleNetSpeed", "SYS:C/ShowNetStatus",
+	"SYS:C/ppp_connector", "SYS:C/ppp_dialer", "SYS:C/ppp_sample",
+	"SYS:Devs/Networks/ppp-serial.device",
+	"SYS:Devs/Networks/ppp-ethernet.device",
+	"SYS:Locale/Catalogs/deutsch/roadshow.catalog",
+	"SYS:Locale/Catalogs/deutsch/ppp-serial.catalog",
+	"SYS:Locale/Catalogs/deutsch/ppp-ethernet.catalog",
+	NULL
 };
 
-/* what AmiBSDNet keeps of DEVS:Internet */
-static const char *const keep_internet[] = { "hosts", "hosts.info", NULL };
+/* moved to BACKUP: settings and scripts (s:, firewall:, ppp:, devs:; the
+   settings RoadshowControl saves are read from envarc:roadshow there) */
+static const char *const move_items[] = {
+	"SYS:S/Network-Startup", "SYS:S/Check-Firewall-Rules",
+	"SYS:S/Start-Firewall", "SYS:S/Stop-Firewall", "SYS:S/IPF",
+	"SYS:S/PPP-Configurations", "SYS:Devs/NetInterfaces",
+	"ENVARC:Roadshow", NULL
+};
 
-static char **found;
-static int nfound, ovf;
+/* moved to BACKUP only when no other stack is installed (libs:, locale:) */
+static const char *const shared_items[] = {
+	"SYS:Libs/bsdsocket.library", "SYS:Libs/usergroup.library",
+	"SYS:Locale/Catalogs/deutsch/bsdsocket.catalog",
+	"SYS:Locale/Catalogs/deutsch/usergroup.catalog",
+	NULL
+};
+
+/* Roadshow's settings drawer (devs:): all of it but what AmiBSDNet uses */
+#define	INTERNET	"SYS:Devs/Internet"
+static const char *const keep_internet[] = {
+	"hosts", "hosts.info",		/* netdb.c HOSTS_FILE */
+	"services", "services.info",	/* netdb.c SERVICES_FILE */
+	NULL
+};
+
+/* what an earlier switch parked of Roadshow (otherstacks.c: its WBStartup
+   items, named as otherstacks.c finds them) */
+static const char *const parked_wb[] = { "NetLogViewer", "Roadshow", NULL };
 
 static int
 lc(int c)
@@ -105,8 +150,22 @@ scpy(char *d, const char *s, int n)
 	*d = '\0';
 }
 
+/* a + b into d; 0 if it does not fit (a cut path would be another one) */
 static int
-Lock_exists(const char *path)
+join(char *d, const char *a, const char *b, int n)
+{
+	int la = slen(a);
+
+	if (la + slen(b) >= n)
+		return 0;
+	if (d != a)
+		scpy(d, a, n);
+	scpy(d + la, b, n - la);
+	return 1;
+}
+
+static int
+exists(const char *path)
 {
 	BPTR l = Lock((CONST_STRPTR)path, ACCESS_READ);
 
@@ -115,248 +174,97 @@ Lock_exists(const char *path)
 	return l != 0;
 }
 
-/* name without a trailing ".info" (for icons) */
-static void
-base_name(const char *name, char *out, int n)
-{
-	int l = slen(name);
-
-	scpy(out, name, n);
-	if (l > 5 && eq(name + l - 5, ".info") && l - 5 < n)
-		out[l - 5] = '\0';
-}
-
-/* AmiBSDNet's own (its settings mention Roadshow): never touched - but
-   the drawer an earlier switch parked Roadshow in is Roadshow's */
 static int
-ours(const char *name)
+ctrl_c(void)
 {
 
-	return starts(name, "AmiBSDNet") && !eq(name, "AmiBSDNet-Disabled");
+	return (CheckSignal(SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0;
 }
 
-/* does this entry belong to Roadshow? */
-static int
-is_roadshow(const char *name, int dir, int indevsinternet)
-{
-	char b[108];
-	int i;
+/* ------------------------------------------------------------------------
+ * the list for the caller
+ */
 
-	base_name(name, b, sizeof(b));
-	if (contains(b, "Roadshow"))
-		return 1;
-	if (eq(b, "NetInterfaces"))		/* (also its icon) */
-		return 1;
-	if (!dir && eq(name, "bsdsocket.library"))
-		return 1;
-	if (starts(b, "Network-Startup"))
-		return 1;
-	for (i = 0; tools[i]; i++)
-		if (eq(b, tools[i]))
-			return 1;
-	/* its settings in DEVS:Internet itself (found by lock, not by
-	   name: other drawers called Internet are not Roadshow's), not the
-	   hosts file */
-	if (!dir && indevsinternet) {
-		for (i = 0; keep_internet[i]; i++)
-			if (eq(name, keep_internet[i]))
-				return 0;
-		return 1;
-	}
-	return 0;
-}
+static char *rlist;
+static int rlistsize, rll, rcount, rfails, rstopped;
 
 static void
-add_found(const char *path, int dir)
+note(const char *path, const char *what)
 {
-	int l = slen(path);
+	int l = slen(path) + slen(what);
 
-	if (nfound >= MAXFOUND) {
-		ovf = 1;
-		return;
+	if (rlist && rll + l + 2 < rlistsize) {
+		scpy(rlist + rll, path, rlistsize - rll);
+		rll += slen(rlist + rll);
+		scpy(rlist + rll, what, rlistsize - rll);
+		rll += slen(rlist + rll);
+		rlist[rll++] = '\n';
+		rlist[rll] = '\0';
 	}
-	if ((found[nfound] = AllocVec(l + 2, MEMF_ANY)) == NULL) {
-		ovf = 1;
-		return;
-	}
-	found[nfound][0] = dir ? 'D' : 'F';
-	scpy(found[nfound] + 1, path, l + 1);
-	nfound++;
 }
 
-/* the drawers of the other TCP/IP stacks: their own bsdsocket.library
-   is not Roadshow's */
-static int
-other_stack_drawer(const char *n)
-{
-
-	return starts(n, "Miami") || starts(n, "AmiTCP") || starts(n, "Genesis");
-}
-
-static BPTR devs_internet;	/* DEVS:Internet: Roadshow's settings there */
-
-/* does a drawer hold a drawer called Work (somewhere inside)? */
-static int
-has_work(const char *path, int depth)
-{
-	struct FileInfoBlock *fib;
-	char sub[PATHMAX];
-	BPTR l;
-	int found_work = 0;
-
-	if (depth > MAXDEPTH || (fib = AllocDosObject(DOS_FIB, NULL)) == NULL)
-		return 0;
-	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
-		if (Examine(l, fib) && fib->fib_DirEntryType > 0)
-			while (!found_work && ExNext(l, fib)) {
-				if (fib->fib_DirEntryType != ST_USERDIR)
-					continue;
-				if (eq((const char *)fib->fib_FileName, "Work")) {
-					found_work = 1;
-					break;
-				}
-				if (slen(path) + slen((const char *)fib->fib_FileName)
-				    + 2 >= PATHMAX)
-					continue;
-				scpy(sub, path, sizeof(sub));
-				scpy(sub + slen(sub), "/", sizeof(sub) - slen(sub));
-				scpy(sub + slen(sub), (const char *)fib->fib_FileName,
-				    sizeof(sub) - slen(sub));
-				found_work = has_work(sub, depth + 1);
-			}
-		UnLock(l);
-	}
-	FreeDosObject(DOS_FIB, fib);
-	return found_work;
-}
+/* ------------------------------------------------------------------------
+ * deleting and moving
+ */
 
 /*
- * Walk one drawer: what matches is collected (drawers whole), the rest
- * searched further.  Inside a Roadshow drawer (inrs) everything counts,
- * except a Work drawer: a Roadshow drawer that holds one is not taken
- * whole, its other contents are.  Links are never followed.
+ * A drawer with everything in it; 0 when it is gone.  Hard links are
+ * deleted as links (of them "the data remains until there are no links
+ * left", downloads/sources/NDK3.2/Autodocs/dos.doc:3544, MakeLink); a
+ * soft link is not touched at all (the drawer stays then, and that is a
+ * failure that is reported).
  */
-static void
-walk(char *path, int depth, int inrs)
-{
-	struct FileInfoBlock *fib;
-	BPTR l;
-	int pl = slen(path), innet;
-
-	if (depth > MAXDEPTH || ovf)
-		return;
-	if ((fib = AllocDosObject(DOS_FIB, NULL)) == NULL)
-		return;
-	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
-		innet = devs_internet && SameLock(l, devs_internet) == LOCK_SAME;
-		if (Examine(l, fib) && fib->fib_DirEntryType > 0) {
-			while (ExNext(l, fib)) {
-				const char *n = (const char *)fib->fib_FileName;
-				LONG t = fib->fib_DirEntryType;
-				int dir = t == ST_USERDIR;
-
-				if (t == ST_SOFTLINK || t == ST_LINKDIR ||
-				    t == ST_LINKFILE)
-					continue;
-				if (pl + slen(n) + 2 >= PATHMAX)
-					continue;
-				if (path[pl - 1] != ':')
-					path[pl] = '/', scpy(path + pl + 1, n,
-					    PATHMAX - pl - 1);
-				else
-					scpy(path + pl, n, PATHMAX - pl);
-				if ((dir && eq(n, "Work")) || ours(n) ||
-				    (dir && !inrs && other_stack_drawer(n)))
-					;	/* the Roadshow installer, ours */
-				else if (inrs || is_roadshow(n, dir, innet)) {
-					if (dir && has_work(path, 0))
-						walk(path, depth + 1, 1);
-					else
-						add_found(path, dir);
-				} else if (dir)
-					walk(path, depth + 1, 0);
-				path[pl] = '\0';
-			}
-		}
-		UnLock(l);
-	}
-	FreeDosObject(DOS_FIB, fib);
-}
-
-/*
- * Delete a drawer with everything in it.  Only real drawers are entered:
- * a link is deleted as a link, never followed (that would empty its
- * target).  A drawer called Work and AmiBSDNet's own are kept, also deep
- * inside; the drawers around them stay then.  Returns 0 when it is gone,
- * 1 when something was kept, -1 if something could not be deleted.
- */
-#define	DELBATCH	128
-
 static int
 delete_tree(const char *path)
 {
 	struct FileInfoBlock *fib;
-	char (*names)[108], sub[PATHMAX];
+	char (*names)[108], *sub;
 	LONG *types;
 	BPTR l;
-	int rv = 0, kept = 0, n, i, progress;
+	int rv = 0, n, i, gone;
 
-	names = AllocVec(DELBATCH * 108, MEMF_ANY);
-	types = AllocVec(DELBATCH * sizeof(LONG), MEMF_ANY);
+	names = AllocVec(32 * 108, MEMF_ANY);
+	types = AllocVec(32 * sizeof(LONG), MEMF_ANY);
+	sub = AllocVec(PATHMAX, MEMF_ANY);
 	fib = AllocDosObject(DOS_FIB, NULL);
-	if (names == NULL || types == NULL || fib == NULL) {
+	if (names == NULL || types == NULL || sub == NULL || fib == NULL) {
 		rv = -1;
 		goto out;
 	}
 	/* collected first (deleting during ExNext() would lose its place),
-	   in batches for big drawers */
-	for (;;) {
-		n = 0;
+	   in batches: each round deletes what it collected */
+	do {
+		n = gone = 0;
 		if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) == 0)
 			break;
 		if (Examine(l, fib) && fib->fib_DirEntryType > 0)
-			while (n < DELBATCH && ExNext(l, fib)) {
+			while (n < 32 && ExNext(l, fib)) {
 				scpy(names[n], (const char *)fib->fib_FileName, 108);
-				types[n] = fib->fib_DirEntryType;
-				n++;
+				types[n++] = fib->fib_DirEntryType;
 			}
 		UnLock(l);
-		progress = 0;
 		for (i = 0; i < n; i++) {
-			if (eq(names[i], "Work") || ours(names[i])) {
-				kept = 1;
+			if (!join(sub, path, "/", PATHMAX) ||
+			    !join(sub, sub, names[i], PATHMAX) ||
+			    types[i] == ST_SOFTLINK) {
+				rv = -1;
 				continue;
 			}
-			if (slen(path) + slen(names[i]) + 2 >= PATHMAX) {
-				rv = -1;	/* (a cut path would be another) */
-				continue;
-			}
-			scpy(sub, path, sizeof(sub));
-			scpy(sub + slen(sub), "/", sizeof(sub) - slen(sub));
-			scpy(sub + slen(sub), names[i], sizeof(sub) - slen(sub));
 			if (types[i] == ST_USERDIR) {
-				int r = delete_tree(sub);
-
-				if (r < 0)
+				if (delete_tree(sub) != 0)
 					rv = -1;
-				else if (r > 0)
-					kept = 1;
 				else
-					progress++;
+					gone++;
 			} else {
-				/* files, and links of either kind */
 				SetProtection((CONST_STRPTR)sub, 0);
 				if (DeleteFile((CONST_STRPTR)sub))
-					progress++;
+					gone++;
 				else
 					rv = -1;
 			}
 		}
-		/* a full batch: there may be more */
-		if (n < DELBATCH || progress == 0)
-			break;
-	}
-	if (!kept && rv == 0) {
+	} while (n == 32 && gone > 0);
+	if (rv == 0) {
 		SetProtection((CONST_STRPTR)path, 0);
 		if (!DeleteFile((CONST_STRPTR)path))
 			rv = -1;
@@ -364,52 +272,241 @@ delete_tree(const char *path)
 out:
 	if (fib)
 		FreeDosObject(DOS_FIB, fib);
+	if (sub)
+		FreeVec(sub);
 	if (types)
 		FreeVec(types);
 	if (names)
 		FreeVec(names);
-	return rv < 0 ? -1 : kept;
+	return rv;
+}
+
+/* the drawers of a path, made where missing ("A:b/c" -> A:b) */
+static void
+make_parents(const char *path)
+{
+	char d[PATHMAX];
+	BPTR l;
+	int i;
+
+	for (i = 0; path[i] && i < PATHMAX - 1; i++) {
+		d[i] = path[i];
+		if (path[i] == '/') {
+			d[i] = '\0';
+			if (!exists(d) && (l = CreateDir((CONST_STRPTR)d)) != 0)
+				UnLock(l);
+			d[i] = '/';
+		}
+	}
+}
+
+/* where an item goes in BACKUP: "SYS:Devs/Internet/x" ->
+   BACKUP "/SYS/Devs/Internet/x" */
+static int
+backup_path(char *d, const char *path)
+{
+	int i, k;
+
+	if (!join(d, BACKUP, "/", PATHMAX))
+		return 0;
+	k = slen(d);
+	for (i = 0; path[i]; i++) {
+		if (k >= PATHMAX - 1)
+			return 0;
+		d[k++] = path[i] == ':' ? '/' : path[i];
+	}
+	d[k] = '\0';
+	return 1;
+}
+
+/* renamed into BACKUP.  Rename() cannot move between volumes ("it is
+   impossible to Rename() a file from one volume to" another, downloads/
+   sources/NDK3.2/Autodocs/dos.doc:4673): then it stays, and that is said */
+static void
+move_item(const char *path, int remove)
+{
+	char dest[PATHMAX];
+
+	if (!exists(path))
+		return;
+	rcount++;
+	if (!remove) {
+		note(path, "  (would be moved to " BACKUP ")");
+		return;
+	}
+	if (!backup_path(dest, path)) {
+		rfails++;
+		note(path, "  (not moved: the name is too long)");
+		return;
+	}
+	if (exists(dest)) {
+		/* (an earlier backup is never overwritten) */
+		rfails++;
+		note(path, "  (not moved: " BACKUP " has one already)");
+		return;
+	}
+	make_parents(dest);
+	if (Rename((CONST_STRPTR)path, (CONST_STRPTR)dest))
+		note(path, "  (moved to " BACKUP ")");
+	else {
+		rfails++;
+		note(path, "  (could not be moved: in use, protected, or on "
+		    "another volume)");
+	}
+}
+
+static void
+delete_item(const char *path, int remove)
+{
+	BPTR l;
+	struct FileInfoBlock *fib;
+	int dir = 0, r;
+
+	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) == 0)
+		return;
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
+		if (Examine(l, fib))
+			dir = fib->fib_DirEntryType == ST_USERDIR;
+		FreeDosObject(DOS_FIB, fib);
+	}
+	UnLock(l);
+	rcount++;
+	if (!remove) {
+		note(path, "");
+		return;
+	}
+	if (dir)
+		r = delete_tree(path);
+	else {
+		SetProtection((CONST_STRPTR)path, 0);
+		r = DeleteFile((CONST_STRPTR)path) ? 0 : -1;
+	}
+	if (r == 0)
+		note(path, "  (deleted)");
+	else {
+		rfails++;
+		note(path, "  (could not be deleted)");
+	}
+}
+
+/* the entries of a drawer, a batch at a time: the names (each 108 bytes)
+   after `skip' of them; returns how many */
+static int
+list_dir(const char *path, char (*names)[108], int max, int skip)
+{
+	struct FileInfoBlock *fib = AllocDosObject(DOS_FIB, NULL);
+	BPTR l;
+	int n = 0, seen = 0;
+
+	if (fib == NULL)
+		return 0;
+	if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
+		if (Examine(l, fib) && fib->fib_DirEntryType > 0)
+			while (n < max && ExNext(l, fib))
+				if (seen++ >= skip)
+					scpy(names[n++],
+					    (const char *)fib->fib_FileName, 108);
+		UnLock(l);
+	}
+	FreeDosObject(DOS_FIB, fib);
+	return n;
+}
+
+/* SYS:Devs/Internet: everything but what AmiBSDNet keeps */
+static void
+internet(int remove)
+{
+	char (*names)[108], path[PATHMAX];
+	int n, i, k, keep, skip = 0;
+
+	if ((names = AllocVec(32 * 108, MEMF_ANY)) == NULL) {
+		rfails++;
+		return;
+	}
+	/* (entries that stay are skipped the next round; moved ones are gone
+	   from the drawer) */
+	while (!rstopped && (n = list_dir(INTERNET, names, 32, skip)) > 0) {
+		int stayed = 0;
+
+		for (i = 0; i < n; i++) {
+			for (keep = 0, k = 0; keep_internet[k]; k++)
+				if (eq(names[i], keep_internet[k]))
+					keep = 1;
+			if (!keep && join(path, INTERNET "/", names[i],
+			    sizeof(path))) {
+				int before = rfails;
+
+				move_item(path, remove);
+				if (!remove || rfails != before)
+					stayed++;
+			} else
+				stayed++;
+			if (ctrl_c()) {
+				rstopped = 1;
+				break;
+			}
+		}
+		skip += stayed;
+		if (n < 32)
+			break;
+	}
+	FreeVec(names);
+}
+
+/* the WBStartup items of Roadshow an earlier switch parked */
+static void
+parked(int remove)
+{
+	char (*names)[108], path[PATHMAX];
+	int n, i, k, skip = 0;
+
+	if ((names = AllocVec(32 * 108, MEMF_ANY)) == NULL) {
+		rfails++;
+		return;
+	}
+	while (!rstopped && (n = list_dir(PARKING "/WBStartup", names, 32,
+	    skip)) > 0) {
+		int stayed = 0;
+
+		for (i = 0; i < n; i++) {
+			int mine = 0;
+
+			for (k = 0; parked_wb[k]; k++)
+				if (starts(names[i], parked_wb[k]))
+					mine = 1;
+			if (mine && join(path, PARKING "/WBStartup/", names[i],
+			    sizeof(path))) {
+				int before = rfails;
+
+				delete_item(path, remove);
+				if (!remove || rfails != before)
+					stayed++;
+			} else
+				stayed++;
+		}
+		skip += stayed;
+		if (n < 32)
+			break;
+	}
+	FreeVec(names);
+}
+
+/* another TCP/IP stack is installed (otherstacks.c finds them by name) */
+static int
+other_stack(void)
+{
+	char names[128];
+
+	otherstacks_check(names, sizeof(names));
+	return contains(names, "Miami") || contains(names, "AmiTCP") ||
+	    contains(names, "Genesis");
 }
 
 /* ------------------------------------------------------------------------
- * lines that mention Roadshow in text and configuration files
+ * comments that mention Roadshow in the two startup files
  */
 
-#define	TEXTMAX		(512 * 1024)	/* bigger ones are no settings */
-#define	SCRUBMAX	1000		/* entries of one drawer */
-
-static int scrubbed, scrubfails;
-static char *slist;
-static int slistsize, sll;
-
-static void
-list_add(const char *s)
-{
-	int l = slen(s);
-
-	if (slist && sll + l + 2 < slistsize) {
-		scpy(slist + sll, s, slistsize - sll);
-		sll += l;
-		slist[sll++] = '\n';
-		slist[sll] = '\0';
-	}
-}
-
-/* a text file (no NUL bytes, mostly printable)? */
-static int
-is_text(const UBYTE *b, LONG n)
-{
-	LONG i, odd = 0;
-
-	for (i = 0; i < n; i++) {
-		if (b[i] == 0)
-			return 0;
-		if (b[i] < 32 && b[i] != '\n' && b[i] != '\r' && b[i] != '\t' &&
-		    b[i] != 27 && b[i] != 12)
-			odd++;
-	}
-	return odd * 20 < n + 1;
-}
+#define	TEXTMAX		(512 * 1024)
 
 static int
 line_mentions(const char *p, const char *e)
@@ -427,14 +524,13 @@ line_mentions(const char *p, const char *e)
 }
 
 /*
- * What to do with a line that mentions Roadshow: 0 leave it, 1 remove
- * it, 2 keep only what comes before its comment.  A comment line goes.
- * In a script a command stays (removing an EndIf or Else would break the
- * script; Roadshow's own commands were removed by otherstacks.c): only
- * a comment after it goes.  In a configuration file the line goes.
+ * 0 leave the line, 1 remove it (a comment line), 2 keep what comes
+ * before its comment.  A command stays: removing an EndIf or Else would
+ * break the script.  A comment starts at a ';' outside double quotes,
+ * as otherstacks.c reads script lines.
  */
 static int
-line_action(const char *p, const char *e, int script, const char **cut)
+line_action(const char *p, const char *e, const char **cut)
 {
 	const char *q = p, *c;
 	int quote = 0;
@@ -443,10 +539,7 @@ line_action(const char *p, const char *e, int script, const char **cut)
 		return 0;
 	while (q < e && (*q == ' ' || *q == '\t'))
 		q++;
-	/* (in AmigaDOS scripts only ';' starts a comment) */
-	if (q < e && (*q == ';' || (!script && *q == '#')))
-		return 1;
-	if (!script)
+	if (q < e && *q == ';')
 		return 1;
 	for (c = q; c < e; c++) {
 		if (*c == '"')
@@ -463,374 +556,215 @@ line_action(const char *p, const char *e, int script, const char **cut)
 	return 0;
 }
 
-static void
-scrub_file(const char *path, LONG size, LONG prot, int remove, int script)
+static char *
+read_all(const char *path, LONG *lenp)
 {
-	char *buf, *p, *e, tmp[PATHMAX], old[PATHMAX], msg[PATHMAX + 32];
-	const char *cut;
-	BPTR fh;
-	LONG n = 0, got;
-	int changes = 0, left = 0, k, a;
+	BPTR fh = Open((CONST_STRPTR)path, MODE_OLDFILE);
+	char *buf = NULL;
+	LONG size, n = 0, got;
 
-	if (size <= 0 || (buf = AllocVec(size + 1, MEMF_ANY)) == NULL)
-		return;
-	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0) {
-		FreeVec(buf);
-		return;
+	*lenp = -1;
+	if (fh == 0)
+		return NULL;
+	Seek(fh, 0, OFFSET_END);
+	size = Seek(fh, 0, OFFSET_BEGINNING);
+	if (size >= 0 && size <= TEXTMAX &&
+	    (buf = AllocVec(size + 1, MEMF_ANY)) != NULL) {
+		while (n < size && (got = Read(fh, buf + n, size - n)) > 0)
+			n += got;
+		if (n != size) {
+			FreeVec(buf);
+			buf = NULL;
+		} else
+			*lenp = n;
 	}
-	while (n < size && (got = Read(fh, buf + n, size - n)) > 0)
-		n += got;
 	Close(fh);
-	if (n != size || !is_text((UBYTE *)buf, n)) {
-		FreeVec(buf);
+	return buf;
+}
+
+/* len bytes to a new file; 0 when all went out and it closed */
+static int
+write_all(const char *path, const char *buf, LONG len)
+{
+	BPTR fh = Open((CONST_STRPTR)path, MODE_NEWFILE);
+	int ok;
+
+	if (fh == 0)
+		return -1;
+	ok = len == 0 || Write(fh, (APTR)buf, len) == len;
+	if (!Close(fh))
+		ok = 0;
+	return ok ? 0 : -1;
+}
+
+/* the first copy of the original (an older one is kept: it is the first
+   original); 0 if there is one */
+static int
+keep_copy(const char *path, const char *bak)
+{
+	char *buf;
+	LONG n;
+	int r;
+
+	if (exists(bak))
+		return 0;
+	if ((buf = read_all(path, &n)) == NULL)
+		return -1;
+	r = write_all(bak, buf, n);
+	FreeVec(buf);
+	if (r != 0)
+		DeleteFile((CONST_STRPTR)bak);
+	return r;
+}
+
+static void
+scrub_file(const char *path, int remove)
+{
+	char *buf, *out, *p, *e, bak[PATHMAX], tmp[PATHMAX], old[PATHMAX];
+	const char *cut;
+	struct FileInfoBlock *fib;
+	LONG n, ol = 0, prot = -1;
+	BPTR l;
+	int changes = 0, left = 0, a;
+
+	if ((buf = read_all(path, &n)) == NULL)
 		return;
-	}
 	for (p = buf; p < buf + n; p = e + 1) {
 		for (e = p; e < buf + n && *e != '\n'; e++)
 			;
-		a = line_action(p, e, script, &cut);
-		if (a)
+		if ((a = line_action(p, e, &cut)) != 0)
 			changes++;
 		else if (line_mentions(p, e))
 			left++;
 	}
-	if (changes == 0 && left == 0) {
-		FreeVec(buf);
-		return;
-	}
-	scpy(msg, path, sizeof(msg));
-	if (changes)
-		scpy(msg + slen(msg), remove ? "  (lines removed)" : "  (lines)",
-		    sizeof(msg) - slen(msg));
 	if (left)
-		scpy(msg + slen(msg), "  (commands left as they are)",
-		    sizeof(msg) - slen(msg));
-	list_add(msg);
-	if (changes)
-		scrubbed++;
-	if (!remove || changes == 0) {
+		note(path, "  (commands that mention Roadshow: left as they "
+		    "are)");
+	if (changes == 0) {
 		FreeVec(buf);
 		return;
 	}
-
-	/* the new text next to the file first; the file is never missing:
-	   renamed aside, replaced, put back if that fails */
-	scpy(tmp, path, sizeof(tmp));
-	for (k = slen(tmp); k > 0 && tmp[k - 1] != '/' && tmp[k - 1] != ':'; k--)
-		;
-	scpy(old, tmp, k + 1);
-	scpy(tmp + k, "AmiBSDNet.tmp", sizeof(tmp) - k);
-	scpy(old + k, "AmiBSDNet.old", sizeof(old) - k);
-	if ((fh = Open((CONST_STRPTR)tmp, MODE_NEWFILE)) == 0) {
-		scrubfails++;
+	rcount++;
+	if (!remove) {
+		note(path, "  (comments that mention Roadshow)");
 		FreeVec(buf);
 		return;
 	}
-	k = 1;
+	if ((out = AllocVec(n + 1, MEMF_ANY)) == NULL) {
+		rfails++;
+		note(path, "  (not changed: no memory)");
+		FreeVec(buf);
+		return;
+	}
 	for (p = buf; p < buf + n; p = e + 1) {
-		LONG l;
+		LONG k;
 
 		for (e = p; e < buf + n && *e != '\n'; e++)
 			;
-		a = line_action(p, e, script, &cut);
+		a = line_action(p, e, &cut);
 		if (a == 1)
 			continue;
-		if (a == 2) {
-			l = cut - p;
-			if ((l > 0 && Write(fh, p, l) != l) ||
-			    (e < buf + n && Write(fh, "\n", 1) != 1))
-				k = 0;
-			continue;
-		}
-		l = e - p + (e < buf + n);
-		if (l > 0 && Write(fh, p, l) != l)
-			k = 0;
+		k = a == 2 ? cut - p : e - p;
+		CopyMem(p, out + ol, k);
+		ol += k;
+		if (e < buf + n)
+			out[ol++] = '\n';
 	}
-	if (!Close(fh))
-		k = 0;
-	DeleteFile((CONST_STRPTR)old);
-	if (!k || !Rename((CONST_STRPTR)path, (CONST_STRPTR)old)) {
+	FreeVec(buf);
+	if ((fib = AllocDosObject(DOS_FIB, NULL)) != NULL) {
+		if ((l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
+			if (Examine(l, fib))
+				prot = fib->fib_Protection;
+			UnLock(l);
+		}
+		FreeDosObject(DOS_FIB, fib);
+	}
+	/* a copy of the original first, then the new text next to the file;
+	   the file is never missing: renamed aside, replaced, put back if
+	   that fails */
+	if (!join(bak, path, ".amibsdnet-rs", sizeof(bak)) ||
+	    !join(tmp, path, ".amibsdnet-new", sizeof(tmp)) ||
+	    !join(old, path, ".amibsdnet-old", sizeof(old)) ||
+	    keep_copy(path, bak) != 0 || write_all(tmp, out, ol) != 0) {
 		DeleteFile((CONST_STRPTR)tmp);
-		scrubfails++;
+		rfails++;
+		note(path, "  (not changed: its copy could not be written)");
+		FreeVec(out);
+		return;
+	}
+	FreeVec(out);
+	DeleteFile((CONST_STRPTR)old);
+	if (!Rename((CONST_STRPTR)path, (CONST_STRPTR)old)) {
+		DeleteFile((CONST_STRPTR)tmp);
+		rfails++;
+		note(path, "  (not changed: it is in use)");
 	} else if (!Rename((CONST_STRPTR)tmp, (CONST_STRPTR)path)) {
 		Rename((CONST_STRPTR)old, (CONST_STRPTR)path);
 		DeleteFile((CONST_STRPTR)tmp);
-		scrubfails++;
+		rfails++;
+		note(path, "  (not changed)");
 	} else {
-		SetProtection((CONST_STRPTR)path, prot);	/* (s bit) */
-		SetProtection((CONST_STRPTR)old, 0);
+		/* (the s bit of a script) */
+		if (prot != -1)
+			SetProtection((CONST_STRPTR)path, prot);
 		DeleteFile((CONST_STRPTR)old);
+		note(path, "  (comments removed; the original is "
+		    "<name>.amibsdnet-rs)");
 	}
-	FreeVec(buf);
 }
 
-/* the text files of a drawer and its subdrawers (not "Work") */
-static void
-scrub_walk(char *path, int depth, int remove, int script)
-{
-	struct FileInfoBlock *fib;
-	char (*names)[108];
-	LONG *sizes, *prots;
-	UBYTE *isdir;
-	BPTR l;
-	int pl = slen(path), n = 0, i;
-
-	if (depth > MAXDEPTH)
-		return;
-	fib = AllocDosObject(DOS_FIB, NULL);
-	names = AllocVec(SCRUBMAX * 108, MEMF_ANY);
-	sizes = AllocVec(SCRUBMAX * sizeof(LONG), MEMF_ANY);
-	prots = AllocVec(SCRUBMAX * sizeof(LONG), MEMF_ANY);
-	isdir = AllocVec(SCRUBMAX, MEMF_ANY);
-	if (fib && names && sizes && prots && isdir &&
-	    (l = Lock((CONST_STRPTR)path, ACCESS_READ)) != 0) {
-		/* collected first: rewriting a file during ExNext() could
-		   confuse it */
-		if (Examine(l, fib) && fib->fib_DirEntryType > 0)
-			while (n < SCRUBMAX && ExNext(l, fib)) {
-				LONG t = fib->fib_DirEntryType;
-
-				/* (links are not followed) */
-				if (t == ST_SOFTLINK || t == ST_LINKDIR ||
-				    t == ST_LINKFILE)
-					continue;
-				scpy(names[n], (const char *)fib->fib_FileName, 108);
-				sizes[n] = fib->fib_Size;
-				prots[n] = fib->fib_Protection;
-				isdir[n] = t == ST_USERDIR;
-				n++;
-			}
-		UnLock(l);
-		for (i = 0; i < n; i++) {
-			int ln = slen(names[i]);
-
-			if (pl + ln + 2 >= PATHMAX)
-				continue;
-			if (path[pl - 1] != ':')
-				path[pl] = '/', scpy(path + pl + 1, names[i],
-				    PATHMAX - pl - 1);
-			else
-				scpy(path + pl, names[i], PATHMAX - pl);
-			if (ours(names[i]))
-				;
-			else if (isdir[i]) {
-				if (!eq(names[i], "Work"))
-					scrub_walk(path, depth + 1, remove,
-					    script);
-			} else if (!(ln > 5 && eq(names[i] + ln - 5, ".info")) &&
-			    sizes[i] <= TEXTMAX)
-				scrub_file(path, sizes[i], prots[i], remove, script);
-			path[pl] = '\0';
-		}
-	}
-	if (isdir)
-		FreeVec(isdir);
-	if (prots)
-		FreeVec(prots);
-	if (sizes)
-		FreeVec(sizes);
-	if (names)
-		FreeVec(names);
-	if (fib)
-		FreeDosObject(DOS_FIB, fib);
-}
-
-/*
- * Assigns: one named like Roadshow ("Assign Roadshow: ...") or pointing
- * into a drawer that is going keeps that drawer locked, so it could not
- * be deleted.  Removed first.
- */
-static void
-remove_assigns(void)
-{
-	char (*names)[40], target[PATHMAX];
-	struct DosList *dl;
-	int n = 0, i, j;
-
-	if ((names = AllocVec(32 * 40, MEMF_CLEAR)) == NULL)
-		return;
-	dl = LockDosList(LDF_ASSIGNS | LDF_READ);
-	while ((dl = NextDosEntry(dl, LDF_ASSIGNS)) != NULL && n < 32) {
-		const UBYTE *b = BADDR(dl->dol_Name);
-		int k, gone = 0;
-
-		if (b == NULL || b[0] == 0 || b[0] > 36)
-			continue;
-		for (k = 0; k < b[0]; k++)
-			names[n][k] = b[k + 1];
-		names[n][k] = '\0';
-		if (contains(names[n], "Roadshow"))
-			gone = 1;
-		else if (dl->dol_Type == DLT_DIRECTORY && dl->dol_Lock &&
-		    NameFromLock(dl->dol_Lock, (STRPTR)target, sizeof(target)))
-			for (j = 0; j < nfound && !gone; j++) {
-				const char *f = found[j] ? found[j] + 1 : "";
-				int fl = slen(f);
-
-				/* the drawer itself, or a drawer inside it */
-				if (found[j] && found[j][0] == 'D' &&
-				    starts(target, f) && (target[fl] == '\0' ||
-				    target[fl] == '/'))
-					gone = 1;
-			}
-		if (gone)
-			n++;
-	}
-	UnLockDosList(LDF_ASSIGNS | LDF_READ);
-	for (i = 0; i < n; i++)
-		AssignLock((CONST_STRPTR)names[i], 0);
-	FreeVec(names);
-}
+/* ------------------------------------------------------------------------ */
 
 int
 roadshow_find(int remove, char *list, int listsize, int *failed)
 {
 	struct Process *me = (struct Process *)SysBase->ThisTask;
 	APTR oldwin = me->pr_WindowPtr;
-	char (*vols)[40], path[PATHMAX];
-	struct DosList *dl;
-	int nvols = 0, i, n, fails = 0, ll = 0;
+	int i, others;
 
 	*failed = 0;
 	if (list && listsize)
 		list[0] = '\0';
-	if ((found = AllocVec(MAXFOUND * sizeof(char *), MEMF_CLEAR)) == NULL ||
-	    (vols = AllocVec(32 * 40, MEMF_CLEAR)) == NULL) {
-		if (found)
-			FreeVec(found);
-		return -1;
+	rlist = list;
+	rlistsize = listsize;
+	rll = rcount = rfails = rstopped = 0;
+	me->pr_WindowPtr = (APTR)-1;	/* no "insert volume" requesters */
+
+	for (i = 0; del_files[i] && !rstopped; i++) {
+		delete_item(del_files[i], remove);
+		rstopped = ctrl_c();
 	}
-	nfound = ovf = 0;
-	me->pr_WindowPtr = (APTR)-1;
-
-	/* the mounted volumes (not a volume called Work) */
-	dl = LockDosList(LDF_VOLUMES | LDF_READ);
-	while ((dl = NextDosEntry(dl, LDF_VOLUMES)) != NULL && nvols < 32) {
-		const UBYTE *b = BADDR(dl->dol_Name);
-		int k;
-
-		if (b == NULL || b[0] == 0 || b[0] > 36 || dl->dol_Task == NULL)
-			continue;
-		for (k = 0; k < b[0]; k++)
-			vols[nvols][k] = b[k + 1];
-		vols[nvols][k] = '\0';
-		if (eq(vols[nvols], "PaulaNET"))
-			continue;
-		nvols++;
+	for (i = 0; move_items[i] && !rstopped; i++) {
+		move_item(move_items[i], remove);
+		rstopped = ctrl_c();
 	}
-	UnLockDosList(LDF_VOLUMES | LDF_READ);
-	/* a volume called Work is skipped - unless the system itself is on
-	   it (then only its Work drawers are) */
-	{
-		BPTR sys = Lock((CONST_STRPTR)"SYS:", ACCESS_READ);
-
-		for (i = 0; i < nvols; i++)
-			if (eq(vols[i], "Work")) {
-				char v[44];
-				BPTR w;
-				int same = 0;
-
-				scpy(v, vols[i], sizeof(v) - 2);
-				scpy(v + slen(v), ":", 2);
-				if (sys && (w = Lock((CONST_STRPTR)v, ACCESS_READ))) {
-					same = SameLock(sys, w) == LOCK_SAME;
-					UnLock(w);
-				}
-				if (!same)
-					vols[i][0] = '\0';
-			}
-		if (sys)
-			UnLock(sys);
-	}
-	devs_internet = Lock((CONST_STRPTR)"DEVS:Internet", ACCESS_READ);
-
-	for (i = 0; i < nvols; i++) {
-		if (!vols[i][0])
-			continue;
-		scpy(path, vols[i], sizeof(path) - 2);
-		scpy(path + slen(path), ":", 2);
-		walk(path, 0, 0);
-	}
-	if (devs_internet) {
-		UnLock(devs_internet);
-		devs_internet = 0;
-	}
-	if (remove)
-		remove_assigns();
-	n = 0;
-	for (i = 0; i < nfound; i++) {
-		int j, dup = 0;
-
-		/* the same object found through an assign: once */
-		for (j = 0; j < i && !dup; j++)
-			if (found[j] && eq(found[j], found[i]))
-				dup = 1;
-		if (dup) {
-			FreeVec(found[i]);
-			found[i] = NULL;
-			continue;
+	if (!rstopped)
+		internet(remove);
+	if (!rstopped) {
+		others = other_stack();
+		for (i = 0; shared_items[i] && !rstopped; i++) {
+			if (others) {
+				if (exists(shared_items[i]))
+					note(shared_items[i], "  (left: another "
+					    "TCP/IP stack is installed)");
+			} else
+				move_item(shared_items[i], remove);
+			rstopped = ctrl_c();
 		}
-		n++;
-		if (list && ll + slen(found[i] + 1) + 2 < listsize) {
-			scpy(list + ll, found[i] + 1, listsize - ll);
-			ll += slen(list + ll);
-			list[ll++] = '\n';
-			list[ll] = '\0';
-		}
-		if (remove) {
-			int r;
-
-			if (found[i][0] == 'D')
-				r = delete_tree(found[i] + 1);
-			else {
-				SetProtection((CONST_STRPTR)found[i] + 1, 0);
-				r = DeleteFile((CONST_STRPTR)found[i] + 1) ? 0 : -1;
-			}
-			/* (a file deleted with its drawer through another
-			   path is not a failure, nor a drawer kept for the
-			   Work drawer inside) */
-			if (r < 0 && Lock_exists(found[i] + 1))
-				fails++;
-		}
+		if (!rstopped && !others)
+			move_item(PARKING "/Libs/bsdsocket.library", remove);
 	}
-	if (ovf) {
-		/* more than could be listed at once: run it again */
-		if (list && ll + 40 < listsize) {
-			scpy(list + ll, "(more: run it again)\n", listsize - ll);
-			ll += slen(list + ll);
-		}
-		fails++;
+	if (!rstopped)
+		parked(remove);
+	if (!rstopped) {
+		scrub_file("S:Startup-Sequence", remove);
+		scrub_file("S:User-Startup", remove);
 	}
-	/* an emptied parking drawer goes too */
-	if (remove)
-		DeleteFile((CONST_STRPTR)PARKING);
-
-	/* then the lines that still mention Roadshow, in the scripts and
-	   configuration files of the system */
-	{
-		static const char *const where[] = { "S:", "ENVARC:", "ENV:",
-		    "DEVS:", NULL };
-
-		slist = list;
-		slistsize = listsize;
-		sll = ll;
-		scrubbed = scrubfails = 0;
-		for (i = 0; where[i]; i++) {
-			scpy(path, where[i], sizeof(path));
-			/* (S: holds scripts: commands are kept, see
-			   line_action()) */
-			scrub_walk(path, 0, remove, i == 0);
-		}
-		n += scrubbed;
-		fails += scrubfails;
+	if (rstopped) {
+		rfails++;
+		note("(stopped: Ctrl-C)", "");
 	}
-
-	for (i = 0; i < nfound; i++)
-		if (found[i])
-			FreeVec(found[i]);
-	FreeVec(found);
-	FreeVec(vols);
 	me->pr_WindowPtr = oldwin;
-	*failed = fails;
-	return n;
+	*failed = rfails;
+	return rcount;
 }

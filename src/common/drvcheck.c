@@ -115,7 +115,9 @@ drv_read_prefs(struct drvprefs *p)
 	    (fh = Open((CONST_STRPTR)"ENVARC:AmiBSDNet/AmiBSDNet.conf",
 	    MODE_OLDFILE)) == 0)
 		return;
-	while (FGets(fh, (STRPTR)line, sizeof(line))) {
+	/* (the size less one for dos V36/V37, which copy one byte more:
+	   dos.doc:2146-2150, FGets BUGS) */
+	while (FGets(fh, (STRPTR)line, sizeof(line) - 1)) {
 		for (n = 0, s = line; n < 4;) {
 			while (*s == ' ' || *s == '\t')
 				s++;
@@ -168,6 +170,39 @@ crc32(ULONG crc, const UBYTE *p, LONG n)
 			crc = (crc >> 1) ^ (0xedb88320UL & -(crc & 1));
 	}
 	return ~crc;
+}
+
+int	drv_file_sum(const char *path, unsigned long *size, unsigned long *crc);
+
+/* size and CRC-32 of a file, read in pieces (any size); 0 when it could
+   all be read (NetCtrl CHECKSUM, the uninstaller's FILE lines) */
+int
+drv_file_sum(const char *path, unsigned long *size, unsigned long *crc)
+{
+	BPTR fh;
+	UBYTE *buf;
+	LONG n;
+	ULONG c = 0, total = 0;
+
+	if ((buf = AllocVec(4096, MEMF_ANY)) == NULL)
+		return -1;
+	if ((fh = Open((CONST_STRPTR)path, MODE_OLDFILE)) == 0) {
+		FreeVec(buf);
+		return -1;
+	}
+	while ((n = Read(fh, buf, 4096)) > 0) {
+		c = crc32(c, buf, n);
+		total += n;
+	}
+	Close(fh);
+	FreeVec(buf);
+	/* (Read(): 0 at the end of the file, -1 for an error, downloads/
+	   sources/NDK3.2/Autodocs/dos.doc Read) */
+	if (n < 0)
+		return -1;
+	*size = total;
+	*crc = c;
+	return 0;
 }
 
 static int check(const char *, const struct drvprefs *, const char **,
