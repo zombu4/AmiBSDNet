@@ -47,8 +47,7 @@ start_wm(struct wmstart *w)
 		sb_copy(started_dev, w->device, sizeof(started_dev));
 		started_unit = w->unit;
 		started = 1;
-		P("%s: started WirelessManager for %s (its messages: its own "
-		    "window, else "
+		P("%s: started WirelessManager for %s (its messages are in "
 		    AMIBSDNET_WMLOG ")\n", w->name, w->device);
 	} else
 		P("%s: could not start WirelessManager\n", w->name);

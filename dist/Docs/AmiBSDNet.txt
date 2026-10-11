@@ -251,10 +251,8 @@ computed again if the network name changes).
 
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
 the network; DHCP starts as soon as it has. In this version
-WirelessManager runs with VERBOSE and its messages appear in a window
-named WirelessManager at the bottom of the screen (in
-SYS:Storage/AmiBSDNet-Logs/WirelessManager.log only if that window
-cannot open). If the status
+WirelessManager runs with VERBOSE; its messages are in
+SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. If the status
 window says "DRIVER NOT USED", the driver named in the settings is not
 in DEVS:Networks, or it could not set up its hardware (the log says
 which; see Logs). A driver that cannot set up its hardware - genet.device on
@@ -317,8 +315,9 @@ Logs
 ----
 AmiBSDNet writes its log to SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log,
 on the disk, so it is still there after a reboot or a power-off; each
-start begins it anew. WirelessManager's messages go to its own window
-(see Wi-Fi above). The log can be read while the stack runs:
+start begins it anew; WirelessManager's messages are in
+SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. Both can be read while
+the stack runs:
 
     Type SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log
 

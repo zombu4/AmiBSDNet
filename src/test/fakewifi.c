@@ -9,19 +9,24 @@
  * lists, S2_ONEVENT with the ONLINE/OFFLINE preset, S2_GETSIGNALQUALITY
  * and S2_GETNETWORKINFO only while connected, S2_GETNETWORKS answered
  * later with a list of tag lists from the caller's pool.  It sees one
- * network, "FakeNet", open (no WPA): S2_SETOPTIONS with that SSID
- * connects a second later and S2EVENT_CONNECT is reported, as wifipi
- * reports it on BRCMF_E_LINK (packet.c:677-689).  Frames go to and come
+ * network, "FakeNet", WPA2-PSK with the passphrase "fakepassword":
+ * S2_SETOPTIONS with that SSID connects a second later and
+ * S2EVENT_CONNECT is reported, as wifipi reports it on BRCMF_E_LINK
+ * (packet.c:677-689); then the access point runs the 4-way handshake
+ * with the supplicant (src/test/fakeap.c), and data passes only after
+ * it.  Frames go to and come
  * from uaenet.device unit 0 (WinUAE's SLIRP), whose station address it
- * takes as its own, while connected.  What it does not do: WEP/WPA keys
+ * takes as its own, while connected.  What it does not do: encryption
  * (S2_SETKEY is accepted and not used), multicast filtering, S2_READMGMT
  * and S2_WRITEMGMT (not in wifipi's list either, unit.c:303-317).
  *
  * Test only: not part of the package.
  *
  *   tools/build_amiga.sh src/test/fakewifi.c build/fakewifi.device \
+ *       src/test/fakeap.c \
  *       -Idownloads/sources/NDK3.2/SANA+RoadshowTCP-IP/include \
- *       -Idownloads/sources/wifipi/include
+ *       -Idownloads/sources/wifipi/include \
+ *       -idirafter downloads/sources/NDK3.2/Include_H -Wl,-u,romtag
  */
 #include <exec/types.h>
 #include <exec/devices.h>
@@ -43,10 +48,13 @@
 #include <proto/dos.h>
 #include <proto/utility.h>
 
+#include "fakeap.h"
+
 #define	DEVNAME		"fakewifi.device"
 #define	IDSTRING	"fakewifi.device 1.0 (11.10.2026) test stand-in"
 #define	BACKEND		"uaenet.device"
 #define	FAKE_SSID	"FakeNet"
+#define	FAKE_PSK	"fakepassword"	/* WPA2-PSK (src/test/fakeap.c) */
 #define	FW_MTU		1500
 #define	FRAME_MAX	1518
 #define	NBACKREADS	8
@@ -169,6 +177,14 @@ report_events(ULONG set)
 static UBYTE rxbuf[NBACKREADS][FRAME_MAX];
 static UBYTE txbuf[FRAME_MAX];
 
+/* the access point: its address, the handshake, and whether data may
+   pass (after message 4, as on a WPA2 network) */
+static const UBYTE bssid_ap[6] = { 0x02, 0, 0, 0, 0, 0x01 };
+static struct fakeap ap;
+static volatile int authorized;
+static UBYTE hsframe[FAKEAP_FRAME_MAX];	/* the last message 1 or 3 */
+static ULONG hslen;
+
 ULONG	back_copy(UBYTE *, const UBYTE *, ULONG);
 
 ULONG
@@ -263,14 +279,20 @@ scan_done(struct IOSana2Req *io)
 	APTR pool = io->ios2_Data;
 	struct TagItem **list, *t;
 	char *ssid;
-	UBYTE *bssid;
-	int i;
+	UBYTE *bssid, *e;
+	UWORD *ie;
+	int i, n;
 
 	list = AllocPooled(pool, sizeof(*list));
-	t = AllocPooled(pool, sizeof(*t) * 8);
+	t = AllocPooled(pool, sizeof(*t) * 9);
 	ssid = AllocPooled(pool, sizeof(FAKE_SSID));
 	bssid = AllocPooled(pool, 6);
-	if (list == NULL || t == NULL || ssid == NULL || bssid == NULL) {
+	/* the information elements, as wifipi gives them (packet.c:
+	   545-563: a UWORD length, then the elements): SSID, RSN */
+	ie = AllocPooled(pool, 2 + 2 + sizeof(FAKE_SSID) - 1 +
+	    sizeof(fakeap_rsn_ie));
+	if (list == NULL || t == NULL || ssid == NULL || bssid == NULL ||
+	    ie == NULL) {
 		io->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
 		io->ios2_WireError = S2WERR_BUFF_ERROR;
 		io->ios2_DataLength = 0;
@@ -280,9 +302,8 @@ scan_done(struct IOSana2Req *io)
 	}
 	for (i = 0; i < (int)sizeof(FAKE_SSID); i++)
 		ssid[i] = FAKE_SSID[i];
-	bssid[0] = 0x02;
-	bssid[1] = bssid[2] = bssid[3] = bssid[4] = 0;
-	bssid[5] = 0x01;
+	for (i = 0; i < 6; i++)
+		bssid[i] = bssid_ap[i];
 	t[0].ti_Tag = S2INFO_SSID;
 	t[0].ti_Data = (ULONG)ssid;
 	t[1].ti_Tag = S2INFO_BSSID;
@@ -292,18 +313,48 @@ scan_done(struct IOSana2Req *io)
 	t[3].ti_Tag = S2INFO_Signal;
 	t[3].ti_Data = (ULONG)-45;
 	t[4].ti_Tag = S2INFO_Capabilities;
-	t[4].ti_Data = 0x0001;		/* ESS, no privacy bit: open */
+	t[4].ti_Data = 0x0011;		/* ESS and privacy (IEEE 802.11-2016
+					   9.4.1.4) */
 	t[5].ti_Tag = S2INFO_Channel;
 	t[5].ti_Data = 6;
 	t[6].ti_Tag = S2INFO_Band;
 	t[6].ti_Data = S2BAND_B;
-	t[7].ti_Tag = TAG_DONE;
-	t[7].ti_Data = 0;
+	e = (UBYTE *)(ie + 1);
+	n = 0;
+	e[n++] = 0;			/* the SSID element */
+	e[n++] = sizeof(FAKE_SSID) - 1;
+	for (i = 0; i < (int)sizeof(FAKE_SSID) - 1; i++)
+		e[n++] = FAKE_SSID[i];
+	for (i = 0; i < (int)sizeof(fakeap_rsn_ie); i++)
+		e[n++] = fakeap_rsn_ie[i];
+	ie[0] = n;
+	t[7].ti_Tag = S2INFO_InfoElements;
+	t[7].ti_Data = (ULONG)ie;
+	t[8].ti_Tag = TAG_DONE;
+	t[8].ti_Data = 0;
 	list[0] = t;
 	io->ios2_StatData = list;
 	io->ios2_DataLength = 1;
 	io->ios2_Req.io_Error = 0;
 	ReplyMsg((struct Message *)io);
+}
+
+/* an EAPOL frame from the access point to the openers (EtherType 0x888e,
+   IEEE 802.1X-2004 7.5) */
+static void
+inject(const UBYTE *f, ULONG len)
+{
+	static struct IOSana2Req in;
+	int i;
+
+	for (i = 0; i < 6; i++) {
+		in.ios2_SrcAddr[i] = bssid_ap[i];
+		in.ios2_DstAddr[i] = mac[i];
+	}
+	in.ios2_PacketType = 0x888e;
+	in.ios2_DataLength = len;
+	in.ios2_Req.io_Flags = 0;
+	deliver(&in, f);
 }
 
 static void
@@ -313,7 +364,7 @@ worker_main(void)
 	struct IOSana2Req *breq = NULL, *bw = NULL, *rd[NBACKREADS];
 	struct timerequest *tr = NULL;
 	struct IOSana2Req *scanq = NULL;
-	int bopen = 0, topen = 0, tpending = 0, joining = 0, i;
+	int bopen = 0, topen = 0, tpending = 0, joining = 0, tries = 0, i;
 	static const ULONG types[NBACKREADS] = { 0x0800, 0x0800, 0x0800,
 	    0x0806, 0x0806, 0x86dd, 0x888e, 0x888e };
 
@@ -363,6 +414,9 @@ worker_main(void)
 			rd[i]->ios2_Req.io_Flags = 0;
 			SendIO((struct IORequest *)rd[i]);
 		}
+	/* (the PMK: 4096 HMAC-SHA1 rounds, done once) */
+	fakeap_init(&ap, FAKE_PSK, FAKE_SSID, bssid_ap, (ULONG)mac[5] << 8 |
+	    mac[4]);
 	cmdport = port;
 	worker_state = 1;
 	Signal(starter, SIGF_SINGLE);
@@ -382,7 +436,7 @@ worker_main(void)
 				continue;
 			if (r->ios2_Req.io_Error == 0 &&
 			    (flags & (FL_ONLINE | FL_CONNECTED)) ==
-			    (FL_ONLINE | FL_CONNECTED))
+			    (FL_ONLINE | FL_CONNECTED) && authorized)
 				deliver(r, rxbuf[i]);
 			r->ios2_Req.io_Command = CMD_READ;
 			r->ios2_PacketType = types[i];
@@ -405,6 +459,31 @@ worker_main(void)
 			io->ios2_Req.io_Error = 0;
 			if ((flags & FL_CONNECTED) == 0) {
 				/* (not associated: nothing goes out) */
+				ReplyMsg(m);
+				continue;
+			}
+			/* EAPOL to the access point: the handshake */
+			if (io->ios2_PacketType == 0x888e &&
+			    io->ios2_DataLength <= FAKEAP_FRAME_MAX &&
+			    call_copy(o->copyfrom, txbuf, io->ios2_Data,
+			    io->ios2_DataLength)) {
+				ULONG n = fakeap_rx(&ap, txbuf,
+				    io->ios2_DataLength, hsframe);
+
+				if (n) {
+					hslen = n;
+					tries = 0;
+					inject(hsframe, hslen);
+				}
+				if (ap.state == FAKEAP_DONE && !authorized) {
+					authorized = 1;
+					hslen = 0;
+				}
+				ReplyMsg(m);
+				continue;
+			}
+			/* (until the handshake is done only EAPOL passes) */
+			if (!authorized) {
 				ReplyMsg(m);
 				continue;
 			}
@@ -433,8 +512,11 @@ worker_main(void)
 			joinreq = 0;
 			joining = 1;
 		}
-		/* scan two seconds, connect one second later */
-		if ((scanq || joining) && !tpending) {
+		/* scan two seconds, connect one second later; then the
+		   handshake, message 1 or 3 again every second, five times
+		   at most (then it disconnects) */
+		if ((scanq || joining || ((flags & FL_CONNECTED) &&
+		    !authorized)) && !tpending) {
 			tr->tr_node.io_Command = TR_ADDREQUEST;
 			tr->tr_time.tv_secs = scanq ? 2 : 1;
 			tr->tr_time.tv_micro = 0;
@@ -452,8 +534,22 @@ worker_main(void)
 				if (Stricmp((STRPTR)joined,
 				    (STRPTR)FAKE_SSID) == 0 &&
 				    (flags & FL_ONLINE)) {
+					authorized = 0;
+					ap.state = FAKEAP_IDLE;
+					hslen = 0;
+					tries = 0;
 					flags |= FL_CONNECTED;
 					report_events(S2EVENT_CONNECT);
+				}
+			} else if ((flags & FL_CONNECTED) && !authorized) {
+				if (++tries > 5) {
+					flags &= ~FL_CONNECTED;
+					report_events(S2EVENT_DISCONNECT);
+				} else {
+					if (ap.state != FAKEAP_SENT3)
+						hslen = fakeap_msg1(&ap, mac,
+						    hsframe);
+					inject(hsframe, hslen);
 				}
 			}
 		}
