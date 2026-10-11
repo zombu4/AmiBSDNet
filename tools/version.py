@@ -10,7 +10,7 @@ AMIBSDNET_VERSTAG(name), the "$VER:" string of a program called name.
 import os
 import sys
 
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 DATE = "10.10.2026"        # AmigaOS version string date: day.month.year
 
 TOP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
