@@ -59,17 +59,12 @@ wm_starter(void *arg)
 	struct wmstart *w = arg;
 
 	/*
-	 * A fixed wait, not a condition: WirelessManager may also be
-	 * started from S:User-Startup (its own installer offers to add it
-	 * there: downloads/sources/prism2v2/extracted/prism2v2/Install,
-	 * #ask-userstartup-help), on a line before or after AmiBSDNet's,
-	 * and nothing tells whether such a line is still to come.
+	 * At once: the installer puts this package's WirelessManager in C:
+	 * (dist/Install), and AmiBSDNet is what starts it.  One started
+	 * before (a line in S:User-Startup ahead of AmiBSDNet's) is kept:
 	 * wm_start() never starts a second one while one runs (wm.c
-	 * wm_start(), "never two"), so the wait only gives a
-	 * WirelessManager started a few seconds after the stack the chance
-	 * to be the one that runs.
+	 * wm_start(), "never two").
 	 */
-	amiga_host_sleep_ms(5000);
 	if (w->generation != config_generation)
 		;
 	else if (!wm_running()) {

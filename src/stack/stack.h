@@ -106,6 +106,7 @@ int	rump_amibsdnet_ifcreate(const char *, const char *);
 int	rump_amibsdnet_ifdestroy(const char *);
 int	rump_amibsdnet_ifaddr4(const char *, ULONG, ULONG);
 int	rump_amibsdnet_ifflags(const char *, int, int);
+int	rump_amibsdnet_sockbuf_auto(void);	/* src/kern/netcfg.c */
 int	rump_amibsdnet_ifdeladdr4(const char *, ULONG);
 int	rump_amibsdnet_route4(int, ULONG, ULONG, ULONG, ULONG);
 #define	NB_RTM_ADD	1

@@ -265,8 +265,8 @@ wm_stop(void)
 
 /*
  * WirelessManager's messages go to AMIBSDNET_WMLOG, on disk (T: if that
- * cannot be written; amibsdnet/logs.h), VERBOSE; the file stays readable
- * while it runs.
+ * cannot be written; amibsdnet/logs.h), VERBOSE if the variable
+ * AmiBSDNet/Debug is set; the file stays readable while it runs.
  */
 int
 wm_start(const char *device, unsigned long unit)
@@ -275,7 +275,7 @@ wm_start(const char *device, unsigned long unit)
 	   NP_Arguments "The arguments are copied before they are passed
 	   in") */
 	static char cmd[200];
-	char devarg[96], *p = cmd;
+	char devarg[96], dbg[4], *p = cmd;
 	const char *s;
 	BPTR in, out, seg;
 	struct MsgPort *console;
@@ -291,10 +291,12 @@ wm_start(const char *device, unsigned long unit)
 	for (s = devarg; *s && p < cmd + 140; )
 		*p++ = *s++;
 	*p++ = '"';
-	/* (always VERBOSE: its log, on disk, then says what it does; the
-	   Wi-Fi connection on the PiStorm is not understood yet) */
-	for (s = " VERBOSE"; *s; )
-		*p++ = *s++;
+	/* VERBOSE only when asked for (the variable AmiBSDNet/Debug): it
+	   writes every step to its log on disk */
+	if (GetVar((CONST_STRPTR)"AmiBSDNet/Debug", (STRPTR)dbg, sizeof(dbg),
+	    0) >= 0)
+		for (s = " VERBOSE"; *s; )
+			*p++ = *s++;
 	if (unit) {
 		char tmp[12];
 		int i = 0;

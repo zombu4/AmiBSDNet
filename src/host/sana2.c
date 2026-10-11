@@ -47,8 +47,11 @@ extern struct ExecBase *SysBase;
 #define	ETHER_HDR_LEN	14
 #define	FRAME_MAX	1536		/* Ethernet MTU 1500 + header, rounded */
 
-#define	NRX_PER_TYPE	6
-#define	NTX		24
+/* read and write requests queued at the driver: Roadshow's defaults,
+   32 IP reads, 32 writes, 4 ARP reads (downloads/sources/Roadshow-full/
+   full/Roadshow-1.15/Documentation/Reference/AddNetInterface.doc:
+   115-129, IPREQUESTS, WRITEREQUESTS, ARPREQUESTS); IPv6 as ARP */
+#define	NTX		32
 #define	MAXVIU		16		/* interfaces (driver + unit) */
 #define	EV_RETRIES	5		/* S2_ONEVENT failures in a row */
 
@@ -59,7 +62,9 @@ extern struct ExecBase *SysBase;
 #define	S_ENOSPC	28
 
 static const UWORD rxtypes[] = { 0x0800, 0x0806, 0x86dd };
+static const UBYTE rxcounts[] = { 32, 4, 4 };	/* reads of each type */
 #define	NRXTYPES	(sizeof(rxtypes) / sizeof(rxtypes[0]))
+#define	NRX		(32 + 4 + 4)	/* the sum of rxcounts[] */
 
 /* must match struct iovec in the kernel (and struct rumpuser_iovec) */
 struct hiovec {
@@ -108,7 +113,7 @@ struct virtif_user {
 	UBYTE	mac[ETHER_ADDR_LEN];
 
 	struct s2req *txfree;		/* Forbid() protects */
-	struct s2req *rxreqs[NRXTYPES * NRX_PER_TYPE];
+	struct s2req *rxreqs[NRX];
 	struct s2req *txreqs[NTX];
 	struct s2req *rxparked;		/* failed reads waiting to go again */
 
@@ -153,8 +158,10 @@ s2_copytobuff(UBYTE *to, const UBYTE *from, ULONG n)
 
 	if (n > FRAME_MAX)
 		return FALSE;
-	while (n--)
-		*to++ = *from++;
+	/* "a general purpose, fast memory copy function" that "attempts
+	   to optimize larger copies" (downloads/sources/NDK3.2/Autodocs/
+	   exec.doc:1763-1782); the two buffers never overlap */
+	CopyMem((APTR)from, to, n);
 	return TRUE;
 }
 
@@ -164,8 +171,7 @@ s2_copyfrombuff(UBYTE *to, const UBYTE *from, ULONG n)
 
 	if (n > FRAME_MAX)
 		return FALSE;
-	while (n--)
-		*to++ = *from++;
+	CopyMem((APTR)from, to, n);
 	return TRUE;
 }
 
@@ -566,7 +572,8 @@ rebuild_header(struct s2req *r)
 /*
  * Deliver as ONE contiguous frame: if_virt.c's VIF_DELIVERPKT miscounts
  * when given more than one iovec ("m_copyback failed").  The length was
- * checked against the buffer by the caller.
+ * checked against the buffer by the caller.  Called with the rump CPU
+ * held (deliver_batch()).
  */
 static void
 deliver(struct virtif_user *viu, struct s2req *r)
@@ -577,10 +584,27 @@ deliver(struct virtif_user *viu, struct s2req *r)
 	iov.iov_base = r->buf;
 	iov.iov_len = ETHER_HDR_LEN + r->ios2.ios2_DataLength;
 
-	rumpuser_component_schedule(NULL);
 	rump_virtif_sana_deliverpkt(viu->sc, &iov, 1);
-	rumpuser_component_unschedule();
 	viu->rx_packets++;
+}
+
+/* the frames that came in this round, into the kernel with one
+   rumpuser_component_schedule() for all of them, then read again */
+static void
+deliver_batch(struct virtif_user *viu, struct s2req **batch, int n,
+    struct MsgPort *ioport)
+{
+	int i;
+
+	if (n == 0)
+		return;
+	rumpuser_component_schedule(NULL);
+	for (i = 0; i < n; i++)
+		deliver(viu, batch[i]);
+	rumpuser_component_unschedule();
+	for (i = 0; i < n; i++)
+		if (!viu->stopping)
+			queue_read(batch[i], ioport);
 }
 
 /* ------------------------------------------------------------------------
@@ -599,6 +623,8 @@ sana_iothread(void *arg)
 	ULONG iomask, txmask, tmask = 0, rmask, sigs;
 	int opened = 0, nrx = 0, ntx = 0, stuck = 0, treqpending = 0;
 	int rpending = 0, txlogged = 0;
+	struct s2req *batch[NRX];	/* frames of a round (deliver_batch()) */
+	int nbatch = 0;
 	int budget;
 	unsigned i, t;
 
@@ -751,7 +777,7 @@ sana_iothread(void *arg)
 	rmask = 1UL << rport->mp_SigBit;
 
 	for (t = 0; t < NRXTYPES; t++) {
-		for (i = 0; i < NRX_PER_TYPE; i++) {
+		for (i = 0; i < rxcounts[t]; i++) {
 			if ((r = req_alloc(base, REQ_RX)) == NULL)
 				goto fail;
 			viu->rxreqs[nrx++] = r;
@@ -871,6 +897,7 @@ sana_iothread(void *arg)
 			SendIO((struct IORequest *)&r->ios2);
 		}
 		/* completed requests */
+		nbatch = 0;
 		while ((r = (struct s2req *)GetMsg(ioport)) != NULL) {
 			r->busy = 0;
 			if (r->kind == REQ_EV) {
@@ -910,16 +937,19 @@ sana_iothread(void *arg)
 						set_link(viu, 1);
 					}
 					/* (stopping: the kernel's interface
-					   may be gone) */
-					if (!viu->stopping && !tapped(viu, r))
-						deliver(viu, r);
+					   may be gone); delivered and read
+					   again after this loop */
+					if (!viu->stopping && !tapped(viu, r)) {
+						batch[nbatch++] = r;
+						continue;
+					}
 				} else {
 					viu->rx_dropped++;
 					/* every read failing, again and again
 					   (twice round): the link is down, said
 					   once */
-					if (++viu->rxerrs == 2 * NRXTYPES *
-					    NRX_PER_TYPE && viu->link) {
+					if (++viu->rxerrs == 2 * NRX &&
+					    viu->link) {
 						amiga_rump_printf("sana: %s: reads "
 						    "fail (error %d, %ld): no "
 						    "link\n", viu->devname,
@@ -978,6 +1008,7 @@ sana_iothread(void *arg)
 				Permit();
 			}
 		}
+		deliver_batch(viu, batch, nbatch, ioport);
 		if (sigs & SIGBREAKF_CTRL_C)
 			viu->stopping = 1;
 		/* failed requests: go again after a pause (longer once every
@@ -988,7 +1019,7 @@ sana_iothread(void *arg)
 			if (viu->rxparked) {
 				rtreq->tr_time.tv_secs = 0;
 				rtreq->tr_time.tv_micro = viu->rxerrs >
-				    2 * NRXTYPES * NRX_PER_TYPE ?
+				    2 * NRX ?
 				    250000 : 40000;
 			} else {
 				rtreq->tr_time.tv_secs = 1;

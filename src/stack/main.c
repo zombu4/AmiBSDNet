@@ -298,6 +298,10 @@ stack_main(void)
 		P("AmiBSDNet: kernel failed to start (%d)\n", rv);
 		goto fail;
 	}
+	/* (TCP buffers grow also for programs that set their size) */
+	if (rump_amibsdnet_sockbuf_auto() != 0)
+		P("AmiBSDNet: kern.sofixedbuf could not be set (errno %d)\n",
+		    amiga_rump_errno());
 	if (bsdsocket_create() == NULL) {
 		P("AmiBSDNet: cannot create bsdsocket.library\n");
 		goto fail;

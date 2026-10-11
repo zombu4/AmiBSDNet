@@ -260,6 +260,17 @@ static size_t loglen;
 static void (*logtee)(const char *, long);	/* also shown here */
 
 /*
+ * What goes to the log file is collected here and written at most once
+ * a second (log_flusher()), when the buffer is full, at once with DEBUG,
+ * and when the kernel stops (rumpuser_exit()): a Write() for every line
+ * made the start slow on the boot volume.  The tee (the start notice on
+ * the screen) still gets every line as it comes.
+ */
+static char filebuf[4096];
+static size_t filelen;
+static struct Process *flusher;
+
+/*
  * The semaphore is set up on first use, whoever logs first (also before
  * amiga_rump_loginit()); Forbid() makes that one-time set-up atomic.
  */
@@ -285,15 +296,44 @@ log_unlock(void)
 	ReleaseSemaphore(&logsem);
 }
 
+/* the collected file text to the log file */
+static void
+file_write_locked(void)
+{
+
+	if (filelen && logfh)
+		Write(logfh, filebuf, filelen);
+	filelen = 0;
+}
+
 static void
 log_flush_locked(void)
 {
 
-	if (loglen && logfh)
-		Write(logfh, logbuf, loglen);
+	if (loglen && logfh) {
+		if (filelen + loglen > sizeof(filebuf))
+			file_write_locked();
+		CopyMem(logbuf, filebuf + filelen, loglen);
+		filelen += loglen;
+		if (amiga_rump_debug || filelen == sizeof(filebuf))
+			file_write_locked();
+	}
 	if (loglen && logtee)
 		logtee(logbuf, (long)loglen);
 	loglen = 0;
+}
+
+/* the log process: the collected text to the file once a second */
+static void
+log_flusher(void)
+{
+
+	for (;;) {
+		Delay(50);	/* 1 s: dos.doc Delay, "ticks (50 per second)" */
+		log_lock();
+		file_write_locked();
+		log_unlock();
+	}
 }
 
 /* everything logged from now on is also given to fn (NULL: no more);
@@ -672,8 +712,15 @@ amiga_rump_logswitch(long log)
 
 	log_lock();
 	log_flush_locked();
+	file_write_locked();
 	old = logfh;
 	logfh = (BPTR)log;
+	/* (one log process for the life of the stack, which is never
+	   unloaded: src/stack/main.c) */
+	if (log && flusher == NULL)
+		flusher = CreateNewProcTags(NP_Entry, (ULONG)log_flusher,
+		    NP_Name, (ULONG)"AmiBSDNet log", NP_StackSize, 4096,
+		    TAG_DONE);
 	log_unlock();
 	return (long)old;
 }
@@ -1156,6 +1203,7 @@ rumpuser_exit(int rv)
 		amiga_rump_printf("rumpuser: exit %d\n", rv);
 	log_lock();
 	log_flush_locked();
+	file_write_locked();
 	log_unlock();
 	amiga_rump_exitcode = rv;
 	amiga_rump_exited = 1;

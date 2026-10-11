@@ -252,9 +252,16 @@ wpa_passphrase command from that archive, avoids it (it has to be
 computed again if the network name changes).
 
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
-the network; DHCP starts as soon as it has. In this version
-WirelessManager runs with VERBOSE; its messages are in
-SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. If the status
+the network; DHCP starts as soon as it has. WirelessManager's messages
+are in SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. For more of them
+(VERBOSE), set the variable AmiBSDNet/Debug and keep it across reboots
+in ENVARC:, then reboot:
+
+    SetEnv AmiBSDNet/Debug 1
+    Copy ENV:AmiBSDNet/Debug ENVARC:AmiBSDNet/
+
+To switch it off again: UnSetEnv AmiBSDNet/Debug and Delete
+ENVARC:AmiBSDNet/Debug. If the status
 window says "DRIVER NOT USED", the driver named in the settings is not
 in DEVS:Networks, or it could not set up its hardware (the log says
 which; see Logs). A driver that cannot set up its hardware - genet.device on
@@ -317,7 +324,8 @@ Logs
 ----
 AmiBSDNet writes its log to SYS:Storage/AmiBSDNet-Logs/AmiBSDNet.log,
 on the disk, so it is still there after a reboot or a power-off; each
-start begins it anew; WirelessManager's messages are in
+start begins it anew; the stack writes its log to the disk once a
+second (with DEBUG at once, line by line). WirelessManager's messages are in
 SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. Both can be read while
 the stack runs:
 

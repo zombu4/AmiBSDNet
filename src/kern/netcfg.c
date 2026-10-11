@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/ioctl.h>
+#include <sys/sysctl.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -38,6 +39,9 @@ int	rump_amibsdnet_ifaddr4(const char *, uint32_t, uint32_t);
 int	rump_amibsdnet_ifflags(const char *, int, int);
 int	rump_amibsdnet_ifdeladdr4(const char *, uint32_t);
 int	rump_amibsdnet_route4(int, uint32_t, uint32_t, uint32_t, uint32_t);
+int	rump_amibsdnet_sockbuf_auto(void);
+int	rump___sysimpl___sysctl(const int *, u_int, void *, size_t *,
+	    const void *, size_t);
 
 /* close the helper socket without losing the error of a failed call
    (every system call stub sets errno, also on success) */
@@ -218,4 +222,24 @@ rump_amibsdnet_route4(int cmd, uint32_t dst, uint32_t mask, uint32_t gw,
 		return -1;
 	n = rump___sysimpl_write(s, &m, len);
 	return done(s, n == (ssize_t)len ? 0 : -1);
+}
+
+/*
+ * kern.sofixedbuf to false: a program that sets SO_SNDBUF or SO_RCVBUF
+ * keeps TCP's automatic buffer sizing.  With it true (the default,
+ * netbsd-src/sys/kern/uipc_socket.c:174-176) setsockopt() clears
+ * SB_AUTOSIZE (uipc_socket.c:1816-1831; "Prevent scaling of fixed socket
+ * buffers", uipc_socket.c:2602-2603), and the buffer stays at what the
+ * program asked for; TCP grows an SB_AUTOSIZE buffer up to 256 KB
+ * (netbsd-src/sys/netinet/tcp_input.c:229-231, tcp_output.c:204-206).
+ * 0, or -1 with errno.
+ */
+int
+rump_amibsdnet_sockbuf_auto(void)
+{
+	static const int mib[2] = { CTL_KERN, KERN_SOFIXEDBUF };
+	bool off = false;
+
+	return rump___sysimpl___sysctl(mib, 2, NULL, NULL, &off,
+	    sizeof(off)) < 0 ? -1 : 0;
 }
