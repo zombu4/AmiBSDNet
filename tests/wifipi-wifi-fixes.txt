@@ -1,0 +1,131 @@
+Wi-Fi with wifipi.device: what failed and how it was fixed
+==========================================================
+
+Setup where it failed: PiStorm on an Amiga 2000, Emu68, wifipi.device 0.4
+(git:1752e4f), WirelessManager 1.5 (24.2.2025, from Aminet's prism2v2 2.9),
+WPA2-PSK network. AmiBSDNet 0.8.4 to 0.8.8 never connected. Since 0.8.9 it
+does: confirmed by the user on that PiStorm (Wi-Fi connects, a speed test
+runs).
+
+Source paths below are those of the AmiBSDNet working tree; downloads/ is
+not in the repository (tools/bootstrap.py and the release notes name
+where each came from).
+
+Two faults, one behind the other.
+
+
+1. WirelessManager hung at boot (fixed in 0.8.7)
+------------------------------------------------
+
+Seen on the PiStorm: the WirelessManager window or log stayed empty, and
+the Wi-Fi window said "WirelessManager does not stop".
+SYS:Storage/AmiBSDNet-Logs/WiFi.log showed the WirelessManager task
+waiting with sigwait 00000100, that is SIGF_DOS
+(downloads/sources/NDK3.2/Include_H/exec/tasks.h:88,96), and sigalloc
+0000ffff.
+
+Cause: the stack starts WirelessManager with CreateNewProc() from one of
+its own threads, and a new process gets the caller's console:
+downloads/sources/NDK3.2/Autodocs/dos.doc:914-916, NP_ConsoleTask, "Default
+is the same as the caller". For the stack that is the Shell that ran
+S:User-Startup at boot.
+
+Fix: src/common/wm.c, wm_start(): NP_ConsoleTask is the output's own
+handler when the output is interactive, else NULL.
+
+Checked in WinUAE with src/test/fakewifi.device (below): before the fix the
+same empty window at boot; after it WirelessManager printed, joined, and
+the stack got its DHCP address.
+
+
+2. The WPA join was torn down right after associating (fixed in 0.8.9)
+----------------------------------------------------------------------
+
+Seen in WirelessManager.log on the PiStorm: "Trying to associate with
+a2:53:22:c6:e8:a8", then "Associated with ff:ff:ff:ff:ff:ff", "PTK
+derivation - A1=e4:5f:01:3f:eb:13 A2=ff:ff:ff:ff:ff:ff", "TX EAPOL:
+dst=ff:ff:ff:ff:ff:ff", "Authentication with ff:ff:ff:ff:ff:ff timed
+out", and over again.
+
+Cause:
+- WirelessManager 1.5 sends an S2_SETOPTIONS whose only tag is
+  S2INFO_OperState (TAG_USER + 20,
+  downloads/sources/wifipi/include/devices/sana2wireless.h:38). In WinUAE
+  it sent it before and after the real join (SYS:fakewifi.log, below).
+- prism2.device, the driver WirelessManager 1.5 was released with, takes
+  that tag as a link up/down report and changes nothing else
+  (downloads/sources/prism2v2/extracted/prism2v2/Source/unit.c:958-970);
+  it reconfigures only after SSID, BSSID, channel and similar tags
+  (Source/request.c:1700-1705 there).
+- wifipi.device 0.4 takes every S2_SETOPTIONS as a new join: it clears its
+  join parameters and takes SSID and BSSID from the tags, BSSID
+  ff:ff:ff:ff:ff:ff when there is none
+  (downloads/sources/wifipi/src/unit.c:637-661); without a WPA element it
+  sets "wsec" 0 and "wpa_auth" WPA_AUTH_DISABLED, then joins (unit.c:
+  900-911). S2_GETNETWORKINFO returns the stored BSSID (unit.c:966).
+  WirelessManager takes the access point's address from S2_GETNETWORKINFO
+  (downloads/sources/AROS/WirelessManager/src/drivers/driver_sana2.c:
+  133-156).
+- The AmiNetXDuo project describes the same bug in its fork of
+  wifipi.device (AmiNetXDuo 1.0.0-beta3 release notes,
+  https://github.com/tinic/AmiNetXDuo/releases/tag/v1.0.0-beta3; copy in
+  downloads/sources/wm-version-notes/AmiNetXDuo-v1.0.0-beta3-release.md,
+  lines 4-7 and 34-41): "1.5 makes a second call after associating that
+  names no network: the firmware was sent to an empty SSID, the driver
+  reported ff:ff:ff:ff:ff:ff as the access point, and the handshake timed
+  out", and "1.3 never made that call".
+- Roadshow does not ship or start WirelessManager: Roadshow 1.15's
+  Workbench/Storage/NetInterfaces/Prism2, lines 3-10
+  (downloads/sources/Roadshow-full/full/Roadshow-1.15/...), sends the user
+  to the prism2.device manual.
+
+Fix: WirelessManager 1.5 is patched when the package is built,
+tools/package.py patch_wm(). In downloads/WirelessManager (196780 bytes)
+the function at code offset 0x2916a of the first hunk (file offset 0x28 +
+0x2916a) builds {S2INFO_OperState (0x80000014), state} and DoIO()s
+S2_SETOPTIONS (0xc012). Its first instruction, link.w a5,#-16 (4e55 fff0),
+becomes moveq #0,d0; rts (7000 4e75), so it returns 0 and sends nothing;
+its callers pop their own arguments. No relocation falls on those 4
+bytes. patch_wm() checks size and original bytes and stops the build if
+they differ. The installer always copies this WirelessManager (copyfiles):
+copylib "only overwrites an existing file if the new file has a higher
+version/revision number"
+(downloads/sources/Installer-43_3/extracted/Installer43_3/Installer.guide:
+1098-1099), so it would keep an unpatched 1.5. It is listed in the install
+log. Docs/ThirdParty.txt says what was changed.
+
+
+How it was found: src/test/fakewifi.device
+------------------------------------------
+
+A SANA-II stand-in for wifipi.device in WinUAE (test only, not in the
+package). It answers the commands as wifipi's source does, passes frames
+to uaenet.device (SLIRP), offers one network "FakeNet" with WPA2-PSK
+(passphrase "fakepassword") and runs the access point's side of the 4-way
+handshake (src/test/fakeap.c: SHA-1, HMAC, PBKDF2, PRF, AES key wrap,
+checked against published test vectors by src/test/fakeaptest.c). It logs
+every S2_SETOPTIONS (tags, SSID, BSSID) to SYS:fakewifi.log.
+
+The stand-in showed the fault only once its S2_SETOPTIONS did what
+wifipi's does (every call a new join). Before, it acted only on calls with
+an SSID, and WirelessManager 1.5 connected in WinUAE while it failed on
+the PiStorm: a stand-in has to follow the real driver's source command for
+command.
+
+Results in WinUAE (fresh install with the real Installer, then boot):
+- before the patch: three S2_SETOPTIONS (OperState, the join, OperState),
+  a wrong BSSID, no DHCP;
+- after it: one S2_SETOPTIONS ("SSID 'FakeNet' BSSID 02:00:00:00:00:01"),
+  "WPA: Key negotiation completed with 02:00:00:00:00:01 [PTK=CCMP
+  GTK=CCMP]", "CTRL-EVENT-CONNECTED", "sana0: DHCP lease 10.0.2.15".
+
+Build:
+  tools/build_amiga.sh src/test/fakewifi.c build/fakewifi.device \
+      src/test/fakeap.c \
+      -Idownloads/sources/NDK3.2/SANA+RoadshowTCP-IP/include \
+      -Idownloads/sources/wifipi/include \
+      -idirafter downloads/sources/NDK3.2/Include_H -Wl,-u,romtag
+Use: copy it to DEVS:Networks of the WinUAE system (emu/wb32sys);
+AmiBSDNet.conf "interface sana0 fakewifi.device 0 dhcp wifi"; a
+Wireless.prefs block with ssid "FakeNet", psk "fakepassword", key_mgmt
+WPA-PSK.

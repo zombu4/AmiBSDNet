@@ -150,7 +150,7 @@ programs.
 | `src/include/` | headers for AmiBSDNet's own client programs |
 | `src/tools/` | NetCtrl, Ping, SerialShell, AmiBSDNetStatus |
 | `src/test/` | test programs run in the emulator (`hangport.c`: a stack that never answers, for the client timeouts) |
-| `tests/` | stack configurations for the emulator tests |
+| `tests/` | stack configurations for the emulator tests, and records of findings: `wifipi-wifi-fixes.txt` (why Wi-Fi with wifipi.device failed and how 0.8.7 and 0.8.9 fixed it, with `src/test/fakewifi.c`, the stand-in for wifipi.device used to find it) |
 | `dist/` | Installer script, user documentation (`Docs/`, with the NetBSD licence notices in `Docs/NetBSD.txt`), readme |
 | `tools/` | build driver, ELF-to-hunk converter, emulator runner, packaging, licence notice collector, `uaeinput.ps1` (clicks and screenshots in WinUAE) |
 | `tools/gen/` | generators for the bsdsocket.library vectors and inline calls |
