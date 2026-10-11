@@ -153,7 +153,8 @@ CRC32 as the installer left it ("FILE <path> <size> <crc32>"), and the
 uninstaller deletes such a file only if it is still unchanged. Files
 that were there before (your own) are not listed. Listed are: the
 programs in C: (C:Ping only if it was not there or you chose to replace
-it), C:WirelessManager if it was not there, the AmiBSDNet drawer (no
+it), C:WirelessManager (always replaced by this package's copy), the
+AmiBSDNet drawer (no
 size and CRC32 for a drawer and the drawer's icon) and its files, the
 status icon copied to SYS:WBStartup, DEVS:Internet/hosts (and
 DEVS:Internet) if there was none, and ENVARC:Sys/Wireless.prefs and
@@ -220,8 +221,9 @@ Wi-Fi
 Wireless drivers such as Emu68's wifipi.device associate with the
 network; the WPA handshake is done by WirelessManager (Neil Cafferkey's
 wpa_supplicant port, installed to C:WirelessManager), which reads
-ENV:Sys/Wireless.prefs. WirelessManager is included in this package
-(see ThirdParty.txt for its authors and licence); the Wi-Fi driver is
+ENV:Sys/Wireless.prefs. WirelessManager is included in this package,
+changed for wifipi.device (see ThirdParty.txt for its authors, its
+licence and the change); the Wi-Fi driver is
 the one installed with Emu68. AmiBSDNet starts WirelessManager itself
 for a Wi-Fi interface if it is not already running. The installer asks
 for the network name and passphrase; to change networks later,

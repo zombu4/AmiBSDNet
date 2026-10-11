@@ -17,6 +17,12 @@ Aminet (driver/net/prism2v2.lha). Its source is in the AROS repository,
 workbench/network/WirelessManager
 (https://github.com/aros-development-team/AROS).
 
+Changed here: WirelessManager 1.5 no longer sends its operational-state
+report (an S2_SETOPTIONS with only S2INFO_OperState). wifipi.device
+takes every S2_SETOPTIONS as a new join, so that report ended the Wi-Fi
+connection. The 4 bytes changed are listed in tools/package.py
+(patch_wm), in the AmiBSDNet source.
+
 WirelessManager is based on wpa_supplicant. It is dual-licensed under the
 GNU General Public License version 2 and the BSD license; it is
 distributed here under the BSD license:

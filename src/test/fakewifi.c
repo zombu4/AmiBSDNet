@@ -87,6 +87,22 @@ static volatile ULONG flags;
 #define	FL_CONNECTED	4
 static UBYTE mac[6];
 static char joined[33];
+/* the BSSID of the last S2_SETOPTIONS, or ff:ff:ff:ff:ff:ff without one,
+   as wifipi keeps it (unit.c:648-661) and gives it back in
+   S2_GETNETWORKINFO (unit.c:946-956) */
+static UBYTE joinbssid[6];
+
+/* the S2_SETOPTIONS seen, for SYS:fakewifi.log (worker_main()) */
+#define	NSETOPT	16
+struct setopt {
+	ULONG tags[8];
+	int ntags;
+	char ssid[33];
+	UBYTE bssid[6];
+};
+static struct setopt setopts[NSETOPT];
+static volatile int nsetopts;
+static int nlogged;
 static volatile int joinreq;
 static struct Sana2DeviceStats stats;
 static struct Task *volatile worker;
@@ -512,6 +528,31 @@ worker_main(void)
 			joinreq = 0;
 			joining = 1;
 		}
+		/* the S2_SETOPTIONS seen so far, to SYS:fakewifi.log */
+		while (nlogged < nsetopts) {
+			struct setopt *so = &setopts[nlogged % NSETOPT];
+			BPTR lf = Open((CONST_STRPTR)"SYS:fakewifi.log",
+			    MODE_READWRITE);
+			LONG arg[10];
+			int k;
+
+			nlogged++;
+			if (lf == 0)
+				continue;
+			Seek(lf, 0, OFFSET_END);
+			arg[0] = nlogged;
+			arg[1] = (LONG)so->ssid;
+			for (k = 0; k < 6; k++)
+				arg[2 + k] = so->bssid[k];
+			VFPrintf(lf, (CONST_STRPTR)"S2_SETOPTIONS %ld: SSID '%s' "
+			    "BSSID %02lx:%02lx:%02lx:%02lx:%02lx:%02lx tags", arg);
+			for (k = 0; k < so->ntags; k++) {
+				arg[0] = so->tags[k] - TAG_USER;
+				VFPrintf(lf, (CONST_STRPTR)" U+%ld", arg);
+			}
+			FPuts(lf, (CONST_STRPTR)"\n");
+			Close(lf);
+		}
 		/* scan two seconds, connect one second later; then the
 		   handshake, message 1 or 3 again every second, five times
 		   at most (then it disconnects) */
@@ -724,21 +765,52 @@ fw_beginio(struct IOSana2Req *io)
 		to_worker(io, MSG_SCAN);
 		return;
 	case S2_SETOPTIONS: {
-		const char *s = (const char *)GetTagData(S2INFO_SSID, 0,
-		    (struct TagItem *)io->ios2_Data);
+		/* (wifipi unit.c:613-914: every S2_SETOPTIONS clears the join
+		   parameters, takes SSID and BSSID from the tags - BSSID
+		   ff:ff:ff:ff:ff:ff without one - and joins with them) */
+		struct TagItem *tl = (struct TagItem *)io->ios2_Data;
+		const char *s = (const char *)GetTagData(S2INFO_SSID, 0, tl);
+		const UBYTE *b = (const UBYTE *)GetTagData(S2INFO_BSSID, 0, tl);
+		struct TagItem *ti, *tstate = tl;
+		struct setopt *so;
 		int i;
 
-		if (s != NULL) {
-			for (i = 0; s[i] && i < 32; i++)
-				joined[i] = s[i];
-			joined[i] = '\0';
-			if (flags & FL_CONNECTED) {
-				flags &= ~FL_CONNECTED;
-				report_events(S2EVENT_DISCONNECT);
+		for (i = 0; s && s[i] && i < 32; i++)
+			joined[i] = s[i];
+		joined[i] = '\0';
+		for (i = 0; i < 6; i++)
+			joinbssid[i] = b ? b[i] : 0xff;
+		/* (recorded for the log, written by the worker) */
+		so = &setopts[nsetopts % NSETOPT];
+		so->ntags = 0;
+		/* (utility/tagitem.h: TAG_DONE ends, TAG_IGNORE is passed
+		   over, TAG_MORE goes on at ti_Data, TAG_SKIP skips ti_Data
+		   more) */
+		for (ti = tstate; ti && ti->ti_Tag != TAG_DONE &&
+		    so->ntags < 8; ti++) {
+			if (ti->ti_Tag == TAG_IGNORE)
+				continue;
+			if (ti->ti_Tag == TAG_MORE) {
+				ti = (struct TagItem *)ti->ti_Data - 1;
+				continue;
 			}
-			joinreq = 1;
-			Signal(worker, SIGBREAKF_CTRL_F);
+			if (ti->ti_Tag == TAG_SKIP) {
+				ti += ti->ti_Data;
+				continue;
+			}
+			so->tags[so->ntags++] = ti->ti_Tag;
 		}
+		for (i = 0; i < 33; i++)
+			so->ssid[i] = joined[i];
+		for (i = 0; i < 6; i++)
+			so->bssid[i] = joinbssid[i];
+		nsetopts++;
+		if (flags & FL_CONNECTED) {
+			flags &= ~FL_CONNECTED;
+			report_events(S2EVENT_DISCONNECT);
+		}
+		joinreq = 1;
+		Signal(worker, SIGBREAKF_CTRL_F);
 		break;
 	}
 	case S2_GETNETWORKINFO: {
@@ -770,9 +842,8 @@ fw_beginio(struct IOSana2Req *io)
 		for (i = 0; joined[i]; i++)
 			s[i] = joined[i];
 		s[i] = '\0';
-		b[0] = 0x02;
-		b[1] = b[2] = b[3] = b[4] = 0;
-		b[5] = 0x01;
+		for (i = 0; i < 6; i++)
+			b[i] = joinbssid[i];
 		t[0].ti_Tag = S2INFO_SSID;
 		t[0].ti_Data = (ULONG)s;
 		t[1].ti_Tag = S2INFO_BSSID;

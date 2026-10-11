@@ -47,6 +47,39 @@ HOSTS = ("# host name table: address  name  [aliases]\n"
          "127.0.0.1  localhost\n")
 
 
+
+# WirelessManager 1.5 (downloads/WirelessManager, 196780 bytes) sends
+# S2_SETOPTIONS with nothing but S2INFO_OperState from one function: at
+# code offset 0x2916a (file offset 0x28 + 0x2916a, first hunk) it builds
+# {S2INFO_OperState (0x80000014), state} and DoIO()s S2_SETOPTIONS
+# (0xc012).  prism2.device takes that as a link up/down report only
+# (downloads/sources/prism2v2/extracted/prism2v2/Source/unit.c:958-970);
+# wifipi.device starts a new join with every S2_SETOPTIONS and so joins
+# an empty SSID with BSSID ff:ff:ff:ff:ff:ff (downloads/sources/wifipi/
+# src/unit.c:637-661, 886-911), which ends the association
+# (downloads/sources/wm-version-notes/AmiNetXDuo-v1.0.0-beta3-release.md,
+# lines 34-41).  The function's first instruction, link.w a5,#-16
+# (4e55 fff0), becomes moveq #0,d0; rts (7000 4e75): it returns 0 without
+# sending anything; its callers pop their own arguments.  No relocation
+# falls on those 4 bytes.
+WM_SIZE = 196780
+WM_PATCH_AT = 0x28 + 0x2916a
+WM_ORIG = bytes.fromhex("4e55fff0")
+WM_NEW = bytes.fromhex("70004e75")
+
+
+def patch_wm(src, dst):
+    with open(src, "rb") as f:
+        data = bytearray(f.read())
+    if len(data) != WM_SIZE or \
+            bytes(data[WM_PATCH_AT:WM_PATCH_AT + 4]) != WM_ORIG:
+        sys.exit("package: %s is not the WirelessManager 1.5 this build "
+                 "patches (size %d, bytes %s)" % (src, len(data),
+                 bytes(data[WM_PATCH_AT:WM_PATCH_AT + 4]).hex()))
+    data[WM_PATCH_AT:WM_PATCH_AT + 4] = WM_NEW
+    with open(dst, "wb") as f:
+        f.write(data)
+
 def git_bash():
     """Git for Windows' bash.exe: the nearest directory at or above
     "git --exec-path" that has bin/bash.exe and usr/bin/bash.exe, else
@@ -291,7 +324,7 @@ def stage():
     if not os.path.exists(wm):
         sys.exit("package: WirelessManager missing; run "
                  "python -I tools/bootstrap.py")
-    shutil.copy(wm, os.path.join(root, "C", "WirelessManager"))
+    patch_wm(wm, os.path.join(root, "C", "WirelessManager"))
     # (no Wi-Fi driver: wifipi.device and its firmware belong to the
     # Emu68 installation, so the one installed with Emu68 is used)
     shutil.copy(os.path.join(TOP, "dist", "Docs", "ThirdParty.txt"),

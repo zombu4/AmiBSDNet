@@ -281,17 +281,19 @@
 	))
 (P_WRITELOG)
 
-; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt); a newer
-; one already in C: is kept (copylib)
+; WirelessManager (WPA/WPA2 for Wi-Fi, see Docs/ThirdParty.txt): always
+; this package's copy, changed for wifipi.device (Docs/ThirdParty.txt,
+; tools/package.py patch_wm), so it is AmiBSDNet's file from now on
 (set #o-path "C:WirelessManager") (set #o-key "c-wirelessmanager")
 (set #o-sum #sum-c-wirelessmanager)
+(set #o-force 1)
 (P_OWNFILE)
-(copylib
+(copyfiles
 	(prompt "Installing WirelessManager (Wi-Fi encryption) to C:")
-	(help @copylib-help)
+	(help @copyfiles-help)
 	(source "C/WirelessManager")
 	(dest "C:")
-	(confirm "expert"))
+	(nogauge))
 
 ; The Wi-Fi driver of a PiStorm (wifipi.device and DEVS:Firmware) belongs
 ; to its Emu68 installation and is never touched here: AmiBSDNet uses the one
