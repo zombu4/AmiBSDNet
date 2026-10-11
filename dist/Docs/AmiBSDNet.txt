@@ -251,13 +251,8 @@ computed again if the network name changes).
 
 The status icon shows "Net: No Wi-Fi" until WirelessManager has joined
 the network; DHCP starts as soon as it has. WirelessManager's messages
-are in SYS:Storage/AmiBSDNet-Logs/WirelessManager.log. For more of
-them, type
-
-    SetEnv SAVE AmiBSDNet/Debug 1
-
-and reboot (SAVE keeps the variable in ENVARC: across the reboot;
-"UnSetEnv SAVE AmiBSDNet/Debug" switches it off again). If the status
+are in SYS:Storage/AmiBSDNet-Logs/WirelessManager.log; in this version
+it always runs with VERBOSE, so that log is detailed. If the status
 window says "DRIVER NOT USED", the driver named in the settings is not
 in DEVS:Networks, or it could not set up its hardware (the log says
 which; see Logs). A driver that cannot set up its hardware - genet.device on
@@ -328,6 +323,12 @@ begins them anew. They can be read while the stack runs:
 
 If that drawer cannot be written, the logs go to T:AmiBSDNet.log and
 T:WirelessManager.log instead, which are lost at a reboot.
+
+When the Wi-Fi window restarts WirelessManager, or the stack does after
+a reconfiguration, SYS:Storage/AmiBSDNet-Logs/WiFi.log records each
+running WirelessManager task: whether it is ready or waiting, and the
+signals it waits for. If WirelessManager does not stop after its Ctrl-C,
+that file says whether it was waiting for Ctrl-C at all.
 
 Commands
 --------

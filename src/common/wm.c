@@ -121,6 +121,101 @@ find_wm(void)
 	return NULL;
 }
 
+/* (wm_report(): appends s at line[*l], within 159 characters) */
+static void
+rep_add(char *line, int *l, const char *s)
+{
+
+	while (*s && *l < 158)
+		line[(*l)++] = *s++;
+}
+
+static void
+rep_hex(char *line, int *l, ULONG v)
+{
+	static const char hex[] = "0123456789abcdef";
+	int j;
+
+	for (j = 28; j >= 0 && *l < 158; j -= 4)
+		line[(*l)++] = hex[(v >> j) & 15];
+}
+
+/*
+ * What every WirelessManager task is doing, appended to the file path
+ * (a log in AMIBSDNET_LOG_DIR) after the line why: its name, whether it
+ * is ready or waiting, the signals it waits for (tc_SigWait), the ones
+ * it got (tc_SigRecvd) and has (tc_SigAlloc), exec/tasks.h.  A waiting
+ * task returns to the ready state "When one or more of the specified
+ * signals occurs" (exec.doc Wait): one that waits without
+ * SIGBREAKF_CTRL_C in tc_SigWait is not woken by a Ctrl-C.  Returns the
+ * number of such tasks.
+ */
+#define	WM_MAXREPORT	4
+int
+wm_report(const char *path, const char *why)
+{
+	struct {
+		char name[40];
+		int ready;
+		ULONG wait, recvd, alloc;
+	} r[WM_MAXREPORT];
+	struct Node *n;
+	int count = 0, i, k, l;
+	BPTR fh;
+	char line[160];
+
+	Forbid();
+	for (k = 0; k < 2; k++)
+		for (n = (k ? SysBase->TaskWait.lh_Head :
+		    SysBase->TaskReady.lh_Head); n->ln_Succ; n = n->ln_Succ) {
+			struct Task *t = (struct Task *)n;
+			const char *s;
+
+			if (!is_wm(t))
+				continue;
+			if (count < WM_MAXREPORT) {
+				s = t->tc_Node.ln_Name ? t->tc_Node.ln_Name : "";
+				for (i = 0; s[i] && i < 39; i++)
+					r[count].name[i] = s[i];
+				r[count].name[i] = '\0';
+				r[count].ready = !k;
+				r[count].wait = t->tc_SigWait;
+				r[count].recvd = t->tc_SigRecvd;
+				r[count].alloc = t->tc_SigAlloc;
+			}
+			count++;
+		}
+	Permit();
+
+	if ((fh = Open((CONST_STRPTR)path, MODE_READWRITE)) == 0)
+		return count;
+	Seek(fh, 0, OFFSET_END);
+	FPuts(fh, (CONST_STRPTR)why);
+	FPuts(fh, (CONST_STRPTR)"\n");
+	for (i = 0; i < count && i < WM_MAXREPORT; i++) {
+		l = 0;
+		rep_add(line, &l, "  \"");
+		rep_add(line, &l, r[i].name);
+		rep_add(line, &l, r[i].ready ? "\" ready" : "\" waiting");
+		rep_add(line, &l, ", sigwait ");
+		rep_hex(line, &l, r[i].wait);
+		rep_add(line, &l, ", sigrecvd ");
+		rep_hex(line, &l, r[i].recvd);
+		rep_add(line, &l, ", sigalloc ");
+		rep_hex(line, &l, r[i].alloc);
+		rep_add(line, &l, r[i].ready ? "" : (r[i].wait &
+		    SIGBREAKF_CTRL_C) ? " (waits for Ctrl-C)" :
+		    " (does not wait for Ctrl-C)");
+		line[l++] = '\n';
+		line[l] = '\0';
+		FPuts(fh, (CONST_STRPTR)line);
+	}
+	if (count == 0)
+		FPuts(fh, (CONST_STRPTR)"  no WirelessManager task\n");
+	Close(fh);
+	return count;
+}
+
 int
 wm_running(void)
 {
@@ -170,8 +265,8 @@ wm_stop(void)
 
 /*
  * WirelessManager's messages go to AMIBSDNET_WMLOG, on disk (T: if that
- * cannot be written; amibsdnet/logs.h) (VERBOSE if the
- * variable AmiBSDNet/Debug is set); the file stays readable while it runs.
+ * cannot be written; amibsdnet/logs.h), VERBOSE; the file stays readable
+ * while it runs.
  */
 int
 wm_start(const char *device, unsigned long unit)
@@ -180,7 +275,7 @@ wm_start(const char *device, unsigned long unit)
 	   NP_Arguments "The arguments are copied before they are passed
 	   in") */
 	static char cmd[200];
-	char devarg[96], dbg[4], *p = cmd;
+	char devarg[96], *p = cmd;
 	const char *s;
 	BPTR in, out, seg;
 
@@ -195,10 +290,10 @@ wm_start(const char *device, unsigned long unit)
 	for (s = devarg; *s && p < cmd + 140; )
 		*p++ = *s++;
 	*p++ = '"';
-	if (GetVar((CONST_STRPTR)"AmiBSDNet/Debug", (STRPTR)dbg, sizeof(dbg),
-	    0) >= 0)
-		for (s = " VERBOSE"; *s; )
-			*p++ = *s++;
+	/* (always VERBOSE: its log, on disk, then says what it does; the
+	   Wi-Fi connection on the PiStorm is not understood yet) */
+	for (s = " VERBOSE"; *s; )
+		*p++ = *s++;
 	if (unit) {
 		char tmp[12];
 		int i = 0;

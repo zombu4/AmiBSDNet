@@ -15,6 +15,8 @@
 #define	AMIBSDNET_WMLOG		AMIBSDNET_LOG_DIR "/WirelessManager.log"
 #define	AMIBSDNET_LOG_T		"T:AmiBSDNet.log"
 #define	AMIBSDNET_WMLOG_T	"T:WirelessManager.log"
+/* the Wi-Fi window's WirelessManager reports (wm_report()) */
+#define	AMIBSDNET_WIFILOG	AMIBSDNET_LOG_DIR "/WiFi.log"
 
 /*
  * A log, emptied, then open with a shared lock (MODE_READWRITE) so it can

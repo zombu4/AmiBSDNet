@@ -15,6 +15,8 @@
  */
 #include "emuenv.h"
 
+#include <dos/dostags.h>
+
 #include <amibsdnet/wm.h>
 
 #define	ENVF	"ENV:Sys/Wireless.prefs"
@@ -25,6 +27,22 @@
 #define	HOME_OLD "network={\n\tssid=\"Home\"\n\tscan_ssid=1\n\tpriority=5\n" \
 		"\tpsk=\"oldpassphrase\"\n\tkey_mgmt=WPA-PSK\n}\n"
 #define	INPUT	OTHER HOME_OLD
+
+#define	REPORT	"DH0:tw/report.txt"
+
+/* (h): waits for Ctrl-E only (not Ctrl-C), then tells the test it ended */
+static struct Task *dummy_parent;
+static volatile int dummy_go;
+
+static void
+dummy_main(void)
+{
+
+	dummy_go = 1;
+	Wait(SIGBREAKF_CTRL_E);
+	Forbid();
+	Signal(dummy_parent, SIGBREAKF_CTRL_F);
+}
 
 /* the prefs files as a case starts: ENVARC: always, ENV: if env != NULL */
 static void
@@ -141,6 +159,38 @@ _start(void)
 	check("ENVARC: unchanged", file_is(ARCF, INPUT));
 	/* (setup(INPUT, NULL) leaves no ENV: file) */
 	check("ENV: still none", !exists(ENVF));
+
+	say("(h) wm_report(): a process named WirelessManager that waits for "
+	    "its own signal only\n");
+	{
+		struct Task *t;
+		int i, n;
+
+		dummy_parent = SysBase->ThisTask;
+		dummy_go = 0;
+		SetSignal(0, SIGBREAKF_CTRL_F);
+		t = (struct Task *)CreateNewProcTags(NP_Entry, (ULONG)dummy_main,
+		    NP_Name, (ULONG)"WirelessManager (wmtest)", NP_StackSize,
+		    4096, TAG_END);
+		check("process started", t != NULL);
+		for (i = 0; i < 100 && !dummy_go; i++)
+			Delay(1);
+		DeleteFile((CONST_STRPTR)REPORT);
+		n = wm_report(REPORT, "test:");
+		check("one WirelessManager task found", n == 1);
+		check("... reported as waiting",
+		    file_has(REPORT, "\"WirelessManager (wmtest)\" waiting"));
+		check("... not waiting for Ctrl-C",
+		    file_has(REPORT, "(does not wait for Ctrl-C)"));
+		if (t)
+			Signal(t, SIGBREAKF_CTRL_E);
+		for (i = 0; i < 100 && !(SetSignal(0, 0) & SIGBREAKF_CTRL_F); i++)
+			Delay(1);
+		SetSignal(0, SIGBREAKF_CTRL_F);
+		check("no WirelessManager task after it ended",
+		    wm_report(REPORT, "after:") == 0);
+		DeleteFile((CONST_STRPTR)REPORT);
+	}
 
 	unassign_all();
 	return finish("wmtest");

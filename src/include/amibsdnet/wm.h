@@ -22,6 +22,9 @@ int	wm_save_env(void);
 int	wm_passphrase_ok(const char *psk);
 /* asks WirelessManager to end, without waiting (wm_stop() waits) */
 void	wm_signal_stop(void);
+/* appends why and the state of every WirelessManager task to the file
+   path; the number of such tasks */
+int	wm_report(const char *path, const char *why);
 /* the preferred network (ssid, psk; psk empty if open): 0 if any */
 int	wm_get_network(char *ssid, int ssidlen, char *psk, int psklen);
 

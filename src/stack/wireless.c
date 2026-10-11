@@ -85,9 +85,12 @@ wm_starter(void *arg)
 		P("%s: WirelessManager runs for %s unit %lu; restarting it "
 		    "for %s unit %lu\n", w->name, started_dev, started_unit,
 		    w->device, w->unit);
-		if (wm_stop() != 0)
-			P("%s: WirelessManager did not stop\n", w->name);
-		else
+		if (wm_stop() != 0) {
+			P("%s: WirelessManager did not stop (its state: "
+			    AMIBSDNET_WIFILOG ")\n", w->name);
+			wm_report(AMIBSDNET_WIFILOG, "the stack: WirelessManager "
+			    "did not stop after a Ctrl-C:");
+		} else
 			start_wm(w);
 	} else
 		P("%s: WirelessManager is running\n", w->name);

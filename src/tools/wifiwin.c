@@ -24,6 +24,7 @@
 
 #include <amibsdnet/control.h>
 #include <amibsdnet/wm.h>
+#include <amibsdnet/logs.h>
 #include <amibsdnet/devopen.h>
 #include <amibsdnet/hwcheck.h>
 
@@ -833,11 +834,22 @@ do_connect(const struct NetCtrlIface *ifc, int sel)
 	/* (WirelessManager is stopped and started again whatever is
 	   clicked meanwhile: the network must not stay without it) */
 	set_status("Restarting WirelessManager...");
+	/* (what it does before and after the Ctrl-C, in AMIBSDNET_WIFILOG:
+	   amibsdnet/logs.h, wm.c wm_report()) */
+	{
+		BPTR fh = amibsdnet_log_create(AMIBSDNET_WIFILOG, NULL, NULL);
+
+		if (fh)
+			Close(fh);
+	}
+	wm_report(AMIBSDNET_WIFILOG, "before the Ctrl-C:");
 	wm_signal_stop();
 	for (i = 0; i < 75 && wm_running(); i++)
 		wait_serviced(10);
 	if (wm_running()) {
-		set_status("WirelessManager does not stop; try again");
+		wm_report(AMIBSDNET_WIFILOG, "15 seconds after the Ctrl-C:");
+		set_status("WirelessManager does not stop (see "
+		    "AmiBSDNet-Logs/WiFi.log)");
 		return;
 	}
 	if (!wm_installed()) {
