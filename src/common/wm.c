@@ -278,6 +278,7 @@ wm_start(const char *device, unsigned long unit)
 	char devarg[96], *p = cmd;
 	const char *s;
 	BPTR in, out, seg;
+	struct MsgPort *console;
 
 	if (!wm_installed())
 		return -1;
@@ -336,12 +337,22 @@ wm_start(const char *device, unsigned long unit)
 	 * gets that Shell's stack size).  The task name is how wm_running()
 	 * finds it.
 	 */
+	/*
+	 * Its console ("*", CONSOLE:) is its own window's handler, or none;
+	 * not the caller's, the default (dos.doc NP_ConsoleTask: "Default is
+	 * the same as the caller"), which for the stack is the Shell that
+	 * ran S:User-Startup at boot.  fh_Type is the handler's port
+	 * (dos/dosextens.h: "Port to do PutMsg() to").
+	 */
+	console = IsInteractive(out) ?
+	    ((struct FileHandle *)BADDR(out))->fh_Type : NULL;
 	if ((seg = LoadSeg((CONST_STRPTR)WM_COMMAND)) == 0 ||
 	    CreateNewProcTags(NP_Seglist, seg, NP_FreeSeglist, TRUE,
 	    NP_Name, (ULONG)"WirelessManager", NP_StackSize, 65536,
 	    NP_Cli, TRUE, NP_Arguments, (ULONG)cmd,
 	    NP_Input, in, NP_Output, out, NP_CloseInput, TRUE,
-	    NP_CloseOutput, TRUE, TAG_DONE) == NULL) {
+	    NP_CloseOutput, TRUE, NP_ConsoleTask, (ULONG)console,
+	    TAG_DONE) == NULL) {
 		if (seg)
 			UnLoadSeg(seg);
 		Close(in);
